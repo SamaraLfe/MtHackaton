@@ -31,6 +31,18 @@ def test_what_if_reduces_projected_risk():
         assert data['projected'][0]['projected_late_probability']==.68
         backend.vehicles.clear()
 
+def test_map_match_and_admin_role_gate():
+    with TestClient(backend.app) as client:
+        saved=backend.schedule
+        backend.schedule=pd.DataFrame([
+            dict(tt_action_item_id=7,tr_id=1,ts=100,time_begin='2026-01-06 10:00:00',lon=37.6,lat=55.7,building_address='Stop A'),
+            dict(tt_action_item_id=8,tr_id=1,ts=200,time_begin='2026-01-06 10:10:00',lon=37.61,lat=55.71,building_address='Stop B'),
+        ])
+        matched=client.post('/api/map-match',json={'tr_id':1,'lon':37.6001,'lat':55.7001}).json()
+        assert matched['stop_id']==7 and matched['distance_m']<20
+        assert client.post('/api/admin/simulation',json={'role':'dispatcher','tr_id':1}).status_code==403
+        backend.schedule=saved
+
 def test_ml_rejects_nonfinite_and_missing_features():
     with TestClient(ml_app) as client:
         assert client.get('/health').status_code==200

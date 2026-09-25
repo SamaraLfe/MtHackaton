@@ -97,7 +97,12 @@ docker compose up -d --build
 - `POST /api/predict` — `{tr_id,T,target_stop_id,target_time_begin,cur_dev_s}`; проверяется первая остановка планового окна, признаки строятся из принятой истории.
 - `POST /api/replay/step` — следующий исторический прогноз.
 - `POST /api/mode` — `{"mode":"live"}` или `{"mode":"replay"}`.
-- `GET /api/state`, `/api/network`, `/api/metrics`, `/health`.
+- `GET /api/state`, `/api/network`, `/api/metrics`, `/api/risk`, `/api/incidents`, `/health`.
+- `POST /api/map-match` — ближайшая плановая остановка, сегмент, расстояние и confidence для координат ТС.
+- `POST /api/what-if` — сценарий выпуска дополнительных ТС и снижения интервала.
+- `GET /api/admin/simulation` — состояние тестового административного контура.
+- `POST /api/admin/simulation` — контролируемая инъекция normal/slow/stop событий; принимает только роль `admin` и работает в live-режиме.
+- Админская панель: `http://localhost:8080/admin`. Это локальный role gate, не полноценная production-аутентификация.
 - ML `POST /predict_v5` — основной endpoint V5: prediction point + causal NDTP history + schedule; `/health` сообщает загруженную модель. Legacy `POST /predict` сохранён для совместимости.
 
 Полный интеграционный контроль запущенных локальных сервисов: `python scripts/verify_running.py`. Он сбрасывает replay, проверяет все 151 точки против submission, посылает фрагментированный TCP-пакет и пакет с ошибочным CRC, сохраняет задержки запросов в `artifacts/verification.json`.

@@ -44,6 +44,18 @@ class WhatIf(BaseModel):
     extra_vehicles:int=Field(default=0,ge=0,le=20)
     headway_reduction_pct:float=Field(default=0,ge=0,le=50)
 
+class MapMatch(BaseModel):
+    tr_id:int=Field(gt=0)
+    lon:float=Field(ge=-180,le=180)
+    lat:float=Field(ge=-90,le=90)
+
+class AdminSimulation(BaseModel):
+    role:str
+    tr_id:int=Field(gt=0)
+    scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$')
+    count:int=Field(default=3,ge=1,le=20)
+    interval_s:int=Field(default=30,ge=5,le=300)
+
 def align_schedule_to_event_day(frame, event_time):
     """Move a historical day-plan to the local calendar day of live telemetry."""
     if frame.empty:return frame.copy()
@@ -85,6 +97,14 @@ def route_risk(items):
 
 def incidents(items):
     return [dict(vehicle_id=int(v['tr_id']),route_id=int(v['tr_id']),level=v.get('level','unknown'),prediction_s=v.get('prediction_s'),late_probability=v.get('late_probability'),reason=v.get('reason'),stop_address=v.get('stop_address'),source=v.get('source'),recommendation=v.get('recommendation')) for v in sorted(items,key=lambda x:({'high':0,'medium':1,'low':2,'unknown':3}[x.get('level','unknown')],-(x.get('late_probability') or -1))) if v.get('level') in {'high','medium'}]
+
+def match_stop(tr_id, lon, lat):
+    candidates=schedule[schedule.tr_id==tr_id].dropna(subset=['lon','lat']).sort_values('ts')
+    if candidates.empty:return None
+    distances=candidates.apply(lambda row:haversine(lon,lat,row.lon,row.lat),axis=1)
+    index=distances.idxmin();position=int(candidates.index.get_loc(index));row=candidates.loc[index]
+    distance=float(distances.loc[index])
+    return {'tr_id':int(tr_id),'stop_id':int(row.tt_action_item_id),'stop_address':str(row.building_address),'distance_m':round(distance,2),'segment_index':position,'next_stop_id':int(candidates.iloc[min(position+1,len(candidates)-1)].tt_action_item_id),'confidence':round(max(0.,1-distance/250),3)}
 
 async def forecast(point,records,source):
     t=epoch(point['T']);tr=int(point['tr_id'])
@@ -252,6 +272,34 @@ async def what_if(body:WhatIf):
         projected.append({**item,'projected_late_probability':adjusted,'projected_level':level})
     return {'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'risk_multiplier':relief},'baseline':baseline,'projected':projected}
 
+@app.post('/api/map-match')
+async def map_match(body:MapMatch):
+    result=match_stop(body.tr_id,body.lon,body.lat)
+    if result is None:raise HTTPException(404,'No planned geometry for this route')
+    return result
+
+@app.get('/api/admin/simulation')
+async def simulation_status():
+    return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles)}
+
+@app.post('/api/admin/simulation')
+async def admin_simulation(body:AdminSimulation):
+    if body.role!='admin':raise HTTPException(403,'Admin role required')
+    if state['mode']!='live':raise HTTPException(409,'Switch to live mode before starting admin simulation')
+    current=vehicles.get(body.tr_id)
+    if current and current.get('lon') is not None:
+        lon,lat=float(current['lon']),float(current['lat'])
+    else:
+        route=schedule[schedule.tr_id==body.tr_id].dropna(subset=['lon','lat'])
+        if route.empty:raise HTTPException(404,'No coordinates for this route')
+        lon,lat=float(route.iloc[0].lon),float(route.iloc[0].lat)
+    speed={'normal':35,'slow':8,'stop':0}[body.scenario]
+    accepted=0;now=time.time()-body.count*body.interval_s
+    for index in range(body.count):
+        event={'tr_id':body.tr_id,'event_time':timestamp(now+index*body.interval_s).isoformat(),'lon':lon+index*0.00005,'lat':lat+index*0.00003,'speed':speed,'location_valid':True}
+        await ingest(event);accepted+=1
+    return {'accepted':accepted,'scenario':body.scenario,'tr_id':body.tr_id,'role':'admin','message':'Simulation events injected into live pipeline'}
+
 @app.get('/api/network')
 async def network():
     # No route IDs in source: expose planned stop sequences, explicitly labeled.
@@ -268,3 +316,6 @@ app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
 
 @app.get('/')
 async def index():return FileResponse(ROOT/'dashboard/index.html')
+
+@app.get('/admin')
+async def admin_page():return FileResponse(ROOT/'dashboard/admin.html')
