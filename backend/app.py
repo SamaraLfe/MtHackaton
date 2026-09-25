@@ -40,6 +40,10 @@ class Point(BaseModel):
 class Mode(BaseModel):
     mode:str=Field(pattern='^(live|replay)$')
 
+class WhatIf(BaseModel):
+    extra_vehicles:int=Field(default=0,ge=0,le=20)
+    headway_reduction_pct:float=Field(default=0,ge=0,le=50)
+
 def align_schedule_to_event_day(frame, event_time):
     """Move a historical day-plan to the local calendar day of live telemetry."""
     if frame.empty:return frame.copy()
@@ -66,6 +70,21 @@ def target_for(tr,t,stop_id=None):
     candidates=candidates[candidates.ts==first_time]
     if stop_id is not None:candidates=candidates[candidates.tt_action_item_id==stop_id]
     return None if candidates.empty else candidates.sort_values('tt_action_item_id').iloc[0].to_dict()
+
+def route_risk(items):
+    grouped={}
+    for item in items:
+        tr=int(item['tr_id']);bucket=grouped.setdefault(tr,[])
+        bucket.append(item)
+    result=[]
+    for tr,bucket in grouped.items():
+        probabilities=[v['late_probability'] for v in bucket if v.get('late_probability') is not None]
+        level='high' if any(v.get('level')=='high' for v in bucket) else 'medium' if any(v.get('level')=='medium' for v in bucket) else 'low' if probabilities else 'unknown'
+        result.append({'tr_id':tr,'level':level,'vehicle_count':len(bucket),'high_count':sum(v.get('level')=='high' for v in bucket),'max_late_probability':max(probabilities,default=None),'vehicles':[int(v['tr_id']) for v in bucket]})
+    return sorted(result,key=lambda r:({'high':0,'medium':1,'low':2,'unknown':3}[r['level']],r['tr_id']))
+
+def incidents(items):
+    return [dict(vehicle_id=int(v['tr_id']),route_id=int(v['tr_id']),level=v.get('level','unknown'),prediction_s=v.get('prediction_s'),late_probability=v.get('late_probability'),reason=v.get('reason'),stop_address=v.get('stop_address'),source=v.get('source'),recommendation=v.get('recommendation')) for v in sorted(items,key=lambda x:({'high':0,'medium':1,'low':2,'unknown':3}[x.get('level','unknown')],-(x.get('late_probability') or -1))) if v.get('level') in {'high','medium'}]
 
 async def forecast(point,records,source):
     t=epoch(point['T']);tr=int(point['tr_id'])
@@ -211,6 +230,27 @@ async def get_state():
             v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
         output.append(v)
     return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points)}
+
+@app.get('/api/incidents')
+async def get_incidents():
+    return {'items':incidents(list(vehicles.values())),'total':len(incidents(list(vehicles.values()))),'as_of':state['clock']}
+
+@app.get('/api/risk')
+async def get_risk():
+    routes=route_risk(list(vehicles.values()))
+    return {'routes':routes,'high_routes':sum(r['level']=='high' for r in routes),'medium_routes':sum(r['level']=='medium' for r in routes),'as_of':state['clock']}
+
+@app.post('/api/what-if')
+async def what_if(body:WhatIf):
+    baseline=route_risk(list(vehicles.values()))
+    relief=max(0.5,1-0.15*body.extra_vehicles-body.headway_reduction_pct/100)
+    projected=[]
+    for item in baseline:
+        probability=item['max_late_probability']
+        adjusted=None if probability is None else probability*relief
+        level='unknown' if adjusted is None else 'high' if adjusted>=.7 else 'medium' if adjusted>=.35 else 'low'
+        projected.append({**item,'projected_late_probability':adjusted,'projected_level':level})
+    return {'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'risk_multiplier':relief},'baseline':baseline,'projected':projected}
 
 @app.get('/api/network')
 async def network():

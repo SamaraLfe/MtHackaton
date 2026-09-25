@@ -9,6 +9,28 @@ from fastapi.testclient import TestClient
 from ml.service import app as ml_app
 from backend import app as backend
 
+
+def test_risk_and_incident_helpers():
+    items=[
+        {'tr_id':10,'level':'high','late_probability':.8,'prediction_s':180,'reason':'slow'},
+        {'tr_id':11,'level':'low','late_probability':.1},
+        {'tr_id':12,'level':'unknown','late_probability':None},
+    ]
+    routes=backend.route_risk(items)
+    assert routes[0]['tr_id']==10 and routes[0]['level']=='high'
+    assert [x['vehicle_id'] for x in backend.incidents(items)]==[10]
+
+
+def test_what_if_reduces_projected_risk():
+    with TestClient(backend.app) as client:
+        backend.vehicles.clear()
+        backend.vehicles[10]={'tr_id':10,'level':'high','late_probability':.8,'prediction_s':180}
+        response=client.post('/api/what-if',json={'extra_vehicles':1})
+        assert response.status_code==200
+        data=response.json()
+        assert data['projected'][0]['projected_late_probability']==.68
+        backend.vehicles.clear()
+
 def test_ml_rejects_nonfinite_and_missing_features():
     with TestClient(ml_app) as client:
         assert client.get('/health').status_code==200

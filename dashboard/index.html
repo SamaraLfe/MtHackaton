@@ -105,6 +105,15 @@
       </aside>
     </section>
 
+    <section class="panel command-panel" aria-label="Риск и сценарии">
+      <div class="panel-head table-head">
+        <div><p class="section-label">УПРАВЛЕНИЕ РИСКОМ</p><h2>Инциденты и what-if</h2><p>Оценка текущих маршрутов и моделирование выпуска дополнительного транспорта.</p></div>
+        <div class="scenario-tools"><label>Доп. ТС <input id="what-if-vehicles" type="number" min="0" max="20" value="0"></label><label>Снижение интервала <input id="what-if-headway" type="number" min="0" max="50" value="0">%</label><button class="button ghost" id="what-if-run">Рассчитать</button></div>
+      </div>
+      <div class="risk-grid"><div><span class="section-label">МАРШРУТНЫЙ РИСК</span><strong id="risk-summary">Нет активных маршрутов</strong><small id="risk-detail">—</small></div><div><span class="section-label">ИНЦИДЕНТЫ</span><strong id="incident-summary">0</strong><small id="incident-detail">Высокий и средний риск</small></div><div class="what-if-result"><span class="section-label">СЦЕНАРИЙ</span><strong id="what-if-result">—</strong><small id="what-if-note">Изменения не применены</small></div></div>
+      <div id="incident-list" class="incident-list"><span class="empty-row">Инциденты появятся после расчёта прогноза.</span></div>
+    </section>
+
     <section class="panel table-panel">
       <div class="panel-head table-head">
         <div><p class="section-label">ОПЕРАЦИОННЫЙ СПИСОК</p><h2>Транспорт и прогнозы</h2><p id="table-description">Сортировка: сначала высокий риск, затем свежие прогнозы.</p></div>
