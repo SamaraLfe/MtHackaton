@@ -3,8 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Такт · Диспетчерский центр</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/map.css">
 </head>
 <body>
   <header class="masthead">
@@ -81,9 +84,14 @@
           </div>
         </div>
         <div class="map-wrap">
-          <svg id="map" viewBox="0 0 900 470" role="img" aria-label="Схема движения транспорта"></svg>
+          <div id="map" aria-label="Карта движения транспорта"></div>
+          <div class="map-actions">
+            <button type="button" id="map-fit" aria-label="Показать всю сеть" title="Показать всю сеть">⊞</button>
+            <label><input id="map-all-routes" type="checkbox"> Все линии</label>
+          </div>
           <div class="map-empty" id="map-empty"><b>Нет координат для отображения</b><span>Данные появятся после получения телеметрии или шага replay.</span></div>
-          <div class="map-scale">Схема по координатам · не дорожная карта</div>
+          <div class="map-scale" title="Точной дорожной геометрии маршрутов в исходных данных нет.">Линии по плановым остановкам</div>
+          <div class="map-tile-notice" id="map-tile-notice" role="status" hidden></div>
         </div>
       </article>
 
@@ -115,6 +123,9 @@
 
     <footer><span>ТАКТ · локальный прототип</span><span>MAE test: <b id="mae">—</b> · baseline: <b id="baseline">—</b></span></footer>
   </main>
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/map-config.js"></script>
+  <script src="/static/map.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
