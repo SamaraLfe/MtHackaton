@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -62,21 +63,30 @@ def test_map_match_and_admin_role_gate():
         backend.schedule=saved
 
 
-def test_dispatcher_can_queue_and_read_driver_instruction():
-    with TestClient(backend.app) as client:
-        backend.driver_commands.clear()
-        response=client.post('/api/driver-commands',json={
-            'role':'dispatcher','dispatcher_id':'dispatcher-01','tr_id':131672,'action':'accelerate_safely',
-            'message':'При возможности сократить отставание без нарушения безопасности.'
-        })
-        assert response.status_code==201,response.text
-        command=response.json()
-        assert command['status']=='queued_for_integration'
-        assert command['channel']=='local_dispatch_outbox'
-        assert command['dispatcher']['id']=='dispatcher-01'
-        commands=client.get('/api/driver-commands',params={'tr_id':131672})
-        assert commands.status_code==200
-        assert commands.json()['items'][0]['id']==command['id']
+def test_dispatcher_command_is_persisted_in_the_local_outbox():
+    command_id=None
+    try:
+        with TestClient(backend.app) as client:
+            response=client.post('/api/driver-commands',json={
+                'role':'dispatcher','dispatcher_id':'dispatcher-01','tr_id':131672,'action':'accelerate_safely',
+                'message':'При возможности сократить отставание без нарушения безопасности.'
+            })
+            assert response.status_code==201,response.text
+            command=response.json();command_id=command['id']
+            assert command['status']=='queued_for_integration'
+            assert command['channel']=='local_dispatch_outbox'
+            assert command['dispatcher']['id']=='dispatcher-01'
+        with sqlite3.connect(backend.DB_PATH) as store:
+            payload=store.execute('SELECT payload FROM driver_commands WHERE id=?',(command_id,)).fetchone()[0]
+            assert json.loads(payload)['id']==command_id
+        with TestClient(backend.app) as client:
+            commands=client.get('/api/driver-commands',params={'tr_id':131672})
+            assert commands.status_code==200
+            assert commands.json()['items'][0]['id']==command_id
+    finally:
+        if command_id:
+            with sqlite3.connect(backend.DB_PATH) as store:
+                store.execute('DELETE FROM driver_commands WHERE id=?',(command_id,))
 
 
 def test_control_room_loads_leaflet_stylesheet():

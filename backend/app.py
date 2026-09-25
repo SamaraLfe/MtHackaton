@@ -17,7 +17,7 @@ from backend.api_docs import DESCRIPTION, TAGS, operation
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
-history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int);driver_commands=deque(maxlen=200)
+history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
@@ -113,6 +113,8 @@ def init_store():
           PRIMARY KEY(dispatcher_id,tr_id), FOREIGN KEY(dispatcher_id) REFERENCES dispatchers(id));
         CREATE TABLE IF NOT EXISTS simulations (
           id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS driver_commands (
+          id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
     ''')
     seeds=[('admin-01','Администратор','admin','Администратор'),('dispatcher-01','Диспетчер №01','dispatcher01','Маршрутный диспетчер'),('dispatcher-02','Диспетчер №02','dispatcher02','Старший диспетчер')]
     for account in seeds:
@@ -140,6 +142,21 @@ def stored_simulations(status=None,tr_id=None,limit=50):
     if status: items=[item for item in items if item.get('status')==status]
     if tr_id is not None: items=[item for item in items if item.get('tr_id')==tr_id]
     return items[:limit]
+
+def save_driver_command(command):
+    """Persist an auditable local outbox command before returning it to the UI."""
+    db.execute('INSERT INTO driver_commands(id,tr_id,payload,created_at) VALUES(?,?,?,?)',
+               (command['id'],command['tr_id'],json.dumps(clean(command),ensure_ascii=False),command['created_at']))
+    db.commit()
+
+def stored_driver_commands(tr_id=None,limit=200):
+    """Return durable outbox records newest first; no delivery is implied."""
+    query='SELECT payload FROM driver_commands'
+    params=[]
+    if tr_id is not None:
+        query+=' WHERE tr_id=?';params.append(tr_id)
+    query+=' ORDER BY created_at DESC LIMIT ?';params.append(limit)
+    return [json.loads(row['payload']) for row in db.execute(query,params)]
 
 def live_track(tr_id,limit=100):
     """Return recent valid GPS points, preserving simulated-point provenance."""
@@ -412,7 +429,8 @@ async def observability():
                                   'avg':round(sum(latencies)/len(latencies),2) if latencies else None,
                                   'max':max(latencies,default=None)},
             'queues':{'telemetry_points_in_memory':sum(len(items) for items in history.values()),
-                      'driver_commands_in_memory':len(driver_commands),'active_simulations':sum(run.get('status') in {'queued','running'} for run in simulation_runs.values())},
+                      'driver_commands_persisted':db.execute('SELECT COUNT(*) FROM driver_commands').fetchone()[0],
+                      'active_simulations':sum(run.get('status') in {'queued','running'} for run in simulation_runs.values())},
             'counters':dict(counters)}
 
 @app.get('/api/dispatchers',**operation('dispatchers'))
@@ -546,7 +564,7 @@ async def map_match(body:MapMatch):
 
 @app.get('/api/driver-commands',**operation('commands'))
 async def get_driver_commands(tr_id:int|None=None):
-    items=[item for item in driver_commands if tr_id is None or item['tr_id']==tr_id]
+    items=stored_driver_commands(tr_id)
     return {'items':items,'channel':'local_dispatch_outbox','external_delivery':False}
 
 @app.post('/api/driver-commands',status_code=201,**operation('queue_command'))
@@ -560,14 +578,14 @@ async def queue_driver_command(body:DriverCommand):
         'slow_down_safely':'При необходимости снизить темп безопасно',
     }
     command={
-        'id':f"cmd-{int(time.time()*1000)}-{len(driver_commands)+1}",
+        'id':f"cmd-{uuid.uuid4().hex[:12]}",
         'tr_id':body.tr_id,'role':body.role,'dispatcher':dispatcher,'action':body.action,
         'action_title':action_titles[body.action],'message':body.message,
         'created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
         'status':'queued_for_integration','channel':'local_dispatch_outbox',
         'external_delivery':False,
     }
-    driver_commands.appendleft(command)
+    save_driver_command(command)
     return command
 
 @app.get('/api/admin/simulation',**operation('simulation_status'))
