@@ -1,11 +1,120 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Такт · Контроль движения</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><aside><div class="brand">такт<span>●</span></div><div class="sub">ТРАНСПОРТНАЯ АНАЛИТИКА</div><nav><div class="active">◈ &nbsp; Контроль движения</div><a href="/docs" target="_blank">↗ &nbsp; Документация API</a></nav><div class="sidebar-bottom"><span class="dot"></span> Локальный MVP<br><small>Горизонт прогноза<br>строго &gt;10 и ≤15 минут</small></div></aside>
-<main><header><div><div class="eyebrow">ДИСПЕТЧЕРСКАЯ / ОБЗОР</div><h1>Движение под контролем</h1><p>Раннее предупреждение об отклонениях от расписания</p></div><div class="clock"><span id="mode-label">ИСТОРИЧЕСКИЙ ПРОГОН</span><strong id="clock">—</strong><small>Московское время</small></div></header>
-<div class="toolbar"><div><span class="dot"></span><b id="status">Готов к запуску</b><span class="muted" id="progress"></span></div><div><select id="mode" aria-label="Режим данных"><option value="replay">Исторические данные</option><option value="live">Живой поток NDTP</option></select><button id="step">Один шаг</button><button class="primary" id="play">▶ Запустить прогон</button></div></div>
-<div class="notice" id="notice">Данные 6 января 2026. Прогон идёт по реальным прогнозным точкам; это не текущая дорожная ситуация.</div>
-<section class="kpis"><article><label>ТС В ОБЗОРЕ</label><strong id="total">0</strong><small>Последнее состояние каждого ТС</small></article><article><label>ВЫСОКИЙ РИСК</label><strong class="red" id="high">0</strong><small>Вероятность задержки &gt;120 с ≥70%</small></article><article><label>ОШИБКА НА TEST · MAE</label><strong id="mae">—</strong><small id="baseline">Загрузка метрик…</small></article><article><label>ML-ЗАПРОС</label><strong id="latency">—</strong><small>Последний запрос, включая сеть</small></article></section>
-<section class="workspace"><article class="map-panel"><div class="panel-head"><div><h2>Схема движения</h2><p>Географические координаты · плановые остановки</p></div><span class="badge">БЕЗ ВНЕШНИХ КАРТ</span></div><div class="map-wrap"><svg id="map" viewBox="0 0 850 520" role="img" aria-label="Географическая схема остановок и положения транспорта"></svg><div class="map-note">Линии соединяют остановки ТС.<br>Это не геометрия дорог и не номера маршрутов.</div></div><div class="legend"><span><i class="green"></i> Низкий риск</span><span><i class="amber"></i> Наблюдение</span><span><i class="danger"></i> Высокий риск</span><span><i class="gray"></i> Нет свежего прогноза</span></div></article>
-<article class="incident-panel"><div class="panel-head"><div><h2>Карточка транспорта</h2><p>Выберите ТС на схеме или в таблице</p></div></div><div id="detail" class="detail"><div class="empty-icon">◎</div><h3>Ожидание данных</h3><p>Запустите исторический прогон.<br>Прогнозы появятся после первого шага.</p></div></article></section>
-<section class="table-panel"><div class="panel-head"><div><h2>Прогнозы и отклонения</h2><p>Красный — высокий риск, серый — недостаточно свежих данных</p></div><label class="filter"><input type="checkbox" id="risk-only"> Только высокий риск</label></div><div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ЦЕЛЕВАЯ ОСТАНОВКА</th><th>ПРОГНОЗ</th><th>РИСК &gt;120 С</th><th>ГОРИЗОНТ</th></tr></thead><tbody id="rows"><tr><td colspan="6" class="empty-row">Нет прогнозов. Нажмите «Один шаг» или «Запустить прогон».</td></tr></tbody></table></div></section>
-<footer>Такт / MVP 1.0 <span>Оценка на одном дне данных. Риск и интервал требуют проверки на новых днях.</span></footer></main><script src="/static/app.js"></script></body></html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Такт · Диспетчерский центр</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="masthead">
+    <a class="brand" href="/" aria-label="Такт, главная">ТАКТ<span>/CONTROL</span></a>
+    <nav aria-label="Основная навигация">
+      <a class="active" href="/">Мониторинг</a>
+      <a href="/docs" target="_blank">API документация ↗</a>
+    </nav>
+    <div class="masthead-meta">
+      <span class="connection-dot" id="connection-dot"></span>
+      <span id="connection-label">Подключение к API…</span>
+      <time id="wall-clock">—</time>
+    </div>
+  </header>
+
+  <main>
+    <section class="page-head">
+      <div>
+        <p class="kicker">ДИСПЕТЧЕРСКИЙ ЦЕНТР / МОСКВА</p>
+        <h1>Контроль движения транспорта</h1>
+        <p class="lede">Телеметрия, прогноз отклонения и состояние контура в одном экране.</p>
+      </div>
+      <div class="mode-clock">
+        <span id="mode-label">ИСТОРИЧЕСКИЙ ПРОГОН</span>
+        <strong id="clock">—</strong>
+        <small id="clock-caption">Время данных</small>
+      </div>
+    </section>
+
+    <section class="command-bar" aria-label="Управление потоком">
+      <div class="mode-control">
+        <label for="mode">Источник данных</label>
+        <select id="mode">
+          <option value="replay">Исторический replay</option>
+          <option value="live">Живой поток NDTP</option>
+        </select>
+      </div>
+      <div class="command-status">
+        <span class="status-mark" id="status-mark"></span>
+        <div><b id="status">Готов к запуску</b><small id="progress">0 / 151 точек</small></div>
+      </div>
+      <div class="command-actions">
+        <button class="button ghost" id="step">Следующая точка</button>
+        <button class="button primary" id="play">Запустить автопрогон</button>
+      </div>
+    </section>
+
+    <section class="advisory info" id="advisory">
+      <div class="advisory-icon" aria-hidden="true">i</div>
+      <div><strong id="notice-title">Исторические данные</strong><p id="notice">Replay использует прогнозные точки за 6 января 2026 года и не отражает текущую дорожную ситуацию.</p></div>
+      <span class="advisory-time" id="last-update">Обновление —</span>
+    </section>
+
+    <section class="system-strip" aria-label="Состояние сервисов">
+      <div><span class="service-dot ok" id="backend-dot"></span><b>Backend API</b><small id="backend-status">на связи</small></div>
+      <div><span class="service-dot ok" id="ml-dot"></span><b>ML-модель</b><small id="ml-status">загружена</small></div>
+      <div><span class="service-dot idle" id="ndtp-dot"></span><b>NDTP-приёмник</b><small id="ndtp-status">ожидание live-режима</small></div>
+      <div><span class="service-dot ok"></span><b>Датасет</b><small>151 прогнозная точка</small></div>
+    </section>
+
+    <section class="metrics" aria-label="Ключевые показатели">
+      <article><span>ТРАНСПОРТ В ПОТОКЕ</span><strong id="total">0</strong><small id="total-note">Нет активных ТС</small></article>
+      <article><span>NDTP-ПАКЕТЫ</span><strong id="packets">0</strong><small id="telemetry">0 строк телеметрии</small></article>
+      <article><span>ПОСТРОЕНО ПРОГНОЗОВ</span><strong id="predictions">0</strong><small id="latency">ML-запрос —</small></article>
+      <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><strong class="danger-text" id="high">0</strong><small id="issues">Ошибок сопоставления: 0</small></article>
+    </section>
+
+    <section class="operations-grid">
+      <article class="panel map-panel">
+        <div class="panel-head">
+          <div><p class="section-label">ОПЕРАТИВНАЯ СХЕМА</p><h2>Положение транспорта</h2><p id="map-description">Плановая последовательность остановок и последнее положение ТС.</p></div>
+          <div class="legend" aria-label="Легенда">
+            <span><i class="low"></i>норма</span><span><i class="medium"></i>наблюдение</span><span><i class="high"></i>риск</span><span><i class="unknown"></i>нет прогноза</span>
+          </div>
+        </div>
+        <div class="map-wrap">
+          <svg id="map" viewBox="0 0 900 470" role="img" aria-label="Схема движения транспорта"></svg>
+          <div class="map-empty" id="map-empty"><b>Нет координат для отображения</b><span>Данные появятся после получения телеметрии или шага replay.</span></div>
+          <div class="map-scale">Схема по координатам · не дорожная карта</div>
+        </div>
+      </article>
+
+      <aside class="panel inspector-panel">
+        <div class="panel-head compact"><div><p class="section-label">ВЫБРАННЫЙ ОБЪЕКТ</p><h2>Карточка транспорта</h2></div></div>
+        <div id="detail" class="detail empty-detail">
+          <div class="empty-symbol">＋</div>
+          <h3>Выберите транспорт</h3>
+          <p>Нажмите на маркер или строку таблицы, чтобы увидеть телеметрию и прогноз.</p>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel table-panel">
+      <div class="panel-head table-head">
+        <div><p class="section-label">ОПЕРАЦИОННЫЙ СПИСОК</p><h2>Транспорт и прогнозы</h2><p id="table-description">Сортировка: сначала высокий риск, затем свежие прогнозы.</p></div>
+        <div class="table-tools">
+          <label class="search"><span>Поиск ТС</span><input id="vehicle-search" inputmode="numeric" placeholder="Например, 131672"></label>
+          <label class="check"><input type="checkbox" id="risk-only"><span>Только высокий риск</span></label>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>ТРАНСПОРТ</th><th>ИСТОЧНИК</th><th>СОСТОЯНИЕ</th><th>ПОСЛЕДНИЕ ДАННЫЕ</th><th>ЦЕЛЕВАЯ ОСТАНОВКА</th><th>ПРОГНОЗ</th><th>ПРИЧИНА / СТАТУС</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="7" class="empty-row">Ожидание данных…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer><span>ТАКТ · локальный прототип</span><span>MAE test: <b id="mae">—</b> · baseline: <b id="baseline">—</b></span></footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
