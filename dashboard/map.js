@@ -43,7 +43,7 @@
     map=L.map('map',{zoomControl:false,scrollWheelZoom:false}).setView([55.75,37.62],10);
     L.control.zoom({position:'topleft',zoomInTitle:'Приблизить',zoomOutTitle:'Отдалить'}).addTo(map);
     const config=window.TRANSIT_MAP;
-    const tiles=L.tileLayer(config.tileUrl,{attribution:config.attribution,maxZoom:config.maxZoom,minZoom:3,updateWhenIdle:true,keepBuffer:1}).addTo(map);
+    const tiles=L.tileLayer(config.tileUrl,{subdomains:config.subdomains||'abc',attribution:config.attribution,maxZoom:config.maxZoom,minZoom:config.minZoom||3,updateWhenIdle:true,keepBuffer:1,detectRetina:true}).addTo(map);
     tiles.on('loading',()=>{failedTiles=0;loadedTiles=0;});
     tiles.on('tileerror',()=>{failedTiles++;notify('Подложка недоступна. Линии и транспорт остаются на карте.');});
     tiles.on('tileload',()=>{loadedTiles++;});

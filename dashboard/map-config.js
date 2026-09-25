@@ -1,7 +1,8 @@
-// Provider may be changed without modifying the map implementation.
-// Keep the provider's attribution and browser caching enabled.
+// Новая подложка Esri World Street Map: отдельный provider, без API key.
+// Ключи картографических сервисов в коде не хранятся.
 window.TRANSIT_MAP = {
-  tileUrl: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>',
-  maxZoom: 19
+  tileUrl: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+  attribution: 'Tiles &copy; Esri — Source: Esri, HERE, Garmin, USGS, NGA, EPA, USDA, NPS',
+  maxZoom: 19,
+  minZoom: 3
 };

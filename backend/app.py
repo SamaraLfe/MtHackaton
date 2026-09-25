@@ -326,7 +326,7 @@ async def metrics():
 app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
 
 @app.get('/')
-async def index():return FileResponse(ROOT/'dashboard/index.html')
+async def index():return FileResponse(ROOT/'dashboard/control.html')
 
 @app.get('/admin')
-async def admin_page():return FileResponse(ROOT/'dashboard/admin.html')
+async def admin_page():return FileResponse(ROOT/'dashboard/admin-control.html')
