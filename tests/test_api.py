@@ -21,6 +21,20 @@ def test_risk_and_incident_helpers():
     assert [x['vehicle_id'] for x in backend.incidents(items)]==[10]
 
 
+def test_metrics_expose_readable_v5_summary():
+    with TestClient(backend.app) as client:
+        response=client.get('/api/metrics')
+        assert response.status_code==200
+        data=response.json()
+        assert data['v5']['model']=='v5'
+        assert data['v5']['features']==104
+        assert data['v5']['test_points']==353
+        assert data['v5']['mae_s']<data['v5']['baseline_mae_s']
+        assert data['v5']['improvement_pct']>0
+        assert data['readable']['coverage'].endswith('%')
+        assert len(data['feature_importance'])==6
+
+
 def test_what_if_reduces_projected_risk():
     with TestClient(backend.app) as client:
         backend.vehicles.clear()

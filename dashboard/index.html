@@ -76,6 +76,18 @@
       <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><strong class="danger-text" id="high">0</strong><small id="issues">Ошибок сопоставления: 0</small></article>
     </section>
 
+    <section class="insight-grid" aria-label="Маршрутные и ML показатели">
+      <article class="panel route-summary-panel">
+        <div class="panel-head compact"><div><p class="section-label">МАРШРУТНАЯ СВОДКА</p><h2>Состояние линий</h2><p>Риск рассчитан по активным ТС и V5-прогнозам.</p></div><span class="panel-badge" id="route-updated">—</span></div>
+        <div id="route-cards" class="route-cards"><div class="empty-row">Ожидание маршрутов…</div></div>
+      </article>
+      <article class="panel ml-summary-panel">
+        <div class="panel-head compact"><div><p class="section-label">ML QUALITY</p><h2>Качество модели</h2><p>Метрики test-набора и runtime-контур разделены.</p></div><span class="model-pill" id="model-pill">V5</span></div>
+        <div class="ml-score-grid"><div><span>MAE V5</span><strong id="ml-mae">—</strong><small>средняя абсолютная ошибка</small></div><div><span>BASELINE</span><strong id="ml-baseline">—</strong><small>persistence</small></div><div><span>УЛУЧШЕНИЕ</span><strong id="ml-improvement">—</strong><small>относительно baseline</small></div><div><span>ИНТЕРВАЛ</span><strong id="ml-coverage">—</strong><small>покрытие 90% интервала</small></div><div><span>TEST POINTS</span><strong id="ml-points">—</strong><small>официальная выборка</small></div><div><span>INFERENCE</span><strong id="ml-latency">—</strong><small>batch V5, миллисекунды</small></div></div>
+        <div class="feature-section"><div class="feature-heading"><span>Вклад признаков</span><small id="feature-note">top V5 features</small></div><div id="feature-bars" class="feature-bars"><div class="empty-row">—</div></div></div>
+      </article>
+    </section>
+
     <section class="operations-grid">
       <article class="panel map-panel">
         <div class="panel-head">

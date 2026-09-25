@@ -310,7 +310,18 @@ async def network():
     return {'kind':'planned_stop_sequences','paths':paths}
 
 @app.get('/api/metrics')
-async def metrics():return json.loads((ARTIFACT/'metrics.json').read_text(encoding='utf-8'))
+async def metrics():
+    legacy=json.loads((ARTIFACT/'metrics.json').read_text(encoding='utf-8'))
+    model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8')) if (ARTIFACT/'model_v5.json').exists() else {}
+    predictions=pd.read_csv(ARTIFACT/'test_predictions_v5.csv') if (ARTIFACT/'test_predictions_v5.csv').exists() else pd.DataFrame()
+    v5=dict(model='v5',features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=float(predictions.abs_error.mean()) if not predictions.empty else None,baseline_mae_s=float(predictions.baseline_abs_error.mean()) if not predictions.empty else None,interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
+    if v5['mae_s'] is not None and v5['baseline_mae_s']:
+        v5['improvement_pct']=100*(1-v5['mae_s']/v5['baseline_mae_s'])
+    importance=[]
+    importance_path=ARTIFACT/'feature_importance_v5.csv'
+    if importance_path.exists():
+        importance=pd.read_csv(importance_path).sort_values('importance',ascending=False).head(6).to_dict('records')
+    return {**legacy,'v5':v5,'feature_importance':importance,'readable':{'mae':f"{v5['mae_s']:.1f} с" if v5['mae_s'] is not None else '—','baseline':f"{v5['baseline_mae_s']:.1f} с" if v5['baseline_mae_s'] is not None else '—','coverage':f"{100*v5['coverage']:.1f}%" if v5['coverage'] is not None else '—'}}
 
 app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
 
