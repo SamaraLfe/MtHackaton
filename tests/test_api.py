@@ -271,6 +271,20 @@ def test_state_exposes_live_track_and_runtime_endpoints():
         assert ready.status_code in {200,503}
 
 
+def test_live_track_excludes_positions_older_than_the_track_ttl():
+    tr_id=987654
+    backend.history[tr_id].clear()
+    now=time.time()
+    try:
+        backend.history[tr_id].append({'event_time':pd.Timestamp(now-7200,unit='s',tz='UTC').isoformat(),'ts':now-7200,'lon':37.6,'lat':55.7,'location_valid':True})
+        backend.history[tr_id].append({'event_time':pd.Timestamp(now-10,unit='s',tz='UTC').isoformat(),'ts':now-10,'lon':37.61,'lat':55.71,'location_valid':True})
+        track=backend.live_track(tr_id)
+        assert len(track)==1
+        assert track[0]['lon']==37.61
+    finally:
+        backend.history.pop(tr_id,None)
+
+
 def test_ml_rejects_nonfinite_and_missing_features():
     with TestClient(ml_app) as client:
         assert client.get('/health').status_code==200

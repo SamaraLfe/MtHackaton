@@ -17,6 +17,7 @@ from backend.api_docs import DESCRIPTION, TAGS, operation
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
+LIVE_TRACK_TTL_S=int(os.getenv('LIVE_TRACK_TTL_S','3600'))
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
@@ -161,6 +162,9 @@ def stored_driver_commands(tr_id=None,limit=200):
 def live_track(tr_id,limit=100):
     """Return recent valid GPS points, preserving simulated-point provenance."""
     rows=[row for row in history[tr_id] if row.get('location_valid') and np.isfinite(row.get('lon',np.nan)) and np.isfinite(row.get('lat',np.nan))]
+    if rows:
+        cutoff=max(float(row['ts']) for row in rows)-LIVE_TRACK_TTL_S
+        rows=[row for row in rows if float(row['ts'])>=cutoff]
     return [clean({'lon':row['lon'],'lat':row['lat'],'event_time':timestamp(row['event_time']).isoformat(),
                    'simulated':bool(row.get('simulated',False))}) for row in rows[-limit:]]
 
