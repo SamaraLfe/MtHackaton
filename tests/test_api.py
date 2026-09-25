@@ -285,6 +285,38 @@ def test_live_track_excludes_positions_older_than_the_track_ttl():
         backend.history.pop(tr_id,None)
 
 
+def test_live_telemetry_overlays_the_historical_snapshot_without_switching_modes():
+    with TestClient(backend.app) as client:
+        assert backend.state['mode']=='replay'
+        response=client.post('/api/telemetry',json=[{
+            'tr_id':131672,'event_time':pd.Timestamp.now(tz='UTC').isoformat(),
+            'lon':37.81,'lat':55.75,'speed':28,'location_valid':True,
+        }])
+        assert response.status_code==200,response.text
+
+        state=client.get('/api/state',params={'dispatcher_id':'dispatcher-01'}).json()
+        vehicle=next(item for item in state['vehicles'] if item['tr_id']==131672)
+        assert state['state']['mode']=='replay'
+        assert vehicle['source']=='historical_archive'
+        assert vehicle['live_position'] is True
+        assert vehicle['lon']==37.81 and vehicle['lat']==55.75
+
+
+def test_stale_live_telemetry_does_not_overlay_the_historical_snapshot():
+    with TestClient(backend.app) as client:
+        backend.vehicles.clear()
+        backend.history.clear()
+        response=client.post('/api/telemetry',json=[{
+            'tr_id':131672,'event_time':(pd.Timestamp.now(tz='UTC')-pd.Timedelta(hours=2)).isoformat(),
+            'lon':37.81,'lat':55.75,'speed':28,'location_valid':True,
+        }])
+        assert response.status_code==200,response.text
+
+        state=client.get('/api/state',params={'dispatcher_id':'dispatcher-01'}).json()
+        vehicle=next(item for item in state['vehicles'] if item['tr_id']==131672)
+        assert 'live_position' not in vehicle
+
+
 def test_ml_rejects_nonfinite_and_missing_features():
     with TestClient(ml_app) as client:
         assert client.get('/health').status_code==200

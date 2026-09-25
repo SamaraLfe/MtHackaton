@@ -327,7 +327,17 @@ async def ingest(event):
     if records and ts<=records[-1]['ts']:
         counters['late_or_duplicate_packets']+=1;return
     row=dict(event,ts=ts);records.append(row);counters['telemetry_rows']+=1
-    if state['mode']!='live':return
+    if state['mode']!='live':
+        # The historical forecast stays visible by default. Only a fresh NDTP
+        # coordinate can overlay it, so delayed source traffic never looks live.
+        if event['location_valid'] and ts>=time.time()-LIVE_TRACK_TTL_S:
+            vehicles[tr]={
+                'tr_id':tr,'T':timestamp(event['event_time']).isoformat(),
+                'level':'unknown','reason':'Live NDTP: позиция получена; прогноз остаётся историческим',
+                'source':'live','prediction_s':None,'late_probability':None,
+                'lon':event['lon'],'lat':event['lat'],'position_time':ts,
+            }
+        return
     state['clock']=timestamp(event['event_time']).isoformat()
     # Conservative arrival match: only already observed stop proximity. No schedule actuals.
     known=schedule[(schedule.tr_id==tr)&(schedule.ts>=ts-1800)&(schedule.ts<=ts+300)]
