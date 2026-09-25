@@ -1,0 +1,41 @@
+services:
+  ml:
+    build: .
+    command: python -m uvicorn ml.service:app --host 0.0.0.0 --port 8001
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  backend:
+    build: .
+    command: python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
+    environment:
+      ML_URL: http://ml:8001
+      NDTP_PORT: "9201"
+    volumes:
+      - ./dataset:/app/dataset:ro
+      - ./artifacts:/app/artifacts:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9201:9201"
+    depends_on:
+      ml:
+        condition: service_healthy
+  dashboard:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+  emulator:
+    image: ndtp-telemetry-emulator:1.0
+    profiles: [emulator]
+    ports:
+      - "127.0.0.1:18080:18080"
+    depends_on:
+      - backend

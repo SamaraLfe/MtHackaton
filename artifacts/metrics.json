@@ -1,0 +1,41 @@
+{
+  "rows_train": 4434,
+  "rows_real": 1141,
+  "fit": 728,
+  "tune": 198,
+  "calibration": 194,
+  "official_test": 353,
+  "validate": 151,
+  "selected": "catboost",
+  "tuning_mae": {
+    "persistence": 87.13131313131314,
+    "shrinkage": 78.327398989899,
+    "catboost": 72.3398844101914,
+    "torch_lad": 75.2807834934552
+  },
+  "test_mae_s": 83.94505189968454,
+  "zero_mae_s": 103.33711048158641,
+  "persistence_mae_s": 93.35977337110482,
+  "mae_vehicle_bootstrap_95": [
+    69.21925431277259,
+    100.40704966298773
+  ],
+  "interval_coverage": 0.9830028328611898,
+  "interval_radius_s": 296.9566738500424,
+  "brier_score": 0.15338679410019196,
+  "late_count": 86,
+  "alert_precision": 0.9411764705882353,
+  "alert_recall": 0.18604651162790697,
+  "chronological_cutoffs": [
+    "2026-01-06T17:55:00+03:00",
+    "2026-01-06T21:06:00+03:00"
+  ],
+  "limitations": [
+    "Only one day; official test is interleaved with train on the same vehicles.",
+    "Test/validate telemetry is byte-identical. No schedule actuals used as features.",
+    "Real route IDs and door statuses absent; no route identity or boarding cause can be inferred.",
+    "Conformal coverage needs exchangeability; measured coverage is reported, not guaranteed."
+  ],
+  "batch_inference_ms": 0.9388000005856156,
+  "batch_size": 353
+}
