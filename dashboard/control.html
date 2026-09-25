@@ -5,8 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0a111c">
   <title>Такт · Центр управления движением</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <link rel="stylesheet" href="/static/map.css">
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/static/control.css">
 </head>
 <body>
@@ -15,10 +14,10 @@
     <div class="brand-lockup"><div class="brand-mark">Т</div><div><strong>ТАКТ</strong><span>CONTROL ROOM</span></div></div>
     <div class="sidebar-caption">ЦЕНТР УПРАВЛЕНИЯ</div>
     <nav class="side-nav" aria-label="Навигация">
-      <a class="active" href="#overview"><span>◈</span>Обзор движения</a>
-      <a href="#routes"><span>≋</span>Маршруты и риск</a>
-      <a href="#ml"><span>◎</span>ML-предиктор</a>
-      <a href="/admin"><span>⚙</span>Симулятор</a>
+      <a class="active" href="#overview"><span>◈</span>Оперативная обстановка</a>
+      <a href="#routes"><span>≋</span>Маршруты и отклонения</a>
+      <a href="#ml"><span>◎</span>Надёжность прогноза</a>
+      <a href="/admin"><span>⚙</span>Сценарии</a>
     </nav>
     <div class="sidebar-spacer"></div>
     <div class="system-card">
@@ -52,19 +51,19 @@
 
     <section class="primary-grid">
       <article class="surface map-card">
-        <div class="surface-head"><div><div class="eyebrow">ОПЕРАТИВНАЯ КАРТА</div><h2>Положение транспорта</h2><p>Карта на новой контрастной подложке; линии показывают плановые остановки.</p></div><div class="map-tools"><label><input id="map-all-routes" type="checkbox"> Все линии</label><button class="icon-btn" id="map-fit" title="Показать всю сеть">⌗</button></div></div>
+        <div class="surface-head"><div><div class="eyebrow">ОПЕРАТИВНАЯ КАРТА</div><h2>Положение транспорта</h2><p>Подложка, плановые линии и текущее положение ТС. Выберите маркер для действия диспетчера.</p></div><div class="map-tools"><label><input id="map-all-routes" type="checkbox"> Все линии</label><button class="icon-btn" id="map-fit" title="Показать всю сеть">⌗</button></div></div>
         <div class="map-wrap"><div id="map" aria-label="Карта движения транспорта"></div><div class="map-empty" id="map-empty"><b>Нет координат для отображения</b><span>Включите live-поток или сделайте шаг replay.</span></div><div class="map-legend"><span><i class="legend-dot low"></i>Норма</span><span><i class="legend-dot medium"></i>Наблюдение</span><span><i class="legend-dot high"></i>Риск</span></div><div class="map-scale">Плановые остановки · не дорожный граф</div><div class="map-tile-notice" id="map-tile-notice" role="status" hidden></div></div>
       </article>
       <article class="surface fleet-card">
-        <div class="surface-head"><div><div class="eyebrow">FLEET WATCH</div><h2>Флот в работе</h2><p>Сначала показываются ТС с наибольшим риском.</p></div><span class="surface-count" id="fleet-count">0</span></div>
+        <div class="surface-head"><div><div class="eyebrow">ОЧЕРЕДЬ ДИСПЕТЧЕРА</div><h2>Транспорт в работе</h2><p>Сначала ТС, которым требуется внимание или связь с водителем.</p></div><span class="surface-count" id="fleet-count">0</span></div>
         <div class="fleet-list" id="fleet-list"><div class="empty-state">Нет активного транспорта</div></div>
         <div class="fleet-footer"><span id="fleet-footer">Ожидание телеметрии</span><a href="#fleet-table">Открыть список ↓</a></div>
       </article>
     </section>
 
     <section class="analytics-grid" id="routes">
-      <article class="surface route-panel"><div class="surface-head"><div><div class="eyebrow">ROUTE INTELLIGENCE</div><h2>Маршрутный риск</h2><p>Агрегировано по активным ТС и вероятности опоздания.</p></div><span class="surface-badge" id="route-updated">—</span></div><div class="route-cards" id="route-cards"><div class="empty-state">Нет активных маршрутов</div></div><div class="risk-summary-row"><div><span>Красная зона</span><b id="risk-high">0</b></div><div><span>Наблюдение</span><b id="risk-medium">0</b></div><div><span>Всего линий</span><b id="risk-total">0</b></div></div></article>
-      <article class="surface ml-panel" id="ml"><div class="surface-head"><div><div class="eyebrow">MODEL HEALTH</div><h2>Качество ML</h2><p>Оценка V5 на официальном test-наборе.</p></div><span class="model-badge" id="model-pill">V5</span></div><div class="ml-grid"><div><span>MAE</span><b id="ml-mae">—</b><small>средняя ошибка</small></div><div><span>BASELINE</span><b id="ml-baseline">—</b><small>persistence</small></div><div><span>GAIN</span><b id="ml-improvement">—</b><small>к baseline</small></div><div><span>COVERAGE</span><b id="ml-coverage">—</b><small>интервал 90%</small></div><div><span>TEST</span><b id="ml-points">—</b><small>точек</small></div><div><span>LATENCY</span><b id="ml-latency">—</b><small>batch inference</small></div></div><div class="feature-head"><span>Главные признаки</span><small>вклад V5</small></div><div class="feature-bars" id="feature-bars"><div class="empty-state">—</div></div></article>
+      <article class="surface route-panel"><div class="surface-head"><div><div class="eyebrow">СОСТОЯНИЕ МАРШРУТОВ</div><h2>Риск опоздания</h2><p>Вероятность задержки, число ТС и очередность внимания.</p></div><span class="surface-badge" id="route-updated">—</span></div><div class="route-cards" id="route-cards"><div class="empty-state">Нет активных маршрутов</div></div><div class="risk-summary-row"><div><span>Критично</span><b id="risk-high">0</b></div><div><span>Наблюдение</span><b id="risk-medium">0</b></div><div><span>Активно</span><b id="risk-total">0</b></div></div></article>
+      <article class="surface ml-panel" id="ml"><div class="surface-head"><div><div class="eyebrow">КОНТРОЛЬ МОДЕЛИ</div><h2>Надёжность прогноза</h2><p>Офлайн-оценка V5 и скорость текущего расчёта.</p></div><span class="model-badge" id="model-pill">V5</span></div><div class="ml-grid"><div><span>ОШИБКА MAE</span><b id="ml-mae">—</b><small>средняя ошибка</small></div><div><span>БАЗОВЫЙ УРОВЕНЬ</span><b id="ml-baseline">—</b><small>без ML</small></div><div><span>УЛУЧШЕНИЕ</span><b id="ml-improvement">—</b><small>к baseline</small></div><div><span>ПОКРЫТИЕ</span><b id="ml-coverage">—</b><small>интервал 90%</small></div><div><span>ТЕСТ</span><b id="ml-points">—</b><small>прогнозных точек</small></div><div><span>ЗАДЕРЖКА</span><b id="ml-latency">—</b><small>batch inference</small></div></div><div class="feature-head"><span>Факторы прогноза</span><small>вклад V5</small></div><div class="feature-bars" id="feature-bars"><div class="empty-state">—</div></div></article>
     </section>
 
     <section class="surface risk-panel"><div class="surface-head"><div><div class="eyebrow">DISPATCH ACTIONS</div><h2>Инциденты и what-if</h2><p>Сценарный расчёт не изменяет live-поток.</p></div><div class="whatif-controls"><label>Доп. ТС<input id="what-if-vehicles" type="number" min="0" max="20" value="0"></label><label>Снижение интервала<input id="what-if-headway" type="number" min="0" max="50" value="0"><em>%</em></label><button class="btn btn-secondary" id="what-if-run">Рассчитать сценарий</button></div></div><div class="risk-actions"><div><span>ТЕКУЩИЙ РИСК</span><b id="risk-summary">Нет активных маршрутов</b><small id="risk-detail">—</small></div><div><span>ИНЦИДЕНТЫ</span><b id="incident-summary">0</b><small id="incident-detail">Высокий и средний риск</small></div><div><span>СЦЕНАРИЙ</span><b id="what-if-result">—</b><small id="what-if-note">Изменения не применены</small></div></div><div id="incident-list" class="incident-list"><span class="empty-state">Инциденты появятся после расчёта прогноза.</span></div></section>

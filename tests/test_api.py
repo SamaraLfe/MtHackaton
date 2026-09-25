@@ -57,6 +57,30 @@ def test_map_match_and_admin_role_gate():
         assert client.post('/api/admin/simulation',json={'role':'dispatcher','tr_id':1}).status_code==403
         backend.schedule=saved
 
+
+def test_dispatcher_can_queue_and_read_driver_instruction():
+    with TestClient(backend.app) as client:
+        backend.driver_commands.clear()
+        response=client.post('/api/driver-commands',json={
+            'role':'dispatcher','tr_id':131672,'action':'accelerate_safely',
+            'message':'При возможности сократить отставание без нарушения безопасности.'
+        })
+        assert response.status_code==201,response.text
+        command=response.json()
+        assert command['status']=='queued_for_integration'
+        assert command['channel']=='local_dispatch_outbox'
+        commands=client.get('/api/driver-commands',params={'tr_id':131672})
+        assert commands.status_code==200
+        assert commands.json()['items'][0]['id']==command['id']
+
+
+def test_control_room_loads_leaflet_stylesheet():
+    with TestClient(backend.app) as client:
+        response=client.get('/')
+        assert response.status_code==200
+        assert '/static/vendor/leaflet/leaflet.css' in response.text
+
+
 def test_ml_rejects_nonfinite_and_missing_features():
     with TestClient(ml_app) as client:
         assert client.get('/health').status_code==200

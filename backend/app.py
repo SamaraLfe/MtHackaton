@@ -16,7 +16,7 @@ from backend.ndtp import handle
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
-history=defaultdict(lambda:deque(maxlen=1000));vehicles={};counters=defaultdict(int)
+history=defaultdict(lambda:deque(maxlen=1000));vehicles={};counters=defaultdict(int);driver_commands=deque(maxlen=200)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
 
@@ -55,6 +55,12 @@ class AdminSimulation(BaseModel):
     scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$')
     count:int=Field(default=3,ge=1,le=20)
     interval_s:int=Field(default=30,ge=5,le=300)
+
+class DriverCommand(BaseModel):
+    role:str=Field(pattern='^(dispatcher|admin)$')
+    tr_id:int=Field(gt=0)
+    action:str=Field(pattern='^(contact|maintain|accelerate_safely|slow_down_safely)$')
+    message:str=Field(min_length=5,max_length=300)
 
 def align_schedule_to_event_day(frame, event_time):
     """Move a historical day-plan to the local calendar day of live telemetry."""
@@ -277,6 +283,30 @@ async def map_match(body:MapMatch):
     result=match_stop(body.tr_id,body.lon,body.lat)
     if result is None:raise HTTPException(404,'No planned geometry for this route')
     return result
+
+@app.get('/api/driver-commands')
+async def get_driver_commands(tr_id:int|None=None):
+    items=[item for item in driver_commands if tr_id is None or item['tr_id']==tr_id]
+    return {'items':items,'channel':'local_dispatch_outbox','external_delivery':False}
+
+@app.post('/api/driver-commands',status_code=201)
+async def queue_driver_command(body:DriverCommand):
+    action_titles={
+        'contact':'Связаться с водителем',
+        'maintain':'Продолжать по графику',
+        'accelerate_safely':'При возможности сократить отставание безопасно',
+        'slow_down_safely':'При необходимости снизить темп безопасно',
+    }
+    command={
+        'id':f"cmd-{int(time.time()*1000)}-{len(driver_commands)+1}",
+        'tr_id':body.tr_id,'role':body.role,'action':body.action,
+        'action_title':action_titles[body.action],'message':body.message,
+        'created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
+        'status':'queued_for_integration','channel':'local_dispatch_outbox',
+        'external_delivery':False,
+    }
+    driver_commands.appendleft(command)
+    return command
 
 @app.get('/api/admin/simulation')
 async def simulation_status():
