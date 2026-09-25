@@ -1624,10 +1624,15 @@ def build_v5_row(point, history, schedule):
     traffic = pd.DataFrame(history).copy()
     if traffic.empty:
         traffic = pd.DataFrame(columns=["tr_id","event_time","location_valid","lat","lon","alt","speed","heading"])
+    for name, default in (("alt",0.0),("heading",0.0)):
+        if name not in traffic.columns: traffic[name]=default
     traffic["tr_id"] = traffic["tr_id"].astype(str)
     traffic["event_time"] = pd.to_datetime(traffic["event_time"])
     gps = prepare_traffic(traffic)
-    sched = prepare_schedule(pd.DataFrame(schedule).copy())
+    sched = pd.DataFrame(schedule).copy()
+    if 'geom' not in sched.columns and {'lon','lat'}.issubset(sched.columns):
+        sched['geom'] = sched.apply(lambda r: f"POINT ({r['lon']} {r['lat']})", axis=1)
+    sched = prepare_schedule(sched)
     points = add_target_coordinates(points, sched)
     telemetry = build_telemetry_features(points, gps, "ONLINE")
     route = build_route_features(points, sched, telemetry, "ONLINE")

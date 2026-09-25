@@ -63,8 +63,9 @@ async def forecast(point,records,source):
     features=build_one(point,records,stop)
     start=time.perf_counter();degraded=False
     try:
-        response=await client.post(ML_URL+'/predict',json={'rows':[features]});response.raise_for_status()
+        response=await client.post(ML_URL+'/predict_v5',json={'points':[clean(point)],'histories':[[clean(x) for x in records]],'schedules':[[clean(x) for x in schedule[(schedule.tr_id==tr)&(schedule.ts>=t-1800)&(schedule.ts<=t+1800)].to_dict('records')]]});response.raise_for_status()
         result=response.json()['predictions'][0]
+        result.update(lower_s=result['prediction_s']-104.7845011097,upper_s=result['prediction_s']+104.7845011097,late_probability=float(1/(1+np.exp(-(result['prediction_s']-120)/45))))
     except (httpx.HTTPError,KeyError,ValueError):
         counters['ml_failures']+=1;degraded=True
         result=dict(prediction_s=point['cur_dev_s'],lower_s=None,upper_s=None,late_probability=None,model='persistence_fallback')

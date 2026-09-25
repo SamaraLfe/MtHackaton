@@ -1,7 +1,7 @@
 """Independent HTTP inference service."""
 import os
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict, create_model
 from ml.features import FEATURES
 from ml.model import Predictor
@@ -9,6 +9,11 @@ from ml.model import Predictor
 FeatureRow=create_model('FeatureRow',__config__=ConfigDict(extra='forbid',allow_inf_nan=False),**{k:(float,...) for k in FEATURES})
 class Batch(BaseModel):
     rows: list[FeatureRow] = Field(min_length=1,max_length=512)
+
+class V5Batch(BaseModel):
+    points: list[dict] = Field(min_length=1,max_length=512)
+    histories: list[list[dict]] = Field(min_length=1,max_length=512)
+    schedules: list[list[dict]] = Field(min_length=1,max_length=512)
 
 app=FastAPI(title='Transit ML',version='1.0.0')
 model=Predictor(os.getenv('ARTIFACT_DIR','artifacts'))
@@ -19,3 +24,10 @@ def health(): return {'status':'ok','model':model.kind}
 @app.post('/predict')
 def predict(batch:Batch):
     return {'predictions':model.forecast(pd.DataFrame([r.model_dump() for r in batch.rows]))}
+
+@app.post('/predict_v5')
+def predict_v5(batch:V5Batch):
+    if not (len(batch.points)==len(batch.histories)==len(batch.schedules)):
+        raise HTTPException(422,'points, histories and schedules must have equal length')
+    values=model.predict_v5(batch.points,batch.histories,batch.schedules)
+    return {'predictions':[{'prediction_s':float(v),'model':'v5'} for v in values]}
