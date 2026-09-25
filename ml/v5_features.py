@@ -509,9 +509,12 @@ def build_telemetry_features(
             )
         )
 
+        cutoff_time = pd.Timestamp(T)
+        if cutoff_time.tz is not None:
+            cutoff_time = cutoff_time.tz_convert(None)
         cutoff = np.searchsorted(
             event_times,
-            np.datetime64(T),
+            np.datetime64(cutoff_time),
             side="right",
         )
 
@@ -1607,6 +1610,10 @@ def build_feature_matrix(
     # V5 route
     # ========================================================
 
+    # Consolidate the many scalar telemetry columns before adding the V5 route
+    # block. This keeps online single-row inference from fragmenting pandas'
+    # BlockManager on every request.
+    X = X.copy()
     for col in ROUTE_COLUMNS:
 
         X[
