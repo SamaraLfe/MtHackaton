@@ -62,13 +62,14 @@ def test_dispatcher_can_queue_and_read_driver_instruction():
     with TestClient(backend.app) as client:
         backend.driver_commands.clear()
         response=client.post('/api/driver-commands',json={
-            'role':'dispatcher','tr_id':131672,'action':'accelerate_safely',
+            'role':'dispatcher','dispatcher_id':'dispatcher-01','tr_id':131672,'action':'accelerate_safely',
             'message':'При возможности сократить отставание без нарушения безопасности.'
         })
         assert response.status_code==201,response.text
         command=response.json()
         assert command['status']=='queued_for_integration'
         assert command['channel']=='local_dispatch_outbox'
+        assert command['dispatcher']['id']=='dispatcher-01'
         commands=client.get('/api/driver-commands',params={'tr_id':131672})
         assert commands.status_code==200
         assert commands.json()['items'][0]['id']==command['id']
@@ -79,6 +80,31 @@ def test_control_room_loads_leaflet_stylesheet():
         response=client.get('/')
         assert response.status_code==200
         assert '/static/vendor/leaflet/leaflet.css' in response.text
+
+
+def test_map_module_tolerates_dispatcher_page_without_legacy_controls():
+    source=(Path('dashboard')/'map.js').read_text(encoding='utf-8')
+    assert "getElementById('map-all-routes')?.checked" in source
+    assert "getElementById('map-empty')?.classList" in source
+
+
+def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
+    with TestClient(backend.app) as client:
+        response=client.post('/api/mode',json={'mode':'replay'})
+        assert response.status_code==200
+        snapshot=client.get('/api/state').json()
+        assert len(snapshot['vehicles'])==11
+        assert {v['source'] for v in snapshot['vehicles']}=={'historical_archive'}
+        assert all(v['prediction_s'] is not None for v in snapshot['vehicles'])
+
+
+def test_dispatcher_profiles_are_available_for_local_workspaces():
+    with TestClient(backend.app) as client:
+        response=client.get('/api/dispatchers')
+        assert response.status_code==200
+        profiles=response.json()['profiles']
+        assert len(profiles)>=2
+        assert {'id','name','role'}<=set(profiles[0])
 
 
 def test_ml_rejects_nonfinite_and_missing_features():

@@ -12,6 +12,7 @@
   const arrival=v=>v?new Date(v).toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}):'—';
   function notify(message='') {
     const node=document.getElementById('map-tile-notice');
+    if(!node)return;
     node.textContent=message;node.hidden=!message;
   }
   function content(v) {
@@ -22,7 +23,7 @@
     return L.divIcon({className:'transit-marker',iconSize:[32,32],iconAnchor:[16,16],popupAnchor:[0,-19],html:`<span class="transit-marker-icon" style="--vehicle-color:${colors[v.level]||colors.unknown}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="3" width="14" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5 12h14M8 19v2m8-2v2M9 6h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8.5" cy="15.5" r="1" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1" fill="currentColor"/></svg></span>`});
   }
   function styleRoutes() {
-    const activeIds=new Set(vehicles.map(v=>v.tr_id)),all=document.getElementById('map-all-routes').checked;
+    const activeIds=new Set(vehicles.map(v=>v.tr_id)),all=document.getElementById('map-all-routes')?.checked??false;
     for(const [id,line] of routes) {
       const selected=id===selection,visible=all||selected||activeIds.has(id)||!vehicles.length;
       line.setStyle({color:selected?'#0f62fe':'#788e80',weight:selected?4:2,opacity:visible ? (selected ? .9 : selection!==null ? .2 : .4) : 0});
@@ -48,8 +49,8 @@
     tiles.on('tileerror',()=>{failedTiles++;notify('Подложка недоступна. Линии и транспорт остаются на карте.');});
     tiles.on('tileload',()=>{loadedTiles++;});
     tiles.on('load',()=>{if(loadedTiles>0&&!failedTiles)notify();});
-    document.getElementById('map-fit').onclick=fit;
-    document.getElementById('map-all-routes').onchange=styleRoutes;
+    const fitButton=document.getElementById('map-fit');if(fitButton)fitButton.onclick=fit;
+    const allRoutes=document.getElementById('map-all-routes');if(allRoutes)allRoutes.onchange=styleRoutes;
     new ResizeObserver(()=>map.invalidateSize({pan:false})).observe(document.getElementById('map'));
   }
   function render(nextVehicles,nextNetwork,nextSelection) {
@@ -67,7 +68,7 @@
       bounds=all.length?L.latLngBounds(all):null;
     }
     const positioned=vehicles.filter(valid),ids=new Set(positioned.map(v=>v.tr_id));
-    document.getElementById('map-empty').classList.toggle('show',!positioned.length);
+    document.getElementById('map-empty')?.classList.toggle('show',!positioned.length);
     for(const [id,marker] of markers)if(!ids.has(id)){marker.remove();markers.delete(id);}
     for(const vehicle of positioned) {
       let marker=markers.get(vehicle.tr_id);

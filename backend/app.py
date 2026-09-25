@@ -17,8 +17,12 @@ ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};counters=defaultdict(int);driver_commands=deque(maxlen=200)
-deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0}
+deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
+DISPATCHER_PROFILES=[
+    {'id':'dispatcher-01','name':'Диспетчер №01','role':'Маршрутный диспетчер'},
+    {'id':'dispatcher-02','name':'Диспетчер №02','role':'Старший диспетчер'},
+]
 
 class Telemetry(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
@@ -58,6 +62,7 @@ class AdminSimulation(BaseModel):
 
 class DriverCommand(BaseModel):
     role:str=Field(pattern='^(dispatcher|admin)$')
+    dispatcher_id:str=Field(pattern='^dispatcher-\\d{2}$')
     tr_id:int=Field(gt=0)
     action:str=Field(pattern='^(contact|maintain|accelerate_safely|slow_down_safely)$')
     message:str=Field(min_length=5,max_length=300)
@@ -103,6 +108,32 @@ def route_risk(items):
 
 def incidents(items):
     return [dict(vehicle_id=int(v['tr_id']),route_id=int(v['tr_id']),level=v.get('level','unknown'),prediction_s=v.get('prediction_s'),late_probability=v.get('late_probability'),reason=v.get('reason'),stop_address=v.get('stop_address'),source=v.get('source'),recommendation=v.get('recommendation')) for v in sorted(items,key=lambda x:({'high':0,'medium':1,'low':2,'unknown':3}[x.get('level','unknown')],-(x.get('late_probability') or -1))) if v.get('level') in {'high','medium'}]
+
+def load_historical_snapshot():
+    """Build the dispatcher default view from the latest archived point per route."""
+    vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+    snapshot=points.sort_values('T').groupby('tr_id',as_index=False).tail(1).sort_values('tr_id')
+    for _,point in snapshot.iterrows():
+        tr=int(point['tr_id']);event_time=point['T'];t=epoch(event_time)
+        stop_rows=schedule[(schedule.tr_id==tr)&(schedule.tt_action_item_id==int(point['target_stop_id']))]
+        if stop_rows.empty:continue
+        stop=stop_rows.sort_values('ts').iloc[0]
+        records=traffic[(traffic.tr_id==tr)&(traffic.ts<=t)&(traffic.ts>=t-600)]
+        valid=records[records.location_valid].dropna(subset=['lon','lat'])
+        last=valid.iloc[-1] if not valid.empty else None
+        prediction=float(point.cur_dev_s)
+        probability=float(1/(1+np.exp(-(prediction-120)/45)))
+        level='high' if probability>=.7 else 'medium' if probability>=.35 else 'low'
+        address='Контрольная точка не указана' if pd.isna(stop.building_address) else str(stop.building_address)
+        vehicles[tr]=dict(
+            tr_id=tr,T=timestamp(event_time).isoformat(),target_time_begin=timestamp(point.target_time_begin).isoformat(),
+            target_stop_id=int(point.target_stop_id),stop_address=address,prediction_s=prediction,
+            lower_s=prediction-104.78,upper_s=prediction+104.78,late_probability=probability,level=level,
+            reason='Историческое отклонение по архивной телеметрии',recommendation='Связаться с водителем и уточнить обстановку' if level in {'high','medium'} else 'Продолжить наблюдение',
+            source='historical_archive',model='v5',degraded=False,stale=False,position_time=float(last.ts) if last is not None else None,
+            lon=float(last.lon) if last is not None else None,lat=float(last.lat) if last is not None else None,
+        )
+    state.update(mode='replay',clock=timestamp(snapshot['T'].max()).isoformat(),index=len(points),snapshot=True)
 
 def match_stop(tr_id, lon, lat):
     candidates=schedule[schedule.tr_id==tr_id].dropna(subset=['lon','lat']).sort_values('ts')
@@ -197,6 +228,7 @@ async def lifespan(app):
     mapping={int(r.unit_id):int(r.tr_id) for r in ids.itertuples()}
     mapping.update({int(k):int(v) for k,v in json.loads(os.getenv('UNIT_MAP','{}')).items()})
     client=httpx.AsyncClient(timeout=2)
+    load_historical_snapshot()
     server=await asyncio.start_server(lambda r,w:handle(r,w,on_ndtp,counters),'0.0.0.0',int(os.getenv('NDTP_PORT','9201')))
     yield
     server.close();await server.wait_closed();await client.aclose()
@@ -205,6 +237,9 @@ app=FastAPI(title='Предиктор движения — Backend',version='1.0
 
 @app.get('/health')
 async def health():return {'status':'ok','mode':state['mode']}
+
+@app.get('/api/dispatchers')
+async def dispatchers():return {'profiles':DISPATCHER_PROFILES,'authentication':'local_profile_selection'}
 
 @app.post('/api/telemetry')
 async def telemetry(events:list[Telemetry]):
@@ -230,13 +265,18 @@ async def mode(body:Mode):
     global schedule,live_schedule_day
     async with lock:
         schedule=schedule_template.copy();live_schedule_day=None
-        state.update(mode=body.mode,index=0,clock=None);vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+        if body.mode=='replay':load_historical_snapshot()
+        else:
+            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
     return state
 
 @app.post('/api/replay/step')
 async def replay():
     async with lock:
         if state['mode']!='replay':raise HTTPException(409,'Switch to replay mode first')
+        if state.get('snapshot'):
+            vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+            state.update(index=0,clock=None,snapshot=False)
         i=state['index']
         if i>=len(points):return {'done':True,**state}
         p=points.iloc[i].to_dict();t=epoch(p['T'])
@@ -252,7 +292,7 @@ async def get_state():
     output=[]
     for original in list(vehicles.values()):
         v=dict(original)
-        if now-epoch(v['T'])>120:
+        if v.get('source')!='historical_archive' and now-epoch(v['T'])>120:
             v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
         output.append(v)
     return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points)}
@@ -291,6 +331,8 @@ async def get_driver_commands(tr_id:int|None=None):
 
 @app.post('/api/driver-commands',status_code=201)
 async def queue_driver_command(body:DriverCommand):
+    dispatcher=next((profile for profile in DISPATCHER_PROFILES if profile['id']==body.dispatcher_id),None)
+    if dispatcher is None:raise HTTPException(422,'Unknown dispatcher profile')
     action_titles={
         'contact':'Связаться с водителем',
         'maintain':'Продолжать по графику',
@@ -299,7 +341,7 @@ async def queue_driver_command(body:DriverCommand):
     }
     command={
         'id':f"cmd-{int(time.time()*1000)}-{len(driver_commands)+1}",
-        'tr_id':body.tr_id,'role':body.role,'action':body.action,
+        'tr_id':body.tr_id,'role':body.role,'dispatcher':dispatcher,'action':body.action,
         'action_title':action_titles[body.action],'message':body.message,
         'created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
         'status':'queued_for_integration','channel':'local_dispatch_outbox',
@@ -356,7 +398,7 @@ async def metrics():
 app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
 
 @app.get('/')
-async def index():return FileResponse(ROOT/'dashboard/control.html')
+async def index():return FileResponse(ROOT/'dashboard/dispatcher.html')
 
 @app.get('/admin')
 async def admin_page():return FileResponse(ROOT/'dashboard/admin-control.html')
