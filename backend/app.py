@@ -1,12 +1,12 @@
 """Dispatcher backend: NDTP/JSON -> causal features -> independent ML service."""
-import asyncio, json, os, sqlite3, time, uuid
+import asyncio, json, logging, math, os, sqlite3, time, uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 import httpx
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,7 +21,9 @@ history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};c
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
-simulation_runs={};simulation_tasks=set()
+simulation_runs={};simulation_tasks={}
+runtime_stats={'started_at':time.time(),'requests_total':0,'requests_errors':0,'recent_request_ms':deque(maxlen=500)}
+logger=logging.getLogger('takt.backend')
 
 class Telemetry(BaseModel):
     """One HTTP telemetry event for a vehicle registered in the plan."""
@@ -91,6 +93,10 @@ class SimulationCreate(BaseModel):
     count:int=Field(default=5,ge=1,le=20,description='Число событий в запуске.')
     interval_s:int=Field(default=30,ge=5,le=300,description='Интервал событий, секунды.')
 
+class SimulationCancel(BaseModel):
+    """Cancellation request for one running local simulation."""
+    dispatcher_id:str=Field(pattern='^(admin|dispatcher)-\\d{2}$',description='Профиль оператора; отмена доступна только администратору.',examples=['admin-01'])
+
 def _account(row):
     return {'id':row['id'],'name':row['name'],'login':row['login'],'role':row['role'],'status':row['status']}
 
@@ -126,6 +132,20 @@ def list_dispatchers():
 def save_simulation(run):
     db.execute('INSERT OR REPLACE INTO simulations(id,payload,created_at) VALUES(?,?,?)',(run['id'],json.dumps(clean(run),ensure_ascii=False),run['created_at']))
     db.commit()
+
+def stored_simulations(status=None,tr_id=None,limit=50):
+    """Read durable scenario history with conservative server-side filters."""
+    rows=db.execute('SELECT payload FROM simulations ORDER BY created_at DESC').fetchall()
+    items=[json.loads(row['payload']) for row in rows]
+    if status: items=[item for item in items if item.get('status')==status]
+    if tr_id is not None: items=[item for item in items if item.get('tr_id')==tr_id]
+    return items[:limit]
+
+def live_track(tr_id,limit=100):
+    """Return recent valid GPS points, preserving simulated-point provenance."""
+    rows=[row for row in history[tr_id] if row.get('location_valid') and np.isfinite(row.get('lon',np.nan)) and np.isfinite(row.get('lat',np.nan))]
+    return [clean({'lon':row['lon'],'lat':row['lat'],'event_time':timestamp(row['event_time']).isoformat(),
+                   'simulated':bool(row.get('simulated',False))}) for row in rows[-limit:]]
 
 def align_schedule_to_event_day(frame, event_time):
     """Move a historical day-plan to the local calendar day of live telemetry."""
@@ -205,13 +225,42 @@ def load_historical_snapshot():
         vehicles[tr]=dict(snapshot_vehicle)
     state.update(mode='replay',clock=timestamp(snapshot['T'].max()).isoformat(),index=len(points),snapshot=True)
 
+def _segment_projection(lon,lat,start_lon,start_lat,end_lon,end_lat):
+    """Project WGS84 coordinates onto a short planned segment in local metres."""
+    scale_x=111_320*math.cos(math.radians((lat+start_lat+end_lat)/3))
+    scale_y=110_540
+    ax=(end_lon-start_lon)*scale_x;ay=(end_lat-start_lat)*scale_y
+    px=(lon-start_lon)*scale_x;py=(lat-start_lat)*scale_y
+    length_sq=ax*ax+ay*ay
+    fraction=0 if length_sq==0 else min(1,max(0,(px*ax+py*ay)/length_sq))
+    projected_lon=start_lon+(end_lon-start_lon)*fraction
+    projected_lat=start_lat+(end_lat-start_lat)*fraction
+    distance=math.hypot(px-ax*fraction,py-ay*fraction)
+    return fraction,projected_lon,projected_lat,distance
+
 def match_stop(tr_id, lon, lat):
     candidates=schedule[schedule.tr_id==tr_id].dropna(subset=['lon','lat']).sort_values('ts')
     if candidates.empty:return None
-    distances=candidates.apply(lambda row:haversine(lon,lat,row.lon,row.lat),axis=1)
-    index=distances.idxmin();position=int(candidates.index.get_loc(index));row=candidates.loc[index]
-    distance=float(distances.loc[index])
-    return {'tr_id':int(tr_id),'stop_id':int(row.tt_action_item_id),'stop_address':str(row.building_address),'distance_m':round(distance,2),'segment_index':position,'next_stop_id':int(candidates.iloc[min(position+1,len(candidates)-1)].tt_action_item_id),'confidence':round(max(0.,1-distance/250),3)}
+    if len(candidates)==1:
+        row=candidates.iloc[0];distance=haversine(lon,lat,row.lon,row.lat)
+        return {'tr_id':int(tr_id),'match_kind':'planned_stop','road_graph_matched':False,'stop_id':int(row.tt_action_item_id),'stop_address':str(row.building_address),'distance_m':round(distance,2),'segment_index':0,'next_stop_id':int(row.tt_action_item_id),'confidence':round(max(0.,1-distance/250),3)}
+    best=None
+    rows=list(candidates.itertuples())
+    for position,(start,end) in enumerate(zip(rows,rows[1:])):
+        fraction,projected_lon,projected_lat,distance=_segment_projection(lon,lat,start.lon,start.lat,end.lon,end.lat)
+        if best is None or distance<best['distance']:
+            heading=(math.degrees(math.atan2((end.lon-start.lon)*math.cos(math.radians((start.lat+end.lat)/2)),end.lat-start.lat))+360)%360
+            best={'position':position,'start':start,'end':end,'fraction':fraction,'lon':projected_lon,'lat':projected_lat,'distance':distance,'heading':heading}
+    start,end=best['start'],best['end']
+    nearest=start if best['fraction']<.5 else end
+    distance_to_next=haversine(best['lon'],best['lat'],end.lon,end.lat)
+    return {'tr_id':int(tr_id),'match_kind':'planned_trajectory_segment','road_graph_matched':False,
+            'stop_id':int(nearest.tt_action_item_id),'stop_address':str(nearest.building_address),
+            'distance_m':round(best['distance'],2),'segment_index':best['position'],
+            'segment_start_stop_id':int(start.tt_action_item_id),'next_stop_id':int(end.tt_action_item_id),
+            'projected_lon':round(best['lon'],7),'projected_lat':round(best['lat'],7),
+            'distance_to_next_stop_m':round(distance_to_next,2),'direction_degrees':round(best['heading'],1),
+            'direction':'along_planned_trajectory','confidence':round(max(0.,1-best['distance']/250),3)}
 
 async def forecast(point,records,source):
     t=epoch(point['T']);tr=int(point['tr_id'])
@@ -314,10 +363,57 @@ app=FastAPI(title='Такт — Backend API',version='1.0.0',lifespan=lifespan,
     description=DESCRIPTION,openapi_tags=TAGS,docs_url='/docs/swagger',
     swagger_ui_parameters={'docExpansion':'none','displayRequestDuration':True,'filter':True})
 
+@app.middleware('http')
+async def observe_request(request:Request,call_next):
+    """Keep bounded in-process request timings for the operations endpoint."""
+    started=time.perf_counter()
+    status=500
+    try:
+        response=await call_next(request)
+        status=response.status_code
+        if status>=500:runtime_stats['requests_errors']+=1
+        return response
+    except Exception:
+        runtime_stats['requests_errors']+=1
+        raise
+    finally:
+        runtime_stats['requests_total']+=1
+        elapsed=round((time.perf_counter()-started)*1000,2)
+        runtime_stats['recent_request_ms'].append(elapsed)
+        logger.info(json.dumps({'event':'http_request','method':request.method,'path':request.url.path,'status':status,'latency_ms':elapsed},ensure_ascii=False))
+
 @app.get('/health',**operation('health'))
 async def health():
     """Report backend availability and the current shared source mode."""
     return {'status':'ok','mode':state['mode']}
+
+@app.get('/health/ready',**operation('readiness'))
+async def readiness():
+    """Check dependencies required to serve forecasts, including the ML API."""
+    checks={'schedule':schedule is not None and not schedule.empty,'traffic':traffic is not None and not traffic.empty,
+            'points':points is not None and not points.empty,'sqlite':db is not None,
+            'artifacts':(ARTIFACT/'metrics.json').exists() and (ARTIFACT/'model_v5.json').exists()}
+    try:
+        response=await client.get(ML_URL+'/health')
+        checks['ml_api']=response.is_success
+    except httpx.HTTPError:
+        checks['ml_api']=False
+    ready=all(checks.values())
+    if not ready:raise HTTPException(503,{'status':'not_ready','checks':checks})
+    return {'status':'ready','checks':checks}
+
+@app.get('/api/observability',**operation('observability'))
+async def observability():
+    """Expose bounded local runtime measurements for a collector or dashboard."""
+    latencies=list(runtime_stats['recent_request_ms'])
+    return {'status':'ok','uptime_s':round(time.time()-runtime_stats['started_at'],2),
+            'requests_total':runtime_stats['requests_total'],'requests_errors':runtime_stats['requests_errors'],
+            'request_latency_ms':{'samples':len(latencies),'last':latencies[-1] if latencies else None,
+                                  'avg':round(sum(latencies)/len(latencies),2) if latencies else None,
+                                  'max':max(latencies,default=None)},
+            'queues':{'telemetry_points_in_memory':sum(len(items) for items in history.values()),
+                      'driver_commands_in_memory':len(driver_commands),'active_simulations':sum(run.get('status') in {'queued','running'} for run in simulation_runs.values())},
+            'counters':dict(counters)}
 
 @app.get('/api/dispatchers',**operation('dispatchers'))
 async def dispatchers():return {'profiles':list_dispatchers(),'authentication':'managed_local_accounts'}
@@ -409,6 +505,8 @@ async def get_state(dispatcher_id:str|None=None):
     output=[]
     for original in sorted(merged.values(),key=lambda item:(not item.get('live_position',False),int(item['tr_id']))):
         v=dict(original)
+        track=live_track(int(v['tr_id']))
+        if track:v['live_track']=track
         if v.get('source')!='historical_archive' and now-epoch(v['T'])>120:
             v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
         output.append(v)
@@ -474,7 +572,7 @@ async def queue_driver_command(body:DriverCommand):
 
 @app.get('/api/admin/simulation',**operation('simulation_status'))
 async def simulation_status():
-    return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':list(simulation_runs.values())[:10]}
+    return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':stored_simulations(limit=10)}
 
 async def execute_simulation(run):
     run['status']='running';run['started_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
@@ -490,9 +588,12 @@ async def execute_simulation(run):
         speed={'normal':35,'slow':8,'stop':0}[run['scenario']]
         now=time.time()-run['count']*run['interval_s']
         for index in range(run['count']):
-            event={'tr_id':run['tr_id'],'event_time':timestamp(now+index*run['interval_s']).isoformat(),'lon':lon+index*0.00005,'lat':lat+index*0.00003,'speed':speed,'location_valid':True}
+            if run.get('cancel_requested'):
+                run['status']='cancelled';run['cancelled_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
+                return
+            event={'tr_id':run['tr_id'],'event_time':timestamp(now+index*run['interval_s']).isoformat(),'lon':lon+index*0.00005,'lat':lat+index*0.00003,'speed':speed,'location_valid':True,'simulated':True,'simulation_id':run['id']}
             await ingest(event)
-            run['events'].append({'sequence':index+1,'event_time':event['event_time'],'lon':event['lon'],'lat':event['lat'],'speed_kmh':speed,'accepted':True})
+            run['events'].append({'sequence':index+1,'event_time':event['event_time'],'lon':event['lon'],'lat':event['lat'],'speed_kmh':speed,'accepted':True,'simulated':True})
             run['progress']={'completed':index+1,'total':run['count']}
             save_simulation(run)
             await asyncio.sleep(.05)
@@ -501,6 +602,8 @@ async def execute_simulation(run):
         run['status']='completed';run['completed_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
     except Exception as exc:
         run['status']='failed';run['error']=str(exc);run['completed_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
+    finally:
+        simulation_tasks.pop(run['id'],None)
 
 @app.post('/api/admin/simulations',status_code=202,**operation('create_simulation'))
 async def create_simulation(body:SimulationCreate):
@@ -509,12 +612,15 @@ async def create_simulation(body:SimulationCreate):
     if state['mode']!='live':raise HTTPException(409,'Switch to live mode before starting simulation')
     run={'id':f"sim-{uuid.uuid4().hex[:10]}",'status':'queued','created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),'operator':operator,'tr_id':body.tr_id,'scenario':body.scenario,'count':body.count,'interval_s':body.interval_s,'progress':{'completed':0,'total':body.count},'events':[],'effect':None}
     simulation_runs[run['id']]=run;save_simulation(run)
-    task=asyncio.create_task(execute_simulation(run));simulation_tasks.add(task);task.add_done_callback(simulation_tasks.discard)
+    task=asyncio.create_task(execute_simulation(run));simulation_tasks[run['id']]=task
     return run
 
 @app.get('/api/admin/simulations',**operation('list_simulations'))
-async def list_simulations():
-    return {'items':list(simulation_runs.values()),'mode':state['mode']}
+async def list_simulations(status:str|None=None,tr_id:int|None=None,limit:int=50):
+    if status is not None and status not in {'queued','running','completed','cancelled','failed'}:raise HTTPException(422,'Unknown simulation status filter')
+    if tr_id is not None and tr_id<=0:raise HTTPException(422,'tr_id must be positive')
+    if not 1<=limit<=200:raise HTTPException(422,'limit must be 1..200')
+    return {'items':stored_simulations(status,tr_id,limit),'mode':state['mode'],'filters':{'status':status,'tr_id':tr_id,'limit':limit}}
 
 @app.get('/api/admin/simulations/{run_id}',**operation('get_simulation'))
 async def get_simulation(run_id:str):
@@ -523,6 +629,21 @@ async def get_simulation(run_id:str):
         row=db.execute('SELECT payload FROM simulations WHERE id=?',(run_id,)).fetchone()
         if row is None:raise HTTPException(404,'Simulation not found')
         return json.loads(row['payload'])
+    return run
+
+@app.post('/api/admin/simulations/{run_id}/cancel',**operation('cancel_simulation'))
+async def cancel_simulation(run_id:str,body:SimulationCancel):
+    operator=get_dispatcher(body.dispatcher_id)
+    if operator is None or operator['role']!='Администратор':raise HTTPException(403,'Admin account required')
+    run=simulation_runs.get(run_id)
+    if run is None:
+        row=db.execute('SELECT payload FROM simulations WHERE id=?',(run_id,)).fetchone()
+        if row is None:raise HTTPException(404,'Simulation not found')
+        run=json.loads(row['payload'])
+        if run.get('status') in {'completed','cancelled','failed'}:raise HTTPException(409,'Simulation is already terminal')
+        raise HTTPException(409,'Simulation is not active in this backend process')
+    if run['status'] in {'completed','cancelled','failed'}:raise HTTPException(409,'Simulation is already terminal')
+    run['cancel_requested']=True;run['cancel_requested_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();run['cancelled_by']=operator['id'];save_simulation(run)
     return run
 
 @app.post('/api/admin/simulation',**operation('legacy_simulation'))

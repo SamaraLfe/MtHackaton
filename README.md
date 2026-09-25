@@ -103,19 +103,22 @@ docker compose up -d --build
 - `POST /api/predict` — `{tr_id,T,target_stop_id,target_time_begin,cur_dev_s}`; проверяется первая остановка планового окна, признаки строятся из принятой истории.
 - `POST /api/replay/step` — следующий исторический прогноз.
 - `POST /api/mode` — `{"mode":"live"}` или `{"mode":"replay"}`.
-- `GET /api/state?dispatcher_id=…`, `/api/network`, `/api/metrics`, `/api/risk`, `/api/incidents`, `/health`.
-- `POST /api/map-match` — ближайшая плановая остановка, сегмент, расстояние и confidence для координат ТС.
+- `GET /api/state?dispatcher_id=…`, `/api/network`, `/api/metrics`, `/api/risk`, `/api/incidents`, `/health`, `/health/ready`, `/api/observability`.
+- `POST /api/map-match` — сегмент плановой траектории, направление и расстояние до следующей остановки; без дорожного графа это не road map matching.
 - `POST /api/what-if` — сценарий выпуска дополнительных ТС и снижения интервала.
 - `GET /api/driver-commands?tr_id=…` — журнал указаний для выбранного ТС.
 - `POST /api/driver-commands` — диспетчер регистрирует указание `contact`, `maintain`, `accelerate_safely` или `slow_down_safely`; команда видна в карточке ТС и имеет статус очереди интеграции.
 - `GET /api/dispatchers`, `POST /api/admin/dispatchers`, `PUT /api/admin/dispatchers/{id}/assignments` — локальные кабинеты и назначения рейсов.
-- `POST /api/admin/simulations`, `GET /api/admin/simulations/{id}` — тестовая симуляция с жизненным циклом, прогрессом, событиями и эффектом до/после. Старый `/api/admin/simulation` оставлен для совместимости.
+- `POST /api/admin/simulations`, `GET /api/admin/simulations?status=…&tr_id=…`, `GET /api/admin/simulations/{id}`, `POST /api/admin/simulations/{id}/cancel` — тестовая симуляция с жизненным циклом, отменой, историей SQLite, прогрессом, событиями и эффектом до/после. Старый `/api/admin/simulation` оставлен для совместимости.
 - Админская панель: `http://localhost:8080/admin`. Это локальные управляемые кабинеты, а не production SSO/JWT.
 - ML `POST /predict_v5` — основной endpoint V5: prediction point + causal NDTP history + schedule; `/health` сообщает загруженную модель. Legacy `POST /predict` сохранён для совместимости.
 
 Полный интеграционный контроль запущенных локальных сервисов: `python scripts/verify_running.py`. Он сбрасывает replay, проверяет все 151 точки против submission, посылает фрагментированный TCP-пакет и пакет с ошибочным CRC, сохраняет задержки запросов в `artifacts/verification.json`.
 
 Сохранённые OpenAPI-спецификации находятся в `docs/`. Не публикуйте этот локальный MVP в интернет без добавления авторизации.
+
+Подробный план перехода в рабочий контур, включая SSO, актуальное расписание,
+дорожный map matching, связь с водителем, нагрузку и сдачу: [docs/production-readiness.md](docs/production-readiness.md).
 
 ## Документация кода (Sphinx)
 

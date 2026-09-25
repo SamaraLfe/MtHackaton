@@ -344,18 +344,18 @@ projected_late_probability = max_late_probability × risk_multiplier</code></pre
   </section>
 
   <section id="map-match">
-    <div class="endpoint"><span class="method post">POST</span><code>/api/map-match</code><span class="service">Backend · не меняет состояние</span></div><h2>Ближайшая плановая остановка</h2>
-    <p>Находит ближайшую по расстоянию по прямой остановку в расписании выбранного ТС. Используйте для приблизительной привязки координат к плану. Привязка к дорожному графу не выполняется.</p>
+    <div class="endpoint"><span class="method post">POST</span><code>/api/map-match</code><span class="service">Backend · не меняет состояние</span></div><h2>Сегмент плановой траектории</h2>
+    <p>Проецирует координату на ближайший отрезок между последовательными плановыми остановками выбранного ТС. Ответ даёт участок, направление и расстояние до следующей остановки по этой прямой. Привязка к дорожному графу не выполняется: для неё нужна утверждённая дорожная геометрия.</p>
     <p>Все три поля обязательны: <code>tr_id</code> — целое число больше 0, <code>lon</code> — долгота от −180 до 180, <code>lat</code> — широта от −90 до 90.</p>
     <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/map-match" \
   -H 'Content-Type: application/json' \
   -d '{"tr_id":131672,"lon":37.60,"lat":55.75}'</code></pre>
     <div class="table-wrap"><table><thead><tr><th>Поле ответа 200</th><th>Значение</th></tr></thead><tbody>
       <tr><td><code>tr_id</code>, <code>stop_id</code>, <code>stop_address</code></td><td>ТС и найденная остановка.</td></tr>
-      <tr><td><code>distance_m</code></td><td>Расстояние по прямой до остановки, округлённое до сотых метра.</td></tr>
-      <tr><td><code>segment_index</code></td><td>Индекс найденной остановки с нуля в последовательности плановых остановок с координатами, отсортированной по времени.</td></tr>
-      <tr><td><code>next_stop_id</code></td><td>Следующая остановка в этой последовательности. Для последней совпадает с <code>stop_id</code>.</td></tr>
-      <tr><td><code>confidence</code></td><td><code>max(0, 1 - distance_m / 250)</code>, округлено до тысячных. Оценка близости, не калиброванная вероятность правильной привязки.</td></tr>
+      <tr><td><code>segment_start_stop_id</code>, <code>next_stop_id</code></td><td>Начальная и следующая остановка ближайшего планового сегмента.</td></tr>
+      <tr><td><code>projected_lon</code>, <code>projected_lat</code></td><td>Координата проекции на сегмент; <code>distance_m</code> — поперечное расстояние до неё.</td></tr>
+      <tr><td><code>distance_to_next_stop_m</code>, <code>direction_degrees</code></td><td>Расстояние от проекции до следующей остановки и направление планового сегмента.</td></tr>
+      <tr><td><code>road_graph_matched</code></td><td>Всегда <code>false</code> для текущего набора: результат не является дорожным map matching.</td></tr>
     </tbody></table></div>
     <p>При расстоянии 250 м и больше ответ всё ещё может быть <code>200</code>, но <code>confidence = 0</code>. <code>404</code> означает отсутствие геометрии для ТС, <code>422</code> — неверные поля запроса.</p>
   </section>
@@ -419,17 +419,21 @@ projected_late_probability = max_late_probability × risk_multiplier</code></pre
 
   <section id="simulation-runs">
     <div class="endpoint"><span class="method post">POST</span><code>/api/admin/simulations</code><span class="service">Backend · асинхронный запуск</span></div><h2>Асинхронная симуляция</h2>
-    <p>Основной метод административного контура. Он создаёт запуск в SQLite и сразу отвечает <code>202</code> с идентификатором <code>sim-…</code>. Затем фоновая задача меняет <code>status</code> с <code>queued</code> на <code>running</code>, добавляет синтетические события и завершает запуск как <code>completed</code> или <code>failed</code>.</p>
+    <p>Основной метод административного контура. Он создаёт запуск в SQLite и сразу отвечает <code>202</code> с идентификатором <code>sim-…</code>. Затем фоновая задача меняет <code>status</code> с <code>queued</code> на <code>running</code>, добавляет синтетические события и завершает запуск как <code>completed</code>, <code>cancelled</code> или <code>failed</code>. Точки запуска помечены <code>simulated: true</code> и отображаются на карте отдельной фиолетовой пунктирной линией.</p>
     <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/admin/simulations" \
   -H 'Content-Type: application/json' \
   -d '{"dispatcher_id":"admin-01","tr_id":131672,"scenario":"slow","count":5,"interval_s":30}'</code></pre>
     <p>Запуск разрешён только профилю с точной ролью <code>Администратор</code> и при <code>mode: "live"</code>. <code>normal</code>, <code>slow</code> и <code>stop</code> используют 35, 8 и 0 км/ч. <code>count</code> — от 1 до 20, <code>interval_s</code> — от 5 до 300 секунд.</p>
-    <pre data-language="Shell"><code># Список запусков текущего backend
-curl -sS "$TAKT_URL/api/admin/simulations"
+    <pre data-language="Shell"><code># История SQLite: фильтр статуса, ТС и ограничение размера
+curl -sS "$TAKT_URL/api/admin/simulations?status=completed&amp;tr_id=131672&amp;limit=50"
 
 # Статус и результат одного запуска; доступен и после перезапуска backend
-curl -sS "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx"</code></pre>
-    <p>Объект запуска содержит <code>operator</code>, <code>progress</code> с completed/total, массив <code>events</code> и <code>effect</code> с прогнозом, вероятностью и уровнем до/после. После перезапуска список активной памяти может стать пустым, но запрос по id читает сохранённую запись из SQLite. Ошибки: <code>403</code> — не администратор, <code>409</code> — выбран replay, <code>404</code> — неизвестный id при чтении.</p>
+curl -sS "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx"
+
+# Отменить активный запуск; остановка произойдёт перед следующим событием
+curl -sS -X POST "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx/cancel" \
+  -H 'Content-Type: application/json' -d '{"dispatcher_id":"admin-01"}'</code></pre>
+    <p>Объект запуска содержит <code>operator</code>, <code>progress</code> с completed/total, массив <code>events</code> и <code>effect</code> с прогнозом, вероятностью и уровнем до/после. История читается из SQLite и переживает перезапуск. Ошибки: <code>403</code> — не администратор, <code>409</code> — выбран replay, повторная отмена или запуск уже от предыдущего процесса, <code>404</code> — неизвестный id при чтении.</p>
   </section>
 
   <section id="simulation-create">

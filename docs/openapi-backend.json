@@ -12,8 +12,51 @@
           "Состояние"
         ],
         "summary": "Проверить доступность backend",
-        "description": "Возвращает `status: ok` и текущий режим. Ответ не подтверждает доступность ML или наличие входящего NDTP-потока; для этого смотрите `GET /api/state`.",
+        "description": "Возвращает `status: ok` и текущий режим. Ответ не подтверждает доступность ML или наличие входящего NDTP-потока; для этого используйте readiness и runtime-метрики.",
         "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "Состояние"
+        ],
+        "summary": "Проверить готовность к прогнозу",
+        "description": "Проверяет загруженные расписание, телеметрию и контрольные точки, SQLite, артефакты V5 и доступность ML API. Возвращает 503 с деталями checks, когда хотя бы одна обязательная зависимость недоступна.",
+        "operationId": "readiness_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "503": {
+            "description": "Хотя бы одна обязательная зависимость не готова."
+          }
+        }
+      }
+    },
+    "/api/observability": {
+      "get": {
+        "tags": [
+          "Состояние"
+        ],
+        "summary": "Получить runtime-метрики",
+        "description": "Возвращает время работы, последние 500 HTTP latency, счётчики ошибок, размер in-memory истории телеметрии, очередь указаний и число активных симуляций. Метрики предназначены для опроса коллектором; после перезапуска накопленные значения сбрасываются.",
+        "operationId": "observability_api_observability_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -308,7 +351,7 @@
           "Состояние"
         ],
         "summary": "Получить картину рейсов",
-        "description": "Возвращает архивный снимок, поверх которого накладывается актуальная live-позиция, а также mode, counters и total_points. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Прогнозы, не являющиеся архивными, старше 120 секунд становятся `stale`/`unknown` в ответе.",
+        "description": "Возвращает архивный снимок, поверх которого накладывается актуальная live-позиция, а также mode, counters и total_points. Для ТС с живыми координатами добавляется `live_track` — до 100 валидных точек, а `simulated: true` отличает тестовую симуляцию. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Прогнозы, не являющиеся архивными, старше 120 секунд становятся `stale`/`unknown` в ответе.",
         "operationId": "get_state_api_state_get",
         "parameters": [
           {
@@ -431,8 +474,8 @@
         "tags": [
           "Карта"
         ],
-        "summary": "Найти ближайшую плановую остановку",
-        "description": "Ищет ближайшую по прямой остановку выбранного ТС и возвращает distance_m, segment_index, next_stop_id и confidence=max(0,1−distance/250). confidence — оценка близости, не вероятность дорожного сопоставления.",
+        "summary": "Сопоставить с сегментом плановой траектории",
+        "description": "Проецирует координату на ближайший сегмент между плановыми остановками и возвращает segment_start_stop_id, next_stop_id, distance_to_next_stop_m и direction_degrees. `road_graph_matched: false`: без дорожной геометрии это сопоставление с плановой траекторией, а не с дорогой.",
         "operationId": "map_match_api_map_match_post",
         "requestBody": {
           "content": {
@@ -595,24 +638,6 @@
       }
     },
     "/api/admin/simulations": {
-      "get": {
-        "tags": [
-          "Симуляции"
-        ],
-        "summary": "Получить запуски текущего процесса",
-        "description": "Возвращает runs, которые ещё есть в памяти текущего backend, и режим. Для конкретного сохранённого run используйте метод по id.",
-        "operationId": "list_simulations_api_admin_simulations_get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          }
-        }
-      },
       "post": {
         "tags": [
           "Симуляции"
@@ -621,14 +646,14 @@
         "description": "Требует существующий профиль с ролью «Администратор» и live mode. Возвращает `202` и run с queued status; затем фоновая задача добавляет события и сохраняет progress, events, effect до/после в SQLite.",
         "operationId": "create_simulation_api_admin_simulations_post",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SimulationCreate"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "202": {
@@ -647,6 +672,71 @@
           },
           "422": {
             "description": "Неверные параметры сценария."
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Получить историю запусков",
+        "description": "Читает сохранённые в SQLite runs, в том числе после перезапуска. Необязательные status, tr_id и limit (1…200) фильтруют историю. Список идёт от новых к старым.",
+        "operationId": "list_simulations_api_admin_simulations_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "tr_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tr Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Неизвестный status, некорректный tr_id или limit."
           }
         }
       }
@@ -681,6 +771,66 @@
           },
           "404": {
             "description": "Симуляция не найдена."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/simulations/{run_id}/cancel": {
+      "post": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Отменить активную симуляцию",
+        "description": "Требует локальный профиль администратора. Помечает run как cancel_requested; фоновая задача останавливается перед следующим событием, сохраняет status `cancelled` и уже обработанные events. Завершённый, отменённый или ошибочный run не меняется.",
+        "operationId": "cancel_simulation_api_admin_simulations__run_id__cancel_post",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulationCancel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Профиль не является администратором."
+          },
+          "404": {
+            "description": "Симуляция не найдена."
+          },
+          "409": {
+            "description": "Симуляция уже завершена либо принадлежит предыдущему процессу."
           },
           "422": {
             "description": "Validation Error",
@@ -1044,6 +1194,25 @@
         "title": "Point",
         "description": "Manual forecast point tied to one scheduled stop in the 10–15 minute window."
       },
+      "SimulationCancel": {
+        "properties": {
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^(admin|dispatcher)-\\d{2}$",
+            "title": "Dispatcher Id",
+            "description": "Профиль оператора; отмена доступна только администратору.",
+            "examples": [
+              "admin-01"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id"
+        ],
+        "title": "SimulationCancel",
+        "description": "Cancellation request for one running local simulation."
+      },
       "SimulationCreate": {
         "properties": {
           "dispatcher_id": {
@@ -1238,7 +1407,7 @@
   "tags": [
     {
       "name": "Состояние",
-      "description": "Доступность backend, снимок рейсов, режим и диагностические счётчики."
+      "description": "Доступность backend, readiness зависимостей, снимок рейсов и диагностические счётчики."
     },
     {
       "name": "Диспетчеры",
@@ -1254,7 +1423,7 @@
     },
     {
       "name": "Карта",
-      "description": "Плановые линии и ближайшая остановка; дорожный граф не используется."
+      "description": "Плановые линии, live-треки и сопоставление с сегментом плановой траектории; дорожный граф не используется."
     },
     {
       "name": "Указания водителю",

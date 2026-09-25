@@ -3,7 +3,7 @@
 (() => {
   'use strict';
   const colors={low:'#198038',medium:'#b28600',high:'#da1e28',unknown:'#6f6f6f'};
-  const markers=new Map(), routes=new Map();
+  const markers=new Map(), routes=new Map(), traces=new Map();
   let map=null,vehicles=[],selection=null,network=null,bounds=null,initialFit=false;
   let onChoose=()=>{},failedTiles=0,loadedTiles=0;
   const escape=value=>String(value??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -30,6 +30,22 @@
       if(selected)line.bringToFront();
     }
     for(const [id,marker] of markers)marker.getElement()?.classList.toggle('selected',id===selection);
+  }
+  function drawTracks() {
+    const visible=new Set();
+    for(const vehicle of vehicles) {
+      const track=(vehicle.live_track||[]).filter(point=>valid(point));
+      if(track.length<2)continue;
+      visible.add(vehicle.tr_id);
+      const live=track.filter(point=>!point.simulated).map(point=>[point.lat,point.lon]);
+      const simulated=track.filter(point=>point.simulated).map(point=>[point.lat,point.lon]);
+      let layer=traces.get(vehicle.tr_id);
+      if(!layer) {layer=L.layerGroup().addTo(map);traces.set(vehicle.tr_id,layer);}
+      layer.clearLayers();
+      if(live.length>1)L.polyline(live,{color:'#51b7ff',weight:3,opacity:.78,dashArray:'7 5',interactive:false}).addTo(layer);
+      if(simulated.length>1)L.polyline(simulated,{color:'#ba8cff',weight:4,opacity:.92,dashArray:'2 7',interactive:false}).addTo(layer);
+    }
+    for(const [id,layer] of traces)if(!visible.has(id)){layer.remove();traces.delete(id);}
   }
   function fit() {
     if(!map)return;
@@ -81,7 +97,10 @@
         markers.set(vehicle.tr_id,marker);
       } else {
         const position=marker.getLatLng();
-        if(position.lat!==vehicle.lat||position.lng!==vehicle.lon)marker.setLatLng([vehicle.lat,vehicle.lon]);
+        if(position.lat!==vehicle.lat||position.lng!==vehicle.lon) {
+          const node=marker.getElement();if(node)node.style.transition='transform .7s linear';
+          marker.setLatLng([vehicle.lat,vehicle.lon]);
+        }
         if(marker.options.level!==vehicle.level)marker.setIcon(icon(vehicle));
         if(marker.getPopup().getContent()!==content(vehicle))marker.setPopupContent(content(vehicle));
       }
@@ -89,6 +108,7 @@
       const node=marker.getElement();if(node){node.setAttribute('role','button');node.setAttribute('aria-label',`ТС ${vehicle.tr_id}: открыть карточку`);node.classList.toggle('live-marker',Boolean(vehicle.live_position));}
     }
     if(!initialFit&&(bounds||positioned.length)){fit();initialFit=true;}
+    drawTracks();
     styleRoutes();
   }
   function focus(id) {

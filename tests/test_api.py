@@ -54,6 +54,9 @@ def test_map_match_and_admin_role_gate():
         ])
         matched=client.post('/api/map-match',json={'tr_id':1,'lon':37.6001,'lat':55.7001}).json()
         assert matched['stop_id']==7 and matched['distance_m']<20
+        assert matched['match_kind']=='planned_trajectory_segment'
+        assert matched['segment_start_stop_id']==7 and matched['next_stop_id']==8
+        assert matched['distance_to_next_stop_m']>0 and matched['road_graph_matched'] is False
         assert client.post('/api/admin/simulation',json={'role':'dispatcher','tr_id':1}).status_code==403
         backend.schedule=saved
 
@@ -160,6 +163,42 @@ def test_simulation_reports_lifecycle_events_and_effect():
         assert run['status']=='completed'
         assert len(run['events'])==2
         assert 'effect' in run and 'after' in run['effect']
+
+
+def test_simulation_can_be_cancelled_and_history_is_filterable():
+    with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'live'})
+        created=client.post('/api/admin/simulations',json={
+            'dispatcher_id':'admin-01','tr_id':131672,'scenario':'slow','count':20,'interval_s':5
+        })
+        assert created.status_code==202,created.text
+        run_id=created.json()['id']
+        cancelled=client.post(f'/api/admin/simulations/{run_id}/cancel',json={'dispatcher_id':'admin-01'})
+        assert cancelled.status_code==200,cancelled.text
+        deadline=time.time()+3
+        while time.time()<deadline:
+            run=client.get(f'/api/admin/simulations/{run_id}').json()
+            if run['status'] in {'cancelled','completed','failed'}:break
+            time.sleep(.05)
+        assert run['status']=='cancelled'
+        history=client.get('/api/admin/simulations',params={'status':'cancelled','tr_id':131672,'limit':10})
+        assert history.status_code==200
+        assert any(item['id']==run_id for item in history.json()['items'])
+
+
+def test_state_exposes_live_track_and_runtime_endpoints():
+    with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'live'})
+        now=time.time()-2
+        event={'tr_id':131672,'event_time':pd.Timestamp(now,unit='s',tz='UTC').isoformat(),'lon':37.6,'lat':55.7,'speed':10}
+        assert client.post('/api/telemetry',json=[event]).status_code==200
+        vehicle=next(v for v in client.get('/api/state').json()['vehicles'] if v['tr_id']==131672)
+        assert vehicle['live_track'][-1]['lon']==37.6
+        metrics=client.get('/api/observability')
+        assert metrics.status_code==200
+        assert metrics.json()['queues']['telemetry_points_in_memory']>=1
+        ready=client.get('/health/ready')
+        assert ready.status_code in {200,503}
 
 
 def test_ml_rejects_nonfinite_and_missing_features():

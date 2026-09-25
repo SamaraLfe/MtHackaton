@@ -1,5 +1,5 @@
 """Integration verification against running localhost services; resets replay state."""
-import json, time, socket, struct, urllib.request
+import json, os, time, socket, struct, urllib.request
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -43,7 +43,9 @@ def main():
     assert after.get('ndtp_packets',0)>before.get('ndtp_packets',0)
     assert after.get('ndtp_errors',0)>before.get('ndtp_errors',0)
     report=dict(replay_points=len(points),submission_rows=len(sub),submission_schema_valid=True,replay_horizon_all_valid=True,replay_request_p50_ms=float(np.median(times)),replay_request_p95_ms=float(np.quantile(times,.95)),replay_request_max_ms=max(times),ndtp_fragmented_frame=True,ndtp_bad_crc_rejected=True,docker_tested=True)
-    Path('artifacts/verification.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+    report_path=Path(os.getenv('VERIFICATION_OUTPUT','artifacts/verification.json'))
+    report_path.parent.mkdir(parents=True,exist_ok=True)
+    report_path.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps(report,indent=2))
     post('/api/mode',{'mode':'replay'})
 
