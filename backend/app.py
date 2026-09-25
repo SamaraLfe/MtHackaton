@@ -1,5 +1,5 @@
 """Dispatcher backend: NDTP/JSON -> causal features -> independent ML service."""
-import asyncio, json, os, time
+import asyncio, json, os, sqlite3, time, uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,10 +19,8 @@ ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int);driver_commands=deque(maxlen=200)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
-DISPATCHER_PROFILES=[
-    {'id':'dispatcher-01','name':'Диспетчер №01','role':'Маршрутный диспетчер'},
-    {'id':'dispatcher-02','name':'Диспетчер №02','role':'Старший диспетчер'},
-]
+DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
+simulation_runs={};simulation_tasks=set()
 
 class Telemetry(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
@@ -62,10 +60,61 @@ class AdminSimulation(BaseModel):
 
 class DriverCommand(BaseModel):
     role:str=Field(pattern='^(dispatcher|admin)$')
-    dispatcher_id:str=Field(pattern='^dispatcher-\\d{2}$')
+    dispatcher_id:str=Field(pattern='^dispatcher-[a-z0-9]{2,40}$')
     tr_id:int=Field(gt=0)
     action:str=Field(pattern='^(contact|maintain|accelerate_safely|slow_down_safely)$')
     message:str=Field(min_length=5,max_length=300)
+
+class DispatcherCreate(BaseModel):
+    name:str=Field(min_length=3,max_length=120)
+    login:str=Field(pattern='^[a-z0-9][a-z0-9_-]{2,40}$')
+    role:str=Field(default='Маршрутный диспетчер',min_length=3,max_length=80)
+
+class AssignmentUpdate(BaseModel):
+    tr_ids:list[int]=Field(min_length=0,max_length=100)
+
+class SimulationCreate(BaseModel):
+    dispatcher_id:str=Field(pattern='^(admin|dispatcher)-\\d{2}$')
+    tr_id:int=Field(gt=0)
+    scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$')
+    count:int=Field(default=5,ge=1,le=20)
+    interval_s:int=Field(default=30,ge=5,le=300)
+
+def _account(row):
+    return {'id':row['id'],'name':row['name'],'login':row['login'],'role':row['role'],'status':row['status']}
+
+def init_store():
+    global db
+    DB_PATH.parent.mkdir(parents=True,exist_ok=True)
+    db=sqlite3.connect(DB_PATH,check_same_thread=False);db.row_factory=sqlite3.Row
+    db.executescript('''
+        CREATE TABLE IF NOT EXISTS dispatchers (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, login TEXT NOT NULL UNIQUE,
+          role TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS assignments (
+          dispatcher_id TEXT NOT NULL, tr_id INTEGER NOT NULL,
+          PRIMARY KEY(dispatcher_id,tr_id), FOREIGN KEY(dispatcher_id) REFERENCES dispatchers(id));
+        CREATE TABLE IF NOT EXISTS simulations (
+          id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+    ''')
+    seeds=[('admin-01','Администратор','admin','Администратор'),('dispatcher-01','Диспетчер №01','dispatcher01','Маршрутный диспетчер'),('dispatcher-02','Диспетчер №02','dispatcher02','Старший диспетчер')]
+    for account in seeds:
+        db.execute('INSERT OR IGNORE INTO dispatchers(id,name,login,role,status,created_at) VALUES(?,?,?,?,?,?)',(*account,'active',pd.Timestamp.now(tz='Europe/Moscow').isoformat()))
+    db.commit()
+
+def get_dispatcher(dispatcher_id):
+    row=db.execute('SELECT * FROM dispatchers WHERE id=?',(dispatcher_id,)).fetchone()
+    if row is None:return None
+    result=_account(row)
+    result['assigned_tr_ids']=[item['tr_id'] for item in db.execute('SELECT tr_id FROM assignments WHERE dispatcher_id=? ORDER BY tr_id',(dispatcher_id,))]
+    return result
+
+def list_dispatchers():
+    return [get_dispatcher(row['id']) for row in db.execute('SELECT id FROM dispatchers WHERE status="active" ORDER BY role DESC,name')]
+
+def save_simulation(run):
+    db.execute('INSERT OR REPLACE INTO simulations(id,payload,created_at) VALUES(?,?,?)',(run['id'],json.dumps(clean(run),ensure_ascii=False),run['created_at']))
+    db.commit()
 
 def align_schedule_to_event_day(frame, event_time):
     """Move a historical day-plan to the local calendar day of live telemetry."""
@@ -75,8 +124,11 @@ def align_schedule_to_event_day(frame, event_time):
     schedule_start=pd.to_datetime(result['ts'].min(), unit='s', utc=True).tz_convert('Europe/Moscow').normalize()
     shift=event_local.normalize().timestamp()-schedule_start.timestamp()
     result['ts']=result['ts'].astype(float)+shift
-    shifted=pd.to_datetime(result['time_begin'], format='mixed')+pd.to_timedelta(shift, unit='s')
-    result['time_begin']=shifted.map(lambda value:value.isoformat(sep=' '))
+    # Preserve the wall-clock plan time from the dataset while changing only
+    # its calendar day. `ts` remains the authoritative epoch for matching.
+    original_times=pd.to_datetime(frame['time_begin'],format='mixed')
+    delta_days=(event_local.date()-pd.Timestamp(original_times.min()).date()).days
+    result['time_begin']=(original_times+pd.to_timedelta(delta_days,unit='D')).map(lambda value:value.isoformat(sep=' '))
     return result
 
 def clean(value):
@@ -227,8 +279,14 @@ async def on_ndtp(event):
 @asynccontextmanager
 async def lifespan(app):
     global schedule,schedule_template,traffic,points,mapping,client
+    init_store()
     schedule=load_schedule(DATA/'validate/schedule_plan.csv')
     schedule_template=schedule.copy()
+    all_ids=sorted({int(item) for item in schedule.tr_id.unique()})
+    for dispatcher_id,parity in (('dispatcher-01',0),('dispatcher-02',1)):
+        if db.execute('SELECT COUNT(*) AS count FROM assignments WHERE dispatcher_id=?',(dispatcher_id,)).fetchone()['count']==0:
+            db.executemany('INSERT OR IGNORE INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,tr_id) for index,tr_id in enumerate(all_ids) if index%2==parity])
+    db.commit()
     traffic=load_traffic(DATA/'validate/traffic.csv')
     points=pd.read_csv(DATA/'validate/points.csv').sort_values('T').reset_index(drop=True)
     ids=pd.read_csv(DATA/'validate/traffic.csv',usecols=['unit_id','tr_id']).drop_duplicates()
@@ -239,6 +297,7 @@ async def lifespan(app):
     server=await asyncio.start_server(lambda r,w:handle(r,w,on_ndtp,counters),'0.0.0.0',int(os.getenv('NDTP_PORT','9201')))
     yield
     server.close();await server.wait_closed();await client.aclose()
+    if db is not None:db.close()
 
 app=FastAPI(title='Предиктор движения — Backend',version='1.0.0',lifespan=lifespan)
 
@@ -246,7 +305,30 @@ app=FastAPI(title='Предиктор движения — Backend',version='1.0
 async def health():return {'status':'ok','mode':state['mode']}
 
 @app.get('/api/dispatchers')
-async def dispatchers():return {'profiles':DISPATCHER_PROFILES,'authentication':'local_profile_selection'}
+async def dispatchers():return {'profiles':list_dispatchers(),'authentication':'managed_local_accounts'}
+
+@app.get('/api/dispatchers/{dispatcher_id}')
+async def dispatcher_profile(dispatcher_id:str):
+    profile=get_dispatcher(dispatcher_id)
+    if profile is None:raise HTTPException(404,'Dispatcher not found')
+    return profile
+
+@app.post('/api/admin/dispatchers',status_code=201)
+async def create_dispatcher(body:DispatcherCreate):
+    dispatcher_id=f"dispatcher-{uuid.uuid4().hex[:8]}"
+    try:
+        db.execute('INSERT INTO dispatchers(id,name,login,role,status,created_at) VALUES(?,?,?,?,?,?)',(dispatcher_id,body.name,body.login,body.role,'active',pd.Timestamp.now(tz='Europe/Moscow').isoformat()));db.commit()
+    except sqlite3.IntegrityError:raise HTTPException(409,'Login already exists')
+    return get_dispatcher(dispatcher_id)
+
+@app.put('/api/admin/dispatchers/{dispatcher_id}/assignments')
+async def set_dispatcher_assignments(dispatcher_id:str,body:AssignmentUpdate):
+    if get_dispatcher(dispatcher_id) is None:raise HTTPException(404,'Dispatcher not found')
+    known={int(item) for item in schedule.tr_id.unique()}
+    if any(item not in known for item in body.tr_ids):raise HTTPException(422,'Unknown vehicle/route assignment')
+    db.execute('DELETE FROM assignments WHERE dispatcher_id=?',(dispatcher_id,))
+    db.executemany('INSERT INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,item) for item in sorted(set(body.tr_ids))]);db.commit()
+    return get_dispatcher(dispatcher_id)
 
 @app.post('/api/telemetry')
 async def telemetry(events:list[Telemetry]):
@@ -294,14 +376,20 @@ async def replay():
         return {'done':False,'prediction':result,**state}
 
 @app.get('/api/state')
-async def get_state():
+async def get_state(dispatcher_id:str|None=None):
     now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
     merged={tr:dict(vehicle) for tr,vehicle in archive_vehicles.items()}
     for tr,live in vehicles.items():
         if tr in merged and live.get('source')=='live':
-            position={key:live[key] for key in ('lon','lat','position_time','T','source','reason') if key in live}
+            # Keep an archived forecast internally coherent when live telemetry
+            # has no valid current 10–15 minute target. Live coordinates are an
+            # overlay, not permission to pair today's timestamp with January's
+            # archived target stop and prediction.
+            position={key:live[key] for key in ('lon','lat','position_time') if key in live}
             merged[tr].update(position)
             merged[tr]['live_position']=True
+            merged[tr]['live_position_time']=live.get('T')
+            merged[tr]['live_status']=live.get('reason')
         else:merged[tr]=dict(live)
     output=[]
     for original in sorted(merged.values(),key=lambda item:(not item.get('live_position',False),int(item['tr_id']))):
@@ -309,7 +397,12 @@ async def get_state():
         if v.get('source')!='historical_archive' and now-epoch(v['T'])>120:
             v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
         output.append(v)
-    return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points)}
+    if dispatcher_id:
+        profile=get_dispatcher(dispatcher_id)
+        if profile is None:raise HTTPException(404,'Dispatcher not found')
+        assigned=set(profile['assigned_tr_ids'])
+        output=[item for item in output if int(item['tr_id']) in assigned]
+    return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points),'dispatcher_id':dispatcher_id}
 
 @app.get('/api/incidents')
 async def get_incidents():
@@ -345,7 +438,7 @@ async def get_driver_commands(tr_id:int|None=None):
 
 @app.post('/api/driver-commands',status_code=201)
 async def queue_driver_command(body:DriverCommand):
-    dispatcher=next((profile for profile in DISPATCHER_PROFILES if profile['id']==body.dispatcher_id),None)
+    dispatcher=get_dispatcher(body.dispatcher_id)
     if dispatcher is None:raise HTTPException(422,'Unknown dispatcher profile')
     action_titles={
         'contact':'Связаться с водителем',
@@ -366,7 +459,56 @@ async def queue_driver_command(body:DriverCommand):
 
 @app.get('/api/admin/simulation')
 async def simulation_status():
-    return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles)}
+    return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':list(simulation_runs.values())[:10]}
+
+async def execute_simulation(run):
+    run['status']='running';run['started_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
+    try:
+        current=vehicles.get(run['tr_id']) or archive_vehicles.get(run['tr_id'])
+        if current and current.get('lon') is not None:
+            lon,lat=float(current['lon']),float(current['lat'])
+        else:
+            route=schedule[schedule.tr_id==run['tr_id']].dropna(subset=['lon','lat'])
+            if route.empty:raise ValueError('No coordinates for this vehicle')
+            lon,lat=float(route.iloc[0].lon),float(route.iloc[0].lat)
+        before=clean(vehicles.get(run['tr_id']) or archive_vehicles.get(run['tr_id']) or {})
+        speed={'normal':35,'slow':8,'stop':0}[run['scenario']]
+        now=time.time()-run['count']*run['interval_s']
+        for index in range(run['count']):
+            event={'tr_id':run['tr_id'],'event_time':timestamp(now+index*run['interval_s']).isoformat(),'lon':lon+index*0.00005,'lat':lat+index*0.00003,'speed':speed,'location_valid':True}
+            await ingest(event)
+            run['events'].append({'sequence':index+1,'event_time':event['event_time'],'lon':event['lon'],'lat':event['lat'],'speed_kmh':speed,'accepted':True})
+            run['progress']={'completed':index+1,'total':run['count']}
+            save_simulation(run)
+            await asyncio.sleep(.05)
+        after=clean(vehicles.get(run['tr_id']) or archive_vehicles.get(run['tr_id']) or {})
+        run['effect']={'before':{'prediction_s':before.get('prediction_s'),'late_probability':before.get('late_probability'),'level':before.get('level')},'after':{'prediction_s':after.get('prediction_s'),'late_probability':after.get('late_probability'),'level':after.get('level')}}
+        run['status']='completed';run['completed_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
+    except Exception as exc:
+        run['status']='failed';run['error']=str(exc);run['completed_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
+
+@app.post('/api/admin/simulations',status_code=202)
+async def create_simulation(body:SimulationCreate):
+    operator=get_dispatcher(body.dispatcher_id)
+    if operator is None or operator['role']!='Администратор':raise HTTPException(403,'Admin account required')
+    if state['mode']!='live':raise HTTPException(409,'Switch to live mode before starting simulation')
+    run={'id':f"sim-{uuid.uuid4().hex[:10]}",'status':'queued','created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),'operator':operator,'tr_id':body.tr_id,'scenario':body.scenario,'count':body.count,'interval_s':body.interval_s,'progress':{'completed':0,'total':body.count},'events':[],'effect':None}
+    simulation_runs[run['id']]=run;save_simulation(run)
+    task=asyncio.create_task(execute_simulation(run));simulation_tasks.add(task);task.add_done_callback(simulation_tasks.discard)
+    return run
+
+@app.get('/api/admin/simulations')
+async def list_simulations():
+    return {'items':list(simulation_runs.values()),'mode':state['mode']}
+
+@app.get('/api/admin/simulations/{run_id}')
+async def get_simulation(run_id:str):
+    run=simulation_runs.get(run_id)
+    if run is None:
+        row=db.execute('SELECT payload FROM simulations WHERE id=?',(run_id,)).fetchone()
+        if row is None:raise HTTPException(404,'Simulation not found')
+        return json.loads(row['payload'])
+    return run
 
 @app.post('/api/admin/simulation')
 async def admin_simulation(body:AdminSimulation):

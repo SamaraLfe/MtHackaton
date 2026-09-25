@@ -98,6 +98,23 @@ def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
         assert all(v['prediction_s'] is not None for v in snapshot['vehicles'])
 
 
+def test_live_forecast_uses_schedule_on_telemetry_calendar_day():
+    """A live alert must never point at a January stop for September telemetry."""
+    with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'live'})
+        now=time.time()-2
+        event=dict(tr_id=131672,event_time=pd.Timestamp(now,unit='s',tz='UTC').isoformat(),lon=37.6,lat=55.7,speed=12)
+        response=client.post('/api/telemetry',json=[event])
+        assert response.status_code==200
+        vehicle=next(v for v in client.get('/api/state').json()['vehicles'] if v['tr_id']==131672)
+        if vehicle['source']=='live':
+            assert pd.Timestamp(vehicle['T']).date()==pd.Timestamp(event['event_time']).date()
+            assert vehicle['prediction_s'] is None or pd.Timestamp(vehicle['target_time_begin']).date()==pd.Timestamp(event['event_time']).date()
+        else:
+            assert vehicle['live_position'] is True
+            assert pd.Timestamp(vehicle['live_position_time']).date()==pd.Timestamp(event['event_time']).date()
+
+
 def test_dispatcher_profiles_are_available_for_local_workspaces():
     with TestClient(backend.app) as client:
         response=client.get('/api/dispatchers')
@@ -105,6 +122,44 @@ def test_dispatcher_profiles_are_available_for_local_workspaces():
         profiles=response.json()['profiles']
         assert len(profiles)>=2
         assert {'id','name','role'}<=set(profiles[0])
+
+
+def test_admin_can_create_dispatcher_and_assign_routes():
+    with TestClient(backend.app) as client:
+        created=client.post('/api/admin/dispatchers',json={
+            'name':'Диспетчер тестового маршрута','login':f'route-test-{int(time.time()*1000)}','role':'Маршрутный диспетчер'
+        })
+        assert created.status_code==201,created.text
+        dispatcher=created.json()
+        assignment=client.put(f"/api/admin/dispatchers/{dispatcher['id']}/assignments",json={'tr_ids':[131672,134040]})
+        assert assignment.status_code==200,assignment.text
+        profile=client.get(f"/api/dispatchers/{dispatcher['id']}")
+        assert profile.status_code==200
+        assert profile.json()['assigned_tr_ids']==[131672,134040]
+        scoped=client.get('/api/state',params={'dispatcher_id':dispatcher['id']})
+        assert {item['tr_id'] for item in scoped.json()['vehicles']}=={131672,134040}
+        command=client.post('/api/driver-commands',json={
+            'role':'dispatcher','dispatcher_id':dispatcher['id'],'tr_id':131672,'action':'contact','message':'Подтвердите обстановку на следующем участке.'
+        })
+        assert command.status_code==201,command.text
+
+
+def test_simulation_reports_lifecycle_events_and_effect():
+    with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'live'})
+        created=client.post('/api/admin/simulations',json={
+            'dispatcher_id':'admin-01','tr_id':131672,'scenario':'slow','count':2,'interval_s':5
+        })
+        assert created.status_code==202,created.text
+        run_id=created.json()['id']
+        deadline=time.time()+3
+        while time.time()<deadline:
+            run=client.get(f'/api/admin/simulations/{run_id}').json()
+            if run['status'] in {'completed','failed'}:break
+            time.sleep(.05)
+        assert run['status']=='completed'
+        assert len(run['events'])==2
+        assert 'effect' in run and 'after' in run['effect']
 
 
 def test_ml_rejects_nonfinite_and_missing_features():

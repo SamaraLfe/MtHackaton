@@ -1,8 +1,9 @@
-// Новая подложка Esri World Street Map: отдельный provider, без API key.
-// Ключи картографических сервисов в коде не хранятся.
+// CARTO light basemap is keyless and has no branded Leaflet prefix or flag icon.
+// Provider attribution remains visible as required by the tile licence.
 window.TRANSIT_MAP = {
-  tileUrl: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
-  attribution: 'Tiles &copy; Esri — Source: Esri, HERE, Garmin, USGS, NGA, EPA, USDA, NPS',
-  maxZoom: 19,
+  tileUrl: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+  subdomains: 'abcd',
+  attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+  maxZoom: 20,
   minZoom: 3
 };

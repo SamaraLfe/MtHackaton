@@ -20,6 +20,8 @@
 .transit-marker-icon{display:grid;place-items:center;width:32px;height:32px;background:var(--vehicle-color);border:2px solid white;border-radius:8px;color:#fff;box-shadow:0 2px 7px #16161640;transition:box-shadow .15s}
 .map-wrap .transit-marker-icon svg{width:18px;height:18px}
 .transit-marker.selected .transit-marker-icon{box-shadow:0 0 0 4px #ffffffad,0 2px 10px #16161650}
+.transit-marker.live-marker .transit-marker-icon{animation:live-pulse 1.6s ease-in-out infinite}
+@keyframes live-pulse{0%,100%{box-shadow:0 0 0 0 #0f62fe88,0 2px 7px #16161640}50%{box-shadow:0 0 0 8px #0f62fe00,0 2px 10px #16161650}}
 .transit-marker:focus-visible{outline:3px solid var(--cds-blue,#0f62fe);outline-offset:3px;border-radius:7px}
 .transit-popup .leaflet-popup-content-wrapper{border-radius:6px;box-shadow:0 5px 24px #16161625}
 .transit-popup .leaflet-popup-content{width:236px!important;margin:17px 18px}

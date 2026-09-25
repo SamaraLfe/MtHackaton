@@ -18,6 +18,7 @@ services:
     volumes:
       - ./dataset:/app/dataset:ro
       - ./artifacts:/app/artifacts:ro
+      - ./state:/app/state
     ports:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:9201:9201"

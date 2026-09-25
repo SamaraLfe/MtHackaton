@@ -86,7 +86,7 @@
         if(marker.getPopup().getContent()!==content(vehicle))marker.setPopupContent(content(vehicle));
       }
       marker.options.level=vehicle.level;
-      const node=marker.getElement();if(node){node.setAttribute('role','button');node.setAttribute('aria-label',`ТС ${vehicle.tr_id}: открыть карточку`);}
+      const node=marker.getElement();if(node){node.setAttribute('role','button');node.setAttribute('aria-label',`ТС ${vehicle.tr_id}: открыть карточку`);node.classList.toggle('live-marker',Boolean(vehicle.live_position));}
     }
     if(!initialFit&&(bounds||positioned.length)){fit();initialFit=true;}
     styleRoutes();
