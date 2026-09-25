@@ -16,7 +16,7 @@ from backend.ndtp import handle
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
-history=defaultdict(lambda:deque(maxlen=1000));vehicles={};counters=defaultdict(int);driver_commands=deque(maxlen=200)
+history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int);driver_commands=deque(maxlen=200)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
 DISPATCHER_PROFILES=[
@@ -111,13 +111,17 @@ def incidents(items):
 
 def load_historical_snapshot():
     """Build the dispatcher default view from the latest archived point per route."""
-    vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+    vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
     snapshot=points.sort_values('T').groupby('tr_id',as_index=False).tail(1).sort_values('tr_id')
     for _,point in snapshot.iterrows():
         tr=int(point['tr_id']);event_time=point['T'];t=epoch(event_time)
         stop_rows=schedule[(schedule.tr_id==tr)&(schedule.tt_action_item_id==int(point['target_stop_id']))]
         if stop_rows.empty:continue
         stop=stop_rows.sort_values('ts').iloc[0]
+        route=schedule[schedule.tr_id==tr].sort_values('ts').reset_index(drop=True)
+        stop_index=route.index[route.tt_action_item_id==int(point['target_stop_id'])][0]
+        previous=route.iloc[max(0,stop_index-1)].building_address
+        following=route.iloc[min(len(route)-1,stop_index+1)].building_address
         records=traffic[(traffic.tr_id==tr)&(traffic.ts<=t)&(traffic.ts>=t-600)]
         valid=records[records.location_valid].dropna(subset=['lon','lat'])
         last=valid.iloc[-1] if not valid.empty else None
@@ -125,14 +129,17 @@ def load_historical_snapshot():
         probability=float(1/(1+np.exp(-(prediction-120)/45)))
         level='high' if probability>=.7 else 'medium' if probability>=.35 else 'low'
         address='Контрольная точка не указана' if pd.isna(stop.building_address) else str(stop.building_address)
-        vehicles[tr]=dict(
+        snapshot_vehicle=dict(
             tr_id=tr,T=timestamp(event_time).isoformat(),target_time_begin=timestamp(point.target_time_begin).isoformat(),
             target_stop_id=int(point.target_stop_id),stop_address=address,prediction_s=prediction,
+            previous_stop='Контрольная точка не указана' if pd.isna(previous) else str(previous),next_stop='Контрольная точка не указана' if pd.isna(following) else str(following),
             lower_s=prediction-104.78,upper_s=prediction+104.78,late_probability=probability,level=level,
             reason='Историческое отклонение по архивной телеметрии',recommendation='Связаться с водителем и уточнить обстановку' if level in {'high','medium'} else 'Продолжить наблюдение',
             source='historical_archive',model='v5',degraded=False,stale=False,position_time=float(last.ts) if last is not None else None,
             lon=float(last.lon) if last is not None else None,lat=float(last.lat) if last is not None else None,
         )
+        archive_vehicles[tr]=snapshot_vehicle
+        vehicles[tr]=dict(snapshot_vehicle)
     state.update(mode='replay',clock=timestamp(snapshot['T'].max()).isoformat(),index=len(points),snapshot=True)
 
 def match_stop(tr_id, lon, lat):
@@ -289,8 +296,15 @@ async def replay():
 @app.get('/api/state')
 async def get_state():
     now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
+    merged={tr:dict(vehicle) for tr,vehicle in archive_vehicles.items()}
+    for tr,live in vehicles.items():
+        if tr in merged and live.get('source')=='live':
+            position={key:live[key] for key in ('lon','lat','position_time','T','source','reason') if key in live}
+            merged[tr].update(position)
+            merged[tr]['live_position']=True
+        else:merged[tr]=dict(live)
     output=[]
-    for original in list(vehicles.values()):
+    for original in sorted(merged.values(),key=lambda item:(not item.get('live_position',False),int(item['tr_id']))):
         v=dict(original)
         if v.get('source')!='historical_archive' and now-epoch(v['T'])>120:
             v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
