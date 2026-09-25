@@ -6,18 +6,19 @@
 
 ## Быстрый запуск Docker
 
-В поставку включены CSV из пользовательского архива и готовая модель. Запустить из корня проекта:
+В поставку включены CSV и готовая модель. Скрипт проверяет наличие образа NDTP-эмулятора, при необходимости скачивает проверенный архив из приватного GitHub Release `dataset-v1` через сохранённые Git credentials или `GITHUB_TOKEN`, загружает образ в Docker, запускает все сервисы и настраивает эмулятор на отправку пакетов в backend:
 
 ```sh
-docker compose up --build
+python scripts/run_prototype.py
 ```
 
 - Дашборд: http://localhost:8080
 - Backend и Swagger: http://localhost:8000/docs
 - NDTP: TCP localhost:9201
+- API эмулятора: http://localhost:18080
 - ML доступен внутри сети Compose по `http://ml:8001`.
 
-Три контейнера: ml, backend, dashboard (nginx проксирует веб-интерфейс/API). Модель уже обучена, переобучение для запуска не требуется. Для остановки: `docker compose down`. Docker не был установлен в среде разработки; контейнерная сборка здесь **не проверена**.
+Четыре контейнера: ml, backend, dashboard и emulator. Dashboard через nginx проксирует API. Модель уже обучена, переобучение для запуска не требуется. Сборка и полный NDTP-контур проверены локально. Для остановки: `docker compose down`.
 
 ## Локальный запуск без Docker
 
@@ -70,20 +71,23 @@ python -m pytest -q
 
 ## NDTP-эмулятор и живой контур
 
-CSV хранятся в `dataset/` обычным Git. Архив эмулятора вынесен в GitHub Release `dataset-v1`, так как его размер превышает лимит обычного GitHub-файла. Скачайте архив со страницы Releases и выполните:
+При запуске `python scripts/run_prototype.py` образ эмулятора скачивается и загружается автоматически, если его ещё нет в Docker. Архив кэшируется в `.cache/` и проверяется по SHA-256.
+
+Ручной вариант запуска:
 
 ```sh
+curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" -o ndtp-telemetry-emulator.tar https://api.github.com/repos/SamaraLfe/MtHackaton/releases/assets/588033020
 docker load -i ndtp-telemetry-emulator.tar
-docker compose --profile emulator up -d emulator
+docker compose up -d --build
 ```
 
-Пример POST `http://localhost:18080/api/config`:
+Скрипт автоматически отправляет конфигурацию на `http://localhost:18080/api/config`. Для ручной настройки используется тело:
 
 ```json
-{"targetHost":"backend","targetPort":9201,"units":[{"unitId":1166336,"intervalMs":5000,"autoGenerate":true,"cells":[]}]}
+{"targetHost":"backend","targetPort":9201,"units":[{"unitId":985940,"intervalMs":5000,"autoGenerate":true,"cells":[]}]}
 ```
 
-Включить «Живой поток NDTP» в UI. `unit_id` сопоставляется с `tr_id` из входного traffic.csv. Переопределение для конкретного эмулятора: переменная backend `UNIT_MAP='{"1166336":131672}'` (синтаксис кавычек зависит от оболочки). Случайные данные эмулятора **не** дают достоверного прогноза реального рейса: для текущей даты нужно актуальное расписание в `dataset/validate/schedule_plan.csv`, затем перезапуск backend. При отсутствии остановки в нужном окне будет серый статус «Нет плановой остановки…».
+Включить «Живой поток NDTP» в UI. Настроенный `unit_id=985940` соответствует `tr_id=131672` в validate-датасете. Для другого идентификатора сопоставление можно переопределить переменной backend `UNIT_MAP` (синтаксис кавычек зависит от оболочки). Случайные данные эмулятора **не** дают достоверного прогноза реального рейса: для текущей даты нужно актуальное расписание в `dataset/validate/schedule_plan.csv`, затем перезапуск backend. При отсутствии остановки в нужном окне будет серый статус «Нет плановой остановки…».
 
 Приёмник проверяет длину, signature, CRC16/Modbus со swap и значения координат. Сокеты допускают фрагментацию и несколько пакетов подряд. Повторные/опоздавшие события не перезаписывают новое состояние. Разрыв соединения не сбрасывает последнее состояние; его давность видна в UI. Поддержанные дополнительные типы ячеек перечислены в `backend/ndtp.py`; неизвестные сенсоры не интерпретируются как двери.
 

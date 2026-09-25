@@ -34,7 +34,6 @@ services:
       - backend
   emulator:
     image: ndtp-telemetry-emulator:1.0
-    profiles: [emulator]
     ports:
       - "127.0.0.1:18080:18080"
     depends_on:
