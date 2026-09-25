@@ -18,7 +18,7 @@ DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};counters=defaultdict(int)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0}
-schedule=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
+schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
 
 class Telemetry(BaseModel):
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
@@ -39,6 +39,18 @@ class Point(BaseModel):
 
 class Mode(BaseModel):
     mode:str=Field(pattern='^(live|replay)$')
+
+def align_schedule_to_event_day(frame, event_time):
+    """Move a historical day-plan to the local calendar day of live telemetry."""
+    if frame.empty:return frame.copy()
+    result=frame.copy()
+    event_local=timestamp(event_time)
+    schedule_start=pd.to_datetime(result['ts'].min(), unit='s', utc=True).tz_convert('Europe/Moscow').normalize()
+    shift=event_local.normalize().timestamp()-schedule_start.timestamp()
+    result['ts']=result['ts'].astype(float)+shift
+    shifted=pd.to_datetime(result['time_begin'], format='mixed')+pd.to_timedelta(shift, unit='s')
+    result['time_begin']=shifted.map(lambda value:value.isoformat(sep=' '))
+    return result
 
 def clean(value):
     if isinstance(value,dict): return {k:clean(v) for k,v in value.items()}
@@ -88,8 +100,13 @@ async def forecast(point,records,source):
     return clean(result)
 
 async def ingest(event):
+    global schedule,live_schedule_day
     tr=event['tr_id'];ts=epoch(event['event_time'])
     if ts>time.time()+60: raise ValueError('Телеметрия из будущего')
+    event_day=timestamp(event['event_time']).date()
+    if state['mode']=='live' and live_schedule_day!=event_day:
+        schedule=align_schedule_to_event_day(schedule, event['event_time'])
+        live_schedule_day=event_day
     records=history[tr]
     if records and ts<=records[-1]['ts']:
         counters['late_or_duplicate_packets']+=1;return
@@ -126,8 +143,9 @@ async def on_ndtp(event):
 
 @asynccontextmanager
 async def lifespan(app):
-    global schedule,traffic,points,mapping,client
+    global schedule,schedule_template,traffic,points,mapping,client
     schedule=load_schedule(DATA/'validate/schedule_plan.csv')
+    schedule_template=schedule.copy()
     traffic=load_traffic(DATA/'validate/traffic.csv')
     points=pd.read_csv(DATA/'validate/points.csv').sort_values('T').reset_index(drop=True)
     ids=pd.read_csv(DATA/'validate/traffic.csv',usecols=['unit_id','tr_id']).drop_duplicates()
@@ -164,7 +182,9 @@ async def predict(point:Point):
 
 @app.post('/api/mode')
 async def mode(body:Mode):
+    global schedule,live_schedule_day
     async with lock:
+        schedule=schedule_template.copy();live_schedule_day=None
         state.update(mode=body.mode,index=0,clock=None);vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
     return state
 

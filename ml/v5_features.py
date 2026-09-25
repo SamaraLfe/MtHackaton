@@ -261,7 +261,8 @@ def prepare_schedule(df):
 
     df["time_begin"] = (
         pd.to_datetime(
-            df["time_begin"]
+            df["time_begin"],
+            utc=True,
         )
     )
 
@@ -1617,8 +1618,8 @@ def build_feature_matrix(
 def build_v5_row(point, history, schedule):
     """Build one 104-feature V5 row from one prediction point and causal history."""
     points = pd.DataFrame([point]).copy()
-    points["T"] = pd.to_datetime(points["T"])
-    points["target_time_begin"] = pd.to_datetime(points["target_time_begin"])
+    points["T"] = pd.to_datetime(points["T"], utc=True)
+    points["target_time_begin"] = pd.to_datetime(points["target_time_begin"], utc=True)
     points["tr_id"] = points["tr_id"].astype(str)
     points["target_stop_id"] = points["target_stop_id"].astype(str)
     traffic = pd.DataFrame(history).copy()
@@ -1627,7 +1628,7 @@ def build_v5_row(point, history, schedule):
     for name, default in (("alt",0.0),("heading",0.0)):
         if name not in traffic.columns: traffic[name]=default
     traffic["tr_id"] = traffic["tr_id"].astype(str)
-    traffic["event_time"] = pd.to_datetime(traffic["event_time"])
+    traffic["event_time"] = pd.to_datetime(traffic["event_time"], utc=True)
     gps = prepare_traffic(traffic)
     sched = pd.DataFrame(schedule).copy()
     if 'geom' not in sched.columns and {'lon','lat'}.issubset(sched.columns):
