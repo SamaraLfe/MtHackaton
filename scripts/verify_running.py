@@ -13,8 +13,23 @@ def post(path,obj):
     req=urllib.request.Request(BASE+path,data=json.dumps(obj).encode(),headers={'Content-Type':'application/json'},method='POST')
     return json.load(urllib.request.urlopen(req,timeout=10))
 
+
+def runtime_contract(fetch):
+    """Fail fast when localhost still serves an older backend image."""
+    readiness=fetch('/health/ready')
+    assert readiness.get('status')=='ready',readiness
+    assert all(readiness.get('checks',{}).values()),readiness
+    observability=fetch('/api/observability')
+    assert observability.get('status')=='ok',observability
+    return {
+        'readiness_ready':True,
+        'observability_available':True,
+        'observability_samples':observability.get('request_latency_ms',{}).get('samples',0),
+    }
+
 def main():
     """Verify replay, submission shape and fragmented/invalid NDTP frames on localhost."""
+    runtime=runtime_contract(get)
     post('/api/mode',{'mode':'replay'})
     points=pd.read_csv('dataset/validate/points.csv').sort_values('T').reset_index(drop=True)
     rows=[];times=[]
@@ -42,7 +57,7 @@ def main():
     after=get('/api/state')['counters']
     assert after.get('ndtp_packets',0)>before.get('ndtp_packets',0)
     assert after.get('ndtp_errors',0)>before.get('ndtp_errors',0)
-    report=dict(replay_points=len(points),submission_rows=len(sub),submission_schema_valid=True,replay_horizon_all_valid=True,replay_request_p50_ms=float(np.median(times)),replay_request_p95_ms=float(np.quantile(times,.95)),replay_request_max_ms=max(times),ndtp_fragmented_frame=True,ndtp_bad_crc_rejected=True,docker_tested=True)
+    report=dict(**runtime,replay_points=len(points),submission_rows=len(sub),submission_schema_valid=True,replay_horizon_all_valid=True,replay_request_p50_ms=float(np.median(times)),replay_request_p95_ms=float(np.quantile(times,.95)),replay_request_max_ms=max(times),ndtp_fragmented_frame=True,ndtp_bad_crc_rejected=True,docker_tested=True)
     report_path=Path(os.getenv('VERIFICATION_OUTPUT','artifacts/verification.json'))
     report_path.parent.mkdir(parents=True,exist_ok=True)
     report_path.write_text(json.dumps(report,indent=2),encoding='utf-8')

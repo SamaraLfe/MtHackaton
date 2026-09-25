@@ -21,25 +21,25 @@
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
-      <article><span>РЕЙСОВ В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя точка по каждому маршруту</small></article>
+      <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя точка по каждому ТС</small></article>
       <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск опоздания</small></article>
       <article><span>УКАЗАНИЙ В ЖУРНАЛЕ</span><b id="kpi-commands">—</b><small>по профилю текущего диспетчера</small></article>
     </section>
 
     <section class="main-grid">
       <article class="card map-card">
-        <div class="card-head"><div><p class="eyebrow">КАРТА РЕЙСОВ</p><h2>Транспорт на маршрутах</h2><p>Маркер открывает карточку рейса и действия диспетчера.</p></div><button class="fit-map" id="map-fit" type="button">Показать все рейсы</button></div>
+        <div class="card-head"><div><p class="eyebrow">КАРТА ТС</p><h2>Транспорт и плановые траектории</h2><p>Нажмите маркер, чтобы открыть карточку ТС и действия диспетчера.</p></div><button class="fit-map" id="map-fit" type="button">Показать все ТС</button></div>
         <div class="map-wrap"><div id="map" aria-label="Карта рейсов"></div><div class="map-legend"><span><i class="low"></i>В графике</span><span><i class="medium"></i>Нужно проверить</span><span><i class="high"></i>Риск опоздания</span></div></div>
       </article>
       <article class="card attention-card">
-        <div class="card-head"><div><p class="eyebrow">ОЧЕРЕДЬ ВНИМАНИЯ</p><h2>С чего начать</h2><p>Рейсы отсортированы по риску и величине отклонения.</p></div></div>
+        <div class="card-head"><div><p class="eyebrow">ОЧЕРЕДЬ ВНИМАНИЯ</p><h2>С чего начать</h2><p>ТС отсортированы по риску и величине отклонения.</p></div></div>
         <div id="attention-list" class="attention-list"></div>
         <p class="attention-foot">Откройте рейс, чтобы связаться с водителем или выбрать безопасное указание.</p>
       </article>
     </section>
 
     <section class="card fleet-card">
-      <div class="card-head"><div><p class="eyebrow">ВСЕ РЕЙСЫ</p><h2>Картина по рейсам</h2><p>Понятный перечень: где находится транспорт, к какой остановке идёт и что требует действия.</p></div><label class="search">Поиск по ТС <input id="search" placeholder="Например, 131672" inputmode="numeric"></label></div>
+      <div class="card-head"><div><p class="eyebrow">ВСЕ ТС</p><h2>Картина по транспорту</h2><p>Понятный перечень: где находится транспорт, к какой остановке идёт и что требует действия.</p></div><label class="search">Поиск по ТС <input id="search" placeholder="Например, 131672" inputmode="numeric"></label></div>
       <div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ОТКЛОНЕНИЕ</th><th>СЛЕДУЮЩАЯ КОНТРОЛЬНАЯ ТОЧКА</th><th>ЧТО НУЖНО СДЕЛАТЬ</th></tr></thead><tbody id="fleet-rows"></tbody></table></div>
     </section>
   </main>

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 from pathlib import Path
 import httpx
 import pytest
@@ -91,6 +92,40 @@ def test_map_module_tolerates_dispatcher_page_without_legacy_controls():
     assert "getElementById('map-empty')?.classList" in source
 
 
+def test_dispatcher_uses_a_keyless_basemap_and_vehicle_terms():
+    config=(Path('dashboard')/'map-config.js').read_text(encoding='utf-8')
+    page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
+    assert 'tile.openstreetmap.org' in config
+    assert 'cartocdn.com' not in config
+    assert 'ТС В КАРТИНЕ' in page
+    assert 'КАРТА ТС' in page
+    assert 'ВСЕ ТС' in page
+
+
+def test_admin_count_explains_that_administrators_are_excluded():
+    page=(Path('dashboard')/'admin-control.html').read_text(encoding='utf-8')
+    assert 'ДИСПЕТЧЕРОВ (БЕЗ АДМИНИСТРАТОРА)' in page
+
+
+def test_running_verifier_checks_readiness_and_runtime_metrics():
+    from scripts import verify_running
+    payloads={
+        '/health/ready':{'status':'ready','checks':{'ml_api':True}},
+        '/api/observability':{'status':'ok','request_latency_ms':{'samples':3},'queues':{}},
+    }
+    report=verify_running.runtime_contract(lambda path:payloads[path])
+    assert report['readiness_ready'] is True
+    assert report['observability_available'] is True
+    assert report['observability_samples']==3
+
+
+def test_vehicle_detail_identifies_the_position_source():
+    source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
+    assert 'ИСТОЧНИК ПОЗИЦИИ' in source
+    assert 'Архивная телеметрия' in source
+    assert 'Live NDTP' in source
+
+
 def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
     with TestClient(backend.app) as client:
         response=client.post('/api/mode',json={'mode':'replay'})
@@ -128,62 +163,87 @@ def test_dispatcher_profiles_are_available_for_local_workspaces():
 
 
 def test_admin_can_create_dispatcher_and_assign_routes():
-    with TestClient(backend.app) as client:
-        created=client.post('/api/admin/dispatchers',json={
-            'name':'Диспетчер тестового маршрута','login':f'route-test-{int(time.time()*1000)}','role':'Маршрутный диспетчер'
-        })
-        assert created.status_code==201,created.text
-        dispatcher=created.json()
-        assignment=client.put(f"/api/admin/dispatchers/{dispatcher['id']}/assignments",json={'tr_ids':[131672,134040]})
-        assert assignment.status_code==200,assignment.text
-        profile=client.get(f"/api/dispatchers/{dispatcher['id']}")
-        assert profile.status_code==200
-        assert profile.json()['assigned_tr_ids']==[131672,134040]
-        scoped=client.get('/api/state',params={'dispatcher_id':dispatcher['id']})
-        assert {item['tr_id'] for item in scoped.json()['vehicles']}=={131672,134040}
-        command=client.post('/api/driver-commands',json={
-            'role':'dispatcher','dispatcher_id':dispatcher['id'],'tr_id':131672,'action':'contact','message':'Подтвердите обстановку на следующем участке.'
-        })
-        assert command.status_code==201,command.text
+    dispatcher_id=None
+    try:
+        with TestClient(backend.app) as client:
+            created=client.post('/api/admin/dispatchers',json={
+                'name':'Диспетчер тестового маршрута','login':f'route-test-{int(time.time()*1000)}','role':'Маршрутный диспетчер'
+            })
+            assert created.status_code==201,created.text
+            dispatcher=created.json();dispatcher_id=dispatcher['id']
+            assignment=client.put(f"/api/admin/dispatchers/{dispatcher_id}/assignments",json={'tr_ids':[131672,134040]})
+            assert assignment.status_code==200,assignment.text
+            profile=client.get(f"/api/dispatchers/{dispatcher_id}")
+            assert profile.status_code==200
+            assert profile.json()['assigned_tr_ids']==[131672,134040]
+            scoped=client.get('/api/state',params={'dispatcher_id':dispatcher_id})
+            assert {item['tr_id'] for item in scoped.json()['vehicles']}=={131672,134040}
+            command=client.post('/api/driver-commands',json={
+                'role':'dispatcher','dispatcher_id':dispatcher_id,'tr_id':131672,'action':'contact','message':'Подтвердите обстановку на следующем участке.'
+            })
+            assert command.status_code==201,command.text
+    finally:
+        if dispatcher_id:
+            with sqlite3.connect(backend.DB_PATH) as db:
+                db.execute('DELETE FROM assignments WHERE dispatcher_id=?',(dispatcher_id,))
+                db.execute('DELETE FROM dispatchers WHERE id=?',(dispatcher_id,))
 
 
 def test_simulation_reports_lifecycle_events_and_effect():
-    with TestClient(backend.app) as client:
-        client.post('/api/mode',json={'mode':'live'})
-        created=client.post('/api/admin/simulations',json={
-            'dispatcher_id':'admin-01','tr_id':131672,'scenario':'slow','count':2,'interval_s':5
-        })
-        assert created.status_code==202,created.text
-        run_id=created.json()['id']
-        deadline=time.time()+3
-        while time.time()<deadline:
-            run=client.get(f'/api/admin/simulations/{run_id}').json()
-            if run['status'] in {'completed','failed'}:break
-            time.sleep(.05)
-        assert run['status']=='completed'
-        assert len(run['events'])==2
-        assert 'effect' in run and 'after' in run['effect']
+    run_id=None
+    run=None
+    try:
+        with TestClient(backend.app) as client:
+            client.post('/api/mode',json={'mode':'live'})
+            created=client.post('/api/admin/simulations',json={
+                'dispatcher_id':'admin-01','tr_id':131672,'scenario':'slow','count':2,'interval_s':5
+            })
+            assert created.status_code==202,created.text
+            run_id=created.json()['id']
+            deadline=time.time()+3
+            while time.time()<deadline:
+                run=client.get(f'/api/admin/simulations/{run_id}').json()
+                if run['status'] in {'completed','failed'}:break
+                time.sleep(.05)
+            assert run is not None
+            assert run['status']=='completed'
+            assert len(run['events'])==2
+            assert 'effect' in run and 'after' in run['effect']
+    finally:
+        if run_id:
+            backend.simulation_runs.pop(run_id,None)
+            with sqlite3.connect(backend.DB_PATH) as db:
+                db.execute('DELETE FROM simulations WHERE id=?',(run_id,))
 
 
 def test_simulation_can_be_cancelled_and_history_is_filterable():
-    with TestClient(backend.app) as client:
-        client.post('/api/mode',json={'mode':'live'})
-        created=client.post('/api/admin/simulations',json={
-            'dispatcher_id':'admin-01','tr_id':131672,'scenario':'slow','count':20,'interval_s':5
-        })
-        assert created.status_code==202,created.text
-        run_id=created.json()['id']
-        cancelled=client.post(f'/api/admin/simulations/{run_id}/cancel',json={'dispatcher_id':'admin-01'})
-        assert cancelled.status_code==200,cancelled.text
-        deadline=time.time()+3
-        while time.time()<deadline:
-            run=client.get(f'/api/admin/simulations/{run_id}').json()
-            if run['status'] in {'cancelled','completed','failed'}:break
-            time.sleep(.05)
-        assert run['status']=='cancelled'
-        history=client.get('/api/admin/simulations',params={'status':'cancelled','tr_id':131672,'limit':10})
-        assert history.status_code==200
-        assert any(item['id']==run_id for item in history.json()['items'])
+    run_id=None
+    run=None
+    try:
+        with TestClient(backend.app) as client:
+            client.post('/api/mode',json={'mode':'live'})
+            created=client.post('/api/admin/simulations',json={
+                'dispatcher_id':'admin-01','tr_id':131672,'scenario':'slow','count':20,'interval_s':5
+            })
+            assert created.status_code==202,created.text
+            run_id=created.json()['id']
+            cancelled=client.post(f'/api/admin/simulations/{run_id}/cancel',json={'dispatcher_id':'admin-01'})
+            assert cancelled.status_code==200,cancelled.text
+            deadline=time.time()+3
+            while time.time()<deadline:
+                run=client.get(f'/api/admin/simulations/{run_id}').json()
+                if run['status'] in {'cancelled','completed','failed'}:break
+                time.sleep(.05)
+            assert run is not None
+            assert run['status']=='cancelled'
+            history=client.get('/api/admin/simulations',params={'status':'cancelled','tr_id':131672,'limit':10})
+            assert history.status_code==200
+            assert any(item['id']==run_id for item in history.json()['items'])
+    finally:
+        if run_id:
+            backend.simulation_runs.pop(run_id,None)
+            with sqlite3.connect(backend.DB_PATH) as db:
+                db.execute('DELETE FROM simulations WHERE id=?',(run_id,))
 
 
 def test_state_exposes_live_track_and_runtime_endpoints():

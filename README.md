@@ -113,7 +113,7 @@ docker compose up -d --build
 - Админская панель: `http://localhost:8080/admin`. Это локальные управляемые кабинеты, а не production SSO/JWT.
 - ML `POST /predict_v5` — основной endpoint V5: prediction point + causal NDTP history + schedule; `/health` сообщает загруженную модель. Legacy `POST /predict` сохранён для совместимости.
 
-Полный интеграционный контроль запущенных локальных сервисов: `python scripts/verify_running.py`. Он сбрасывает replay, проверяет все 151 точки против submission, посылает фрагментированный TCP-пакет и пакет с ошибочным CRC, сохраняет задержки запросов в `artifacts/verification.json`.
+Полный интеграционный контроль запущенных локальных сервисов: `python scripts/verify_running.py`. Он сначала проверяет `/health/ready` и `/api/observability`, поэтому сразу выявляет устаревший Docker-образ; затем сбрасывает replay, проверяет все 151 точки против submission, посылает фрагментированный TCP-пакет и пакет с ошибочным CRC, сохраняет задержки запросов в `artifacts/verification.json`.
 
 Сохранённые OpenAPI-спецификации находятся в `docs/`. Не публикуйте этот локальный MVP в интернет без добавления авторизации.
 
@@ -141,7 +141,7 @@ python -m sphinx -b html docs/sphinx docs/_build/html -W --keep-going
 ```text
 ml/          признаки, обучение, статистика, инференс и ML API
 backend/     NDTP, HTTP, replay, сопоставление с планом
-dashboard/   диспетчерский интерфейс, карта CARTO и административный контур
+dashboard/   диспетчерский интерфейс, карта OpenStreetMap и административный контур
 tests/       горизонт, утечки признаков, CRC, API, деградация
 scripts/     извлечение данных и локальный запуск
 artifacts/   готовая модель, submission и отчёты
