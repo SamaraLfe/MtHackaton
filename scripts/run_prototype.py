@@ -63,8 +63,22 @@ def sha256(path: Path) -> str:
 
 
 def github_token() -> str:
+    # 1. Explicit environment variable
     if token := os.getenv("GITHUB_TOKEN"):
         return token
+
+    # 2. GitHub CLI authentication
+    result = subprocess.run(
+        ["gh", "auth", "token"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+
+    # 3. Git credential helper fallback
     result = subprocess.run(
         ["git", "credential", "fill"],
         input="protocol=https\nhost=github.com\n\n",
@@ -75,13 +89,16 @@ def github_token() -> str:
     )
     if result.returncode == 0:
         credentials = dict(
-            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+            line.split("=", 1)
+            for line in result.stdout.splitlines()
+            if "=" in line
         )
         if token := credentials.get("password"):
             return token
+
     raise RuntimeError(
-        "GitHub authentication is required to download the emulator from the "
-        "private repository. Configure Git credentials or GITHUB_TOKEN."
+        "GitHub authentication is required to download the emulator. "
+        "Run `gh auth login` or set GITHUB_TOKEN."
     )
 
 
