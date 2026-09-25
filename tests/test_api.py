@@ -155,12 +155,13 @@ def test_live_forecast_uses_schedule_on_telemetry_calendar_day():
         response=client.post('/api/telemetry',json=[event])
         assert response.status_code==200
         vehicle=next(v for v in client.get('/api/state').json()['vehicles'] if v['tr_id']==131672)
+        event_day=pd.Timestamp(event['event_time']).tz_convert('Europe/Moscow').date()
         if vehicle['source']=='live':
-            assert pd.Timestamp(vehicle['T']).date()==pd.Timestamp(event['event_time']).date()
-            assert vehicle['prediction_s'] is None or pd.Timestamp(vehicle['target_time_begin']).date()==pd.Timestamp(event['event_time']).date()
+            assert pd.Timestamp(vehicle['T']).date()==event_day
+            assert vehicle['prediction_s'] is None or pd.Timestamp(vehicle['target_time_begin']).date()==event_day
         else:
             assert vehicle['live_position'] is True
-            assert pd.Timestamp(vehicle['live_position_time']).date()==pd.Timestamp(event['event_time']).date()
+            assert pd.Timestamp(vehicle['live_position_time']).date()==event_day
 
 
 def test_dispatcher_profiles_are_available_for_local_workspaces():
@@ -347,16 +348,19 @@ def test_replay_live_and_degradation():
             assert client.post('/api/telemetry',json=[dict(tr_id=1,event_time='2099-01-01',lon=37,lat=55,speed=10)]).status_code==422
             # Real-time branch uses observed stop proximity, then the independent ML API.
             saved_schedule=backend.schedule
+            saved_live_schedule_day=backend.live_schedule_day
             now=int(time.time())-2
+            event=dict(tr_id=1,event_time=pd.Timestamp(now,unit='s',tz='UTC').isoformat(),lon=37.6,lat=55.7,speed=0)
             backend.schedule=pd.DataFrame([
                 dict(tt_action_item_id=1,tr_id=1,ts=now-45,time_begin=pd.Timestamp(now-45,unit='s',tz='UTC').isoformat(),lon=37.6,lat=55.7,building_address='Past stop'),
                 dict(tt_action_item_id=2,tr_id=1,ts=now+720,time_begin=pd.Timestamp(now+720,unit='s',tz='UTC').isoformat(),lon=37.61,lat=55.71,building_address='Future stop')])
-            event=dict(tr_id=1,event_time=pd.Timestamp(now,unit='s',tz='UTC').isoformat(),lon=37.6,lat=55.7,speed=0)
+            backend.live_schedule_day=backend.timestamp(event['event_time']).date()
             assert client.post('/api/telemetry',json=[event]).status_code==200
             live=client.get('/api/state').json()['vehicles'][0]
             assert live['source']=='live' and live['features']['cur_dev_s']==45
             assert live['horizon_s']==720 and not live['degraded']
             backend.schedule=saved_schedule
+            backend.live_schedule_day=saved_live_schedule_day
             client.post('/api/mode',json={'mode':'replay'})
             async def failed(request):raise httpx.ConnectError('offline')
             backend.client=httpx.AsyncClient(transport=httpx.MockTransport(failed))

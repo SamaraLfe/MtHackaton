@@ -2,7 +2,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend.ndtp import decode
-from emulator.service import build_nav00_frame, load_vehicles
+from emulator.service import (
+    advance_vehicle,
+    build_nav00_frame,
+    haversine_m,
+    initial_vehicle_state,
+    load_vehicles,
+)
 
 
 def test_emulator_builds_a_valid_ndtp_nav00_frame():
@@ -34,6 +40,19 @@ def test_emulator_loads_multiple_scheduled_vehicles():
     assert len({vehicle['tr_id'] for vehicle in vehicles}) == len(vehicles)
     assert len({vehicle['unit_id'] for vehicle in vehicles}) == len(vehicles)
     assert all(len(vehicle['path']) >= 2 for vehicle in vehicles)
+
+
+def test_emulator_advances_vehicle_smoothly_along_its_planned_path():
+    vehicle = load_vehicles('dataset')[0]
+    state = initial_vehicle_state(vehicle)
+    previous_lon, previous_lat, previous_speed = state['lon'], state['lat'], state['speed_kmh']
+
+    for _ in range(5):
+        lon, lat, speed = advance_vehicle(vehicle, state, elapsed_s=3)
+        distance_m = haversine_m(previous_lon, previous_lat, lon, lat)
+        assert 1 <= distance_m <= 45
+        assert abs(speed - previous_speed) <= 2
+        previous_lon, previous_lat, previous_speed = lon, lat, speed
 
 
 def test_compose_runs_the_multi_vehicle_emulator_against_backend():
