@@ -1,0 +1,13 @@
+{
+  "replay_points": 151,
+  "offline_online_max_abs_difference_s": 2.842170943040401e-14,
+  "replay_request_p50_ms": 8.806099998764694,
+  "replay_request_p95_ms": 27.464799990411848,
+  "replay_request_max_ms": 36.318100057542324,
+  "ndtp_fragmented_frame": true,
+  "ndtp_bad_crc_rejected": true,
+  "docker_tested": false,
+  "tests_passed": 17,
+  "live_http_forecast_verified": true,
+  "ui_browser_verified": true
+}
