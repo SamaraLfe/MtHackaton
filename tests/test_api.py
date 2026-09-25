@@ -136,6 +136,18 @@ def test_vehicle_detail_identifies_the_position_source():
     assert 'Live NDTP' in source
 
 
+def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
+    page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
+    source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
+    assert 'ПРОГНОЗ НА КОНТРОЛЬНОЙ ТОЧКЕ' in page
+    assert 'КАК ПОНЯТЬ ПРОГНОЗ' in page
+    assert 'ОТКУДА ДАННЫЕ' in source
+    assert '/docs' in page
+    assert 'github.com/SamaraLfe/MtHackaton' in page
+    assert 'late_probability' in source
+    assert 'reason_is_hypothesis' in source
+
+
 def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
     with TestClient(backend.app) as client:
         response=client.post('/api/mode',json={'mode':'replay'})
@@ -270,6 +282,15 @@ def test_state_exposes_live_track_and_runtime_endpoints():
         assert metrics.json()['queues']['telemetry_points_in_memory']>=1
         ready=client.get('/health/ready')
         assert ready.status_code in {200,503}
+
+
+def test_state_exposes_http_telemetry_provenance():
+    with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'live'})
+        event={'tr_id':131672,'event_time':pd.Timestamp.now(tz='UTC').isoformat(),'lon':37.6,'lat':55.7,'speed':10}
+        assert client.post('/api/telemetry',json=[event]).status_code==200
+        vehicle=next(v for v in client.get('/api/state').json()['vehicles'] if v['tr_id']==131672)
+        assert vehicle['telemetry_source']=='http_json'
 
 
 def test_live_track_excludes_positions_older_than_the_track_ttl():

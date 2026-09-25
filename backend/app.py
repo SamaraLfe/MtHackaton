@@ -335,6 +335,7 @@ async def ingest(event):
                 'tr_id':tr,'T':timestamp(event['event_time']).isoformat(),
                 'level':'unknown','reason':'Live NDTP: позиция получена; прогноз остаётся историческим',
                 'source':'live','prediction_s':None,'late_probability':None,
+                'telemetry_source':event.get('telemetry_source','unknown'),
                 'lon':event['lon'],'lat':event['lat'],'position_time':ts,
             }
         return
@@ -350,10 +351,12 @@ async def ingest(event):
     last_forecast[tr]=ts
     stop=target_for(tr,ts)
     if stop is None:
-        vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',prediction_s=None,late_probability=None,position_time=ts)
+        vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),prediction_s=None,late_probability=None,position_time=ts)
         return
     point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],cur_dev_s=deviations.get(tr,{}).get('value',0))
     result=await forecast(point,list(records),'live')
+    result['telemetry_source']=event.get('telemetry_source','unknown')
+    vehicles[tr]=clean(result)
     if tr not in deviations:
         result.update(level='unknown',reason='Нет подтверждённого текущего отклонения',deviation_estimated=True)
         vehicles[tr]=result
@@ -364,7 +367,8 @@ async def on_ndtp(event):
     event['tr_id']=tr
     try:
         validated=Telemetry(**event)
-        async with lock: await ingest(validated.model_dump())
+        payload=validated.model_dump();payload['telemetry_source']='ndtp_nav00'
+        async with lock: await ingest(payload)
     except ValueError: counters['invalid_events']+=1
 
 @asynccontextmanager
@@ -481,7 +485,9 @@ async def telemetry(events:list[Telemetry]):
         for e in events:
             if epoch(e.event_time)>time.time()+60:raise ValueError('Future timestamp')
         async with lock:
-            for e in events:await ingest(e.model_dump())
+            for e in events:
+                payload=e.model_dump();payload['telemetry_source']='http_json'
+                await ingest(payload)
     except ValueError as e:raise HTTPException(422,str(e))
     return {'accepted':len(events)}
 
@@ -533,6 +539,7 @@ async def get_state(dispatcher_id:str|None=None):
             merged[tr]['live_position']=True
             merged[tr]['live_position_time']=live.get('T')
             merged[tr]['live_status']=live.get('reason')
+            merged[tr]['telemetry_source']=live.get('telemetry_source','unknown')
         else:merged[tr]=dict(live)
     output=[]
     for original in sorted(merged.values(),key=lambda item:(not item.get('live_position',False),int(item['tr_id']))):

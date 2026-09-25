@@ -1,14 +1,14 @@
 {
   "readiness_ready": true,
   "observability_available": true,
-  "observability_samples": 3,
+  "observability_samples": 29,
   "replay_points": 151,
   "submission_rows": 151,
   "submission_schema_valid": true,
   "replay_horizon_all_valid": true,
-  "replay_request_p50_ms": 57.065299995883834,
-  "replay_request_p95_ms": 80.45429999765474,
-  "replay_request_max_ms": 132.85300000279676,
+  "replay_request_p50_ms": 59.75210000178777,
+  "replay_request_p95_ms": 81.5689500013832,
+  "replay_request_max_ms": 108.78710000542924,
   "ndtp_fragmented_frame": true,
   "ndtp_bad_crc_rejected": true,
   "docker_tested": true
