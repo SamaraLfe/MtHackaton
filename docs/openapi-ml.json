@@ -1,1 +1,268 @@
-{"openapi":"3.1.0","info":{"title":"Transit ML","version":"1.0.0"},"paths":{"/health":{"get":{"summary":"Health","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/predict":{"post":{"summary":"Predict","operationId":"predict_predict_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Batch"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}}},"components":{"schemas":{"Batch":{"properties":{"rows":{"items":{"$ref":"#/components/schemas/FeatureRow"},"type":"array","maxItems":512,"minItems":1,"title":"Rows"}},"type":"object","required":["rows"],"title":"Batch"},"FeatureRow":{"properties":{"cur_dev_s":{"type":"number","title":"Cur Dev S"},"horizon_s":{"type":"number","title":"Horizon S"},"hour_sin":{"type":"number","title":"Hour Sin"},"hour_cos":{"type":"number","title":"Hour Cos"},"speed_last":{"type":"number","title":"Speed Last"},"speed_mean":{"type":"number","title":"Speed Mean"},"speed_std":{"type":"number","title":"Speed Std"},"speed_trend":{"type":"number","title":"Speed Trend"},"stopped_fraction":{"type":"number","title":"Stopped Fraction"},"idle_s":{"type":"number","title":"Idle S"},"age_s":{"type":"number","title":"Age S"},"observations":{"type":"number","title":"Observations"},"distance_m":{"type":"number","title":"Distance M"},"required_kmh":{"type":"number","title":"Required Kmh"},"missing_gps":{"type":"number","title":"Missing Gps"}},"additionalProperties":false,"type":"object","required":["cur_dev_s","horizon_s","hour_sin","hour_cos","speed_last","speed_mean","speed_std","speed_trend","stopped_fraction","idle_s","age_s","observations","distance_m","required_kmh","missing_gps"],"title":"FeatureRow"},"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"},"input":{"title":"Input"},"ctx":{"type":"object","title":"Context"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Такт — ML API",
+    "description": "\nВнутренний сервис инференса V5. Он возвращает отклонение от расписания в\nсекундах: положительное значение означает опоздание. Основной контракт —\n**POST /predict_v5**. Backend выбирает цель, хранит историю, оценивает риск и\nдобавляет fallback; внешняя интеграция обычно обращается именно к backend.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Состояние"
+        ],
+        "summary": "Проверить ML-сервис",
+        "description": "Возвращает status=ok и имя загруженной модели.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/predict": {
+      "post": {
+        "tags": [
+          "Legacy"
+        ],
+        "summary": "Прогноз по 15 признакам (legacy)",
+        "description": "При загруженной V5 набор из 15 legacy-признаков недостаточен. Используйте /predict_v5.",
+        "operationId": "predict_predict_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Batch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Неверные признаки или число строк вне 1…512."
+          }
+        },
+        "deprecated": true
+      }
+    },
+    "/predict_v5": {
+      "post": {
+        "tags": [
+          "V5"
+        ],
+        "summary": "Пакетный прогноз V5 по исходным данным",
+        "description": "points, histories и schedules имеют одинаковую длину от 1 до 512; элементы с одним индексом относятся к одному прогнозу. Результат сохраняет порядок входа и содержит prediction_s в секундах. Прямой ML API не проверяет выбор целевой остановки и не вычисляет риск.",
+        "operationId": "predict_v5_predict_v5_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/V5Batch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Массивы пусты, слишком велики или имеют разную длину."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Batch": {
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/FeatureRow"
+            },
+            "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
+            "title": "Rows",
+            "description": "Legacy: 1…512 строк по 15 числовых признаков. Для V5 используйте /predict_v5."
+          }
+        },
+        "type": "object",
+        "required": [
+          "rows"
+        ],
+        "title": "Batch"
+      },
+      "FeatureRow": {
+        "properties": {
+          "cur_dev_s": {
+            "type": "number",
+            "title": "Cur Dev S"
+          },
+          "horizon_s": {
+            "type": "number",
+            "title": "Horizon S"
+          },
+          "hour_sin": {
+            "type": "number",
+            "title": "Hour Sin"
+          },
+          "hour_cos": {
+            "type": "number",
+            "title": "Hour Cos"
+          },
+          "speed_last": {
+            "type": "number",
+            "title": "Speed Last"
+          },
+          "speed_mean": {
+            "type": "number",
+            "title": "Speed Mean"
+          },
+          "speed_std": {
+            "type": "number",
+            "title": "Speed Std"
+          },
+          "speed_trend": {
+            "type": "number",
+            "title": "Speed Trend"
+          },
+          "stopped_fraction": {
+            "type": "number",
+            "title": "Stopped Fraction"
+          },
+          "idle_s": {
+            "type": "number",
+            "title": "Idle S"
+          },
+          "age_s": {
+            "type": "number",
+            "title": "Age S"
+          },
+          "observations": {
+            "type": "number",
+            "title": "Observations"
+          },
+          "distance_m": {
+            "type": "number",
+            "title": "Distance M"
+          },
+          "required_kmh": {
+            "type": "number",
+            "title": "Required Kmh"
+          },
+          "missing_gps": {
+            "type": "number",
+            "title": "Missing Gps"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "cur_dev_s",
+          "horizon_s",
+          "hour_sin",
+          "hour_cos",
+          "speed_last",
+          "speed_mean",
+          "speed_std",
+          "speed_trend",
+          "stopped_fraction",
+          "idle_s",
+          "age_s",
+          "observations",
+          "distance_m",
+          "required_kmh",
+          "missing_gps"
+        ],
+        "title": "FeatureRow"
+      },
+      "V5Batch": {
+        "properties": {
+          "points": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
+            "title": "Points",
+            "description": "Точки: tr_id, T, target_stop_id, target_time_begin, cur_dev_s."
+          },
+          "histories": {
+            "items": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
+            "title": "Histories",
+            "description": "История телеметрии для каждой точки в том же порядке."
+          },
+          "schedules": {
+            "items": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "type": "array",
+            "maxItems": 512,
+            "minItems": 1,
+            "title": "Schedules",
+            "description": "Плановые остановки для каждой точки в том же порядке."
+          }
+        },
+        "type": "object",
+        "required": [
+          "points",
+          "histories",
+          "schedules"
+        ],
+        "title": "V5Batch"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Состояние",
+      "description": "Доступность процесса и имя загруженной модели."
+    },
+    {
+      "name": "V5",
+      "description": "Прогноз по исходной точке, телеметрии и плану остановок."
+    },
+    {
+      "name": "Legacy",
+      "description": "Старый контракт 15 готовых признаков; не подходит для V5."
+    }
+  ]
+}

@@ -185,7 +185,7 @@ def main() -> None:
     if not args.no_configure:
         configure_emulator()
     print("Dashboard: http://127.0.0.1:8080")
-    print("Backend API: http://127.0.0.1:8000/docs")
+    print("API guide: http://127.0.0.1:8080/docs | Swagger: http://127.0.0.1:8000/docs/swagger")
     print("Emulator API: http://127.0.0.1:18080")
 
 

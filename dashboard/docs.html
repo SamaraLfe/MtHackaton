@@ -1,0 +1,583 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Документация API Такт: первый прогноз, телеметрия, режимы live и replay, риски, карта и интеграция с ML.">
+  <meta name="theme-color" content="#ffffff">
+  <title>API и интеграция · Документация Такт</title>
+  <link rel="stylesheet" href="/static/docs.css">
+  <script src="/static/docs.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#overview">Перейти к содержимому</a>
+<header class="docs-header">
+  <a class="brand" href="/"><span class="brand-mark">Т</span>ТАКТ <small>Документация</small></a>
+  <div class="header-links"><a class="dashboard-link" href="/">Диспетчерская ↗</a><a class="swagger-link" href="/docs/swagger">Swagger ↗</a><button class="menu-toggle" type="button" aria-controls="docs-nav" aria-expanded="true">Разделы</button></div>
+</header>
+<aside class="docs-sidebar" id="docs-nav">
+  <label class="search-label" for="docs-search">Найти раздел или метод</label>
+  <input id="docs-search" type="search" placeholder="Например, telemetry" autocomplete="off" aria-controls="reference-nav">
+  <nav id="reference-nav" aria-label="Разделы документации">
+    <div class="nav-group"><h2>Начало работы</h2><a href="#overview">Об API</a><a href="#quickstart">Первый прогноз</a><a href="#concepts">Как устроен прогноз</a><a href="#conventions">Адреса и соглашения</a><a href="#prediction">Как читать результат</a></div>
+    <div class="nav-group"><h2>Состояние и источники</h2><a href="#health">Доступность сервиса</a><a href="#state">Состояние транспорта</a><a href="#mode">Режимы live и replay</a><a href="#replay">Исторический прогон</a><a href="#telemetry">Приём телеметрии</a><a href="#predict">Запрос прогноза</a></div>
+    <div class="nav-group"><h2>Работа диспетчера</h2><a href="#dispatchers">Профили и назначения</a><a href="#risk">Сводка рисков</a><a href="#incidents">Инциденты</a><a href="#what-if">Сценарий what-if</a><a href="#network">Плановые линии</a><a href="#map-match">Ближайшая остановка</a><a href="#commands-list">Журнал указаний</a><a href="#commands-create">Создание указания</a></div>
+    <div class="nav-group"><h2>Проверка и модель</h2><a href="#simulation-status">Состояние симулятора</a><a href="#simulation-runs">Асинхронные симуляции</a><a href="#simulation-create">Legacy-симуляция</a><a href="#metrics">Качество модели</a><a href="#ml">Отдельный ML API</a><a href="#errors">Ошибки и диагностика</a><a href="#limits">Ограничения и материалы</a></div>
+  </nav>
+  <p id="search-empty" role="status" hidden>Раздел не найден. Попробуйте название поля или путь API.</p>
+</aside>
+<main class="docs-main" id="main">
+  <section class="hero" id="overview">
+    <div class="eyebrow">Руководство разработчика · API 1.0.0</div>
+    <h1>От телеметрии<br>к понятному прогнозу</h1>
+    <p class="lead">Такт помогает диспетчеру заранее увидеть отклонение транспорта от расписания. API принимает координаты и скорость, рассчитывает прогноз на ближайшие 10–15 минут и отдаёт данные для карты и очереди внимания.</p>
+    <div class="meta-row"><span class="pill">HTTP + JSON</span><span class="pill">Модель V5</span><span class="pill">Локальный прототип</span><span class="pill">Live / Replay</span></div>
+    <p>Это руководство объясняет, что делает каждый блок API, какие данные ему нужны и как трактовать результат. Начните с готового исторического прогона, затем переходите к приёму своего потока. Для проверки отдельных запросов есть <a href="/docs/swagger">интерактивный Swagger</a>, а для генерации клиента — <a href="/openapi.json">OpenAPI JSON</a>.</p>
+    <div class="start-links"><a href="#quickstart"><strong>Получить первый прогноз →</strong><span>Три запроса на готовых данных, без настройки эмулятора.</span></a><a href="#telemetry"><strong>Подключить телеметрию →</strong><span>Формат событий, порядок отправки и поведение live.</span></a></div>
+    <ol class="flow" aria-label="Путь данных"><li><strong>Телеметрия</strong><span>NDTP по TCP или события через HTTP.</span></li><li><strong>Backend</strong><span>История ТС, расписание и выбор целевой остановки.</span></li><li><strong>ML V5</strong><span>Расчёт отклонения от планового времени прибытия.</span></li><li><strong>Диспетчер</strong><span>Прогноз, оценка риска и локальная очередь указаний.</span></li></ol>
+  </section>
+
+  <section id="quickstart">
+    <div class="eyebrow">Начните здесь</div><h2>Первый прогноз за три запроса</h2>
+    <p>Предполагается, что backend и ML уже запущены с данными и моделью из репозитория. Для запуска используйте <code>python scripts/run_prototype.py</code> с Docker или <code>python scripts/run_local.py</code> в подготовленном Python-окружении. Подробная установка описана в README проекта.</p>
+    <p>Примеры ниже рассчитаны на Bash / zsh. В PowerShell используйте <code>curl.exe</code> и синтаксис переменных вашей оболочки. Для Docker выберите порт <code>8080</code>; без Docker — <code>8000</code>.</p>
+    <pre data-language="Shell"><code>export TAKT_URL=http://localhost:8080
+# Без Docker: export TAKT_URL=http://127.0.0.1:8000
+curl -sS "$TAKT_URL/health"</code></pre>
+    <p>Ответ <code>{"status":"ok","mode":"replay"}</code> означает, что backend доступен. Текущий режим может быть <code>live</code>, если его уже переключили в интерфейсе. Эта проверка не подтверждает доступность ML.</p>
+    <h3>1. Начните исторический прогон</h3>
+    <p>Replay использует готовые прогнозные точки и телеметрию из <code>dataset/validate</code>. Ни NDTP-эмулятор, ни ручная отправка координат для него не нужны.</p>
+    <div class="note warn"><strong>Этот запрос сбрасывает состояние.</strong><p>История телеметрии и последние прогнозы очищаются для всех открытых клиентов, даже если replay уже выбран. Выполняйте пример в своём демонстрационном окружении.</p></div>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/mode" \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"replay"}'</code></pre>
+    <p>Ожидаемый ответ содержит <code>mode: "replay"</code>. В актуальной версии backend сразу восстанавливает архивный снимок: в <code>/api/state</code> уже есть последняя историческая запись по каждому ТС. Первый шаг replay очищает этот снимок и начинает последовательный прогон.</p>
+    <h3>2. Рассчитайте следующую точку</h3>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/replay/step"</code></pre>
+    <p>Ответ содержит <code>done: false</code>, объект <code>prediction</code> и <code>index: 1</code>. Внутри <code>prediction</code> проверьте <code>prediction_s</code> — отклонение в секундах, <code>level</code> — уровень внимания и <code>degraded</code> — использован ли резервный расчёт. При доступной V5 ожидается <code>model: "v5"</code> и <code>degraded: false</code>.</p>
+    <h3>3. Прочитайте общее состояние</h3>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/state"</code></pre>
+    <p>В <code>vehicles</code> находится текущая картина рейсов; эти же данные использует <a href="/">диспетчерская</a>. Повторяйте второй шаг, чтобы продвигаться по историческим точкам. Когда получите <code>done: true</code>, прогон завершён; поля <code>prediction</code> в таком ответе уже нет.</p>
+  </section>
+
+  <section id="concepts">
+    <h2>Как устроен прогноз</h2>
+    <p>Backend хранит историю отдельно для каждого транспортного средства. В момент <code>T</code> он ищет в расписании первую остановку, до планового прибытия на которую осталось строго больше 600 и не больше 900 секунд. Затем передаёт точку, историю до <code>T</code> и плановое расписание в ML-сервис. Будущая телеметрия для расчёта не используется.</p>
+    <p>Например, для <code>T = 10:00</code> остановка в 10:10 не подходит, а в 10:15 подходит. Если в этом окне есть остановки в 10:12 и 10:14, целевой будет остановка в 10:12. Если несколько остановок имеют одно и то же первое время, ручной запрос допускает любую из них.</p>
+    <div class="table-wrap"><table><thead><tr><th>Понятие</th><th>Что означает</th></tr></thead><tbody>
+      <tr><td><code>tr_id</code></td><td>Идентификатор транспортного средства (ТС). Отдельного идентификатора официального маршрута в данных нет. В сводках «маршруты» группируются по этому же полю.</td></tr>
+      <tr><td><code>unit_id</code></td><td>Идентификатор NDTP-устройства. Backend сопоставляет его с <code>tr_id</code> по датасету и настройке <code>UNIT_MAP</code>. HTTP-телеметрия сразу принимает <code>tr_id</code>.</td></tr>
+      <tr><td><code>T</code></td><td>Момент, на который строится прогноз. Это время данных, которое в replay относится к историческому дню.</td></tr>
+      <tr><td><code>target_stop_id</code></td><td>Идентификатор плановой остановки: поле <code>tt_action_item_id</code> расписания.</td></tr>
+      <tr><td><code>cur_dev_s</code></td><td>Уже известное текущее отклонение от плана. В live backend оценивает его при наблюдении ТС ближе 60 м к остановке со скоростью меньше 5 км/ч.</td></tr>
+      <tr><td><code>prediction_s</code></td><td>Прогноз отклонения на целевой остановке, а не время поездки до неё. <code>180</code> означает опоздание на 3 минуты; <code>-60</code> — прибытие на минуту раньше.</td></tr>
+    </tbody></table></div>
+    <h3>Два источника — одно общее состояние</h3>
+    <p><strong>Replay</strong> обрабатывает по одной строке <code>validate/points.csv</code> за запрос. Для неё берётся историческая телеметрия последних 10 минут. <strong>Live</strong> реагирует на входящие события HTTP или NDTP и рассчитывает прогноз не чаще раза в 30 секунд времени событий для каждого ТС.</p>
+    <p>В live план переносится на московский календарный день входящего события. Это сдвиг исходного расписания, а не загрузка актуального плана перевозчика. Если подходящей остановки нет либо текущее отклонение ещё не подтверждено, транспорт получает <code>level: "unknown"</code>.</p>
+  </section>
+
+  <section id="conventions">
+    <h2>Адреса и общие соглашения</h2>
+    <div class="table-wrap"><table><thead><tr><th>Сервис</th><th>Адрес и назначение</th></tr></thead><tbody>
+      <tr><td>Дашборд + API, Docker</td><td><code>http://localhost:8080</code>. Nginx передаёт запросы backend. Прямой доступ к backend: <code>http://localhost:8000</code>.</td></tr>
+      <tr><td>Backend без Docker</td><td><code>http://127.0.0.1:8000</code>. Те же пути <code>/api/…</code>, документация и интерфейс.</td></tr>
+      <tr><td>ML без Docker</td><td><code>http://127.0.0.1:8001</code>. В Docker доступен внутри сети как <code>http://ml:8001</code>; порт на хост не опубликован.</td></tr>
+      <tr><td>NDTP</td><td>TCP <code>localhost:9201</code>. Это бинарный протокол телеметрии, а не HTTP endpoint.</td></tr>
+      <tr><td>Спецификация</td><td><a href="/openapi.json">/openapi.json</a> — актуальная схема backend; <a href="/docs/swagger">/docs/swagger</a> — интерактивные запросы; <a href="/redoc">/redoc</a> — альтернативный просмотр схемы.</td></tr>
+    </tbody></table></div>
+    <ul>
+      <li><strong>Формат.</strong> Тела HTTP-запросов — JSON с <code>Content-Type: application/json</code>. Успешный ответ — JSON и статус <code>200</code>, кроме создания указания (<code>201</code>). <code>GET</code> не требует тела.</li>
+      <li><strong>Время.</strong> Используйте ISO 8601, например <code>2026-01-06T03:35:00Z</code>. Время без смещения трактуется как UTC; backend отображает нормализованное время в <code>Europe/Moscow</code>. <code>03:35Z</code> и <code>06:35+03:00</code> — один момент.</li>
+      <li><strong>Единицы.</strong> Отклонения, интервалы и горизонты — секунды; скорость — км/ч; расстояния — метры; координаты — градусы; вероятности — от 0 до 1. <code>null</code> означает отсутствие оценки, а не ноль.</li>
+      <li><strong>Доступ.</strong> API локального MVP не использует ключи или сессии. <code>dispatcher_id</code> выбирает локальный профиль из SQLite, а <code>role</code> проверяет переданное значение; это не production-аутентификация.</li>
+      <li><strong>Общее состояние.</strong> Режим, телеметрические буферы и очередь указаний общие для всех клиентов и теряются при перезапуске. Профили, назначения и история асинхронных симуляций сохраняются в SQLite. Вебсокетов нет: интерфейс опрашивает HTTP API.</li>
+      <li><strong>Повторы.</strong> Idempotency-Key не реализован. Повтор replay продвинет прогон, повтор создания указания создаст ещё одну запись, повтор выбора режима снова очистит состояние.</li>
+    </ul>
+    <div class="note"><strong>Примеры и реальные данные.</strong><p>Далее <code>$TAKT_URL</code> — адрес, заданный в быстром старте. Поля в JSON-примерах ответов могут быть сокращены; числовые оценки иллюстрируют формат и не обещают конкретный результат модели.</p></div>
+  </section>
+
+  <section id="prediction">
+    <h2>Как читать результат прогноза</h2>
+    <p>Этот объект возвращает <code>POST /api/predict</code>. В replay он находится в поле <code>prediction</code>, а в <code>GET /api/state</code> — в массиве <code>vehicles</code>. Сначала проверяйте достоверность данных, затем уровень внимания и величину отклонения.</p>
+    <pre data-language="JSON · пример, основные поля"><code>{
+  "tr_id": 131672,
+  "T": "2026-01-06T06:35:00+03:00",
+  "target_stop_id": 53700172828,
+  "target_time_begin": "2026-01-06T06:50:00+03:00",
+  "horizon_s": 900,
+  "prediction_s": 180,
+  "lower_s": 75.2154988903,
+  "upper_s": 284.7845011097,
+  "late_probability": 0.7913914727,
+  "level": "high",
+  "model": "v5",
+  "source": "historical_replay",
+  "degraded": false,
+  "stale": false,
+  "reason": "Устойчивое отклонение от графика",
+  "reason_is_hypothesis": true
+}</code></pre>
+    <div class="table-wrap"><table><thead><tr><th>Поля</th><th>Как использовать</th></tr></thead><tbody>
+      <tr><td><code>tr_id</code>, <code>T</code></td><td>Определяют ТС и момент расчёта. В <code>vehicles</code> хранится только последнее значение для каждого ТС.</td></tr>
+      <tr><td><code>target_stop_id</code>, <code>target_time_begin</code>, <code>stop_address</code></td><td>Куда и на какое плановое время построен прогноз. Плановое время плюс <code>prediction_s</code> даёт прогнозируемое время прибытия.</td></tr>
+      <tr><td><code>horizon_s</code></td><td>Разница между плановым временем целевой остановки и <code>T</code>. Для рассчитанной точки: <code>600 &lt; horizon_s &lt;= 900</code>.</td></tr>
+      <tr><td><code>prediction_s</code></td><td>Отклонение в секундах: плюс — позднее плана, минус — раньше. При отсутствии целевой остановки значение <code>null</code>.</td></tr>
+      <tr><td><code>lower_s</code>, <code>upper_s</code></td><td>Границы интервала отклонения. Backend V5 использует радиус около 104.78 с вокруг прогноза. Это оценка неопределённости, не гарантированные пределы. При fallback оба поля <code>null</code>.</td></tr>
+      <tr><td><code>late_probability</code></td><td>Эвристическая оценка риска опоздания более чем на 120 с: <code>1 / (1 + exp(-(prediction_s - 120) / 45))</code>. Не является подтверждённой калиброванной вероятностью для live-потока.</td></tr>
+      <tr><td><code>level</code></td><td><code>low</code>, <code>medium</code>, <code>high</code> или <code>unknown</code>. Правила ниже. Нельзя определять уровень только по величине <code>prediction_s</code>.</td></tr>
+      <tr><td><code>model</code>, <code>degraded</code></td><td>В штатном режиме <code>v5</code> и <code>false</code>. При ошибке ML — <code>persistence_fallback</code> и <code>true</code>: прогноз равен текущему <code>cur_dev_s</code>, вероятность отсутствует.</td></tr>
+      <tr><td><code>stale</code></td><td>Истина при отсутствии достоверного GPS или возрасте телеметрии больше 120 с на момент расчёта. <code>/api/state</code> дополнительно проверяет возраст самого прогноза.</td></tr>
+      <tr><td><code>deviation_estimated</code></td><td>Необязательное поле: <code>true</code>, если в live ещё не подтверждено текущее отклонение. Такой результат получает <code>level: "unknown"</code>.</td></tr>
+      <tr><td><code>source</code></td><td><code>live</code> — живой поток, <code>historical_replay</code> — исторический шаг, <code>api</code> — ручной запрос прогноза.</td></tr>
+      <tr><td><code>reason</code>, <code>reason_is_hypothesis</code>, <code>recommendation</code></td><td>Текст наблюдаемого паттерна и рекомендуемого действия. Причина является гипотезой: низкая скорость сама по себе не доказывает пробку или поломку.</td></tr>
+      <tr><td><code>lon</code>, <code>lat</code>, <code>position_time</code></td><td>Последняя подходящая позиция и её Unix-время в секундах. Координаты могут быть <code>null</code>; <code>position_time</code> — число, в отличие от строкового <code>T</code>.</td></tr>
+      <tr><td><code>features</code></td><td>Диагностические признаки backend: скорость, возраст GPS, простой и другие значения. Это компактный набор из 15 полей, а не полный набор из 104 признаков V5.</td></tr>
+    </tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>Уровень</th><th>Условие и смысл</th></tr></thead><tbody>
+      <tr><td><code>low</code></td><td>Риск меньше 0.35 при пригодных данных. Наблюдать в обычном режиме.</td></tr>
+      <tr><td><code>medium</code></td><td>От 0.35 включительно до 0.70. Включить ТС в очередь внимания.</td></tr>
+      <tr><td><code>high</code></td><td>От 0.70 включительно. Проверить ситуацию и доступность резерва.</td></tr>
+      <tr><td><code>unknown</code></td><td>Недостаточно надёжных данных: сбой ML, устаревание, нет целевой остановки или подтверждённого отклонения. Это не «всё хорошо».</td></tr>
+    </tbody></table></div>
+    <div class="note"><strong>Не все записи содержат полный прогноз.</strong><p>Если в live не нашлась остановка в нужном окне, запись содержит идентификатор, время, координаты, источник, <code>level</code>, <code>reason</code> и <code>null</code> вместо прогноза и вероятности. Поля цели, модели, интервала и признаков могут отсутствовать. Клиент должен это учитывать.</p></div>
+    <pre data-language="JavaScript · обработка результата"><code>function describePrediction(item) {
+  if (item.level === 'unknown' || item.prediction_s == null) {
+    return item.reason || 'Недостаточно данных';
+  }
+  const seconds = Math.round(Math.abs(item.prediction_s));
+  return item.prediction_s &gt;= 0
+    ? `Опоздание на ${seconds} с`
+    : `Раньше плана на ${seconds} с`;
+}</code></pre>
+    <details><summary>Диагностические поля features</summary><div class="table-wrap"><table><thead><tr><th>Поле</th><th>Смысл</th></tr></thead><tbody>
+      <tr><td><code>cur_dev_s</code>, <code>horizon_s</code></td><td>Текущее отклонение и горизонт в секундах.</td></tr>
+      <tr><td><code>hour_sin</code>, <code>hour_cos</code></td><td>Циклическое кодирование московского времени суток.</td></tr>
+      <tr><td><code>speed_last</code>, <code>speed_mean</code>, <code>speed_std</code></td><td>Последняя скорость, средняя и стандартное отклонение в окне 10 минут, км/ч.</td></tr>
+      <tr><td><code>speed_trend</code></td><td>Линейный тренд скорости, км/ч за минуту. Отрицательное значение означает замедление.</td></tr>
+      <tr><td><code>stopped_fraction</code>, <code>idle_s</code></td><td>Доля наблюдений со скоростью &lt; 2 км/ч и длительность последнего непрерывного простоя в секундах. Разрыв между соседними наблюдениями &gt; 60 с прерывает подсчёт простоя.</td></tr>
+      <tr><td><code>age_s</code>, <code>observations</code>, <code>missing_gps</code></td><td>Возраст последнего пригодного GPS (до 3600 с), число пригодных наблюдений и флаг отсутствия GPS (0/1). При отсутствии пригодных данных смотрите флаг, а не нулевые значения скоростей.</td></tr>
+      <tr><td><code>distance_m</code>, <code>required_kmh</code></td><td>Расстояние по прямой до цели и скорость для его прохождения за плановый горизонт. <code>-1</code> означает, что значение не удалось вычислить.</td></tr>
+    </tbody></table></div></details>
+  </section>
+
+  <section id="health">
+    <div class="endpoint"><span class="method get">GET</span><code>/health</code><span class="service">Backend · состояние</span></div><h2>Доступность сервиса</h2>
+    <p>Самая простая проверка, что backend отвечает на HTTP-запросы. Используйте её перед интеграцией или в проверке доступности. Параметров нет.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/health"</code></pre>
+    <pre data-language="JSON · 200"><code>{"status":"ok","mode":"replay"}</code></pre>
+    <p><code>status</code> сообщает о доступности backend, <code>mode</code> — о выбранном источнике. Даже при остановленном ML или отсутствии NDTP ответ может быть <code>ok</code>. Для этих случаев проверяйте счётчики и признаки деградации в <a href="#state">состоянии</a>.</p>
+  </section>
+
+  <section id="state">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/state</code><span class="service">Backend · состояние</span></div><h2>Состояние транспорта</h2>
+    <p>Основной запрос для диспетчерского интерфейса. Возвращает архивный снимок каждого ТС, live-наложения, положение исторического прогона и диагностические счётчики. Необязательный query-параметр <code>dispatcher_id</code> оставляет только назначенные профилю рейсы; пагинации нет.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/state"</code></pre>
+    <pre data-language="JSON · сразу после сброса, сокращено"><code>{
+  "vehicles": [],
+  "state": {"mode":"replay","clock":null,"index":0},
+  "counters": {},
+  "total_points": 151
+}</code></pre>
+    <p><code>vehicles</code> содержит <a href="#prediction">объекты прогноза</a>. После запуска replay уже показывает <code>source: "historical_archive"</code>: это последняя архивная точка каждого ТС. Live-позиция без подходящей новой цели добавляется к ней как <code>live_position: true</code>, не смешивая сегодняшние координаты с архивным прогнозом. <code>state.clock</code> — время последнего события или replay-точки, <code>state.index</code> — шаги прогона, <code>total_points</code> — размер validate-набора.</p>
+    <p>При чтении backend проверяет давность: если с <code>T</code> прошло больше 120 секунд, в ответе появляются <code>stale: true</code>, <code>level: "unknown"</code> и объяснение. В replay сравнение идёт с часами прогона, поэтому остановленный прогон не стареет вместе с реальными часами. Проверка меняет только копию ответа.</p>
+    <div class="table-wrap"><table><thead><tr><th>Счётчик</th><th>Что показывает</th></tr></thead><tbody>
+      <tr><td><code>telemetry_rows</code></td><td>Сколько новых событий добавлено в историю через ingest. Replay читает CSV напрямую и этот счётчик не увеличивает.</td></tr>
+      <tr><td><code>predictions</code></td><td>Количество рассчитанных прогнозов, включая резервные.</td></tr>
+      <tr><td><code>last_inference_ms</code></td><td>Длительность последней попытки обращения backend к ML в миллисекундах; это не время обработки всего HTTP-запроса.</td></tr>
+      <tr><td><code>ml_failures</code></td><td>Сколько раз backend перешёл на резервный прогноз после ошибки обращения к ML или разбора ответа.</td></tr>
+      <tr><td><code>late_or_duplicate_packets</code></td><td>События с временем не новее последнего принятого для того же ТС.</td></tr>
+      <tr><td><code>ndtp_packets</code>, <code>ndtp_errors</code>, <code>ndtp_disconnects</code></td><td>Обработанные NDTP-пакеты, ошибки разбора и разрывы/окончания соединений.</td></tr>
+      <tr><td><code>unknown_units</code>, <code>invalid_events</code></td><td>NDTP-события без сопоставленного ТС и события, не прошедшие последующую проверку.</td></tr>
+    </tbody></table></div>
+    <p>Ключи счётчиков появляются по мере использования: отсутствующий счётчик в интерфейсе можно показывать как 0. Переключение режима не обнуляет накопленные счётчики.</p>
+  </section>
+
+  <section id="dispatchers">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/dispatchers</code><span class="service">Backend · рабочие места</span></div><h2>Профили диспетчеров и назначения</h2>
+    <p>Профиль определяет, какие рейсы показывает диспетчерская. Это локальный контур управления: данные лежат в <code>state/dispatcher.db</code>, но логинов с паролями, токенов и SSO здесь нет. При первом запуске создаются <code>admin-01</code>, <code>dispatcher-01</code> и <code>dispatcher-02</code>.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/dispatchers"
+curl -sS "$TAKT_URL/api/dispatchers/dispatcher-01"
+curl -sS "$TAKT_URL/api/state?dispatcher_id=dispatcher-01"</code></pre>
+    <p>Первый запрос возвращает <code>profiles</code>; каждый профиль содержит <code>id</code>, <code>name</code>, <code>login</code>, <code>role</code>, <code>status</code> и <code>assigned_tr_ids</code>. Второй возвращает один профиль или <code>404</code>. Третий фильтрует общую картину только назначенными <code>tr_id</code>; неизвестный профиль также даёт <code>404</code>.</p>
+    <h3><span class="method post">POST</span> /api/admin/dispatchers</h3>
+    <p>Создаёт профиль и возвращает <code>201</code>. <code>login</code> должен быть уникален и содержать строчные латинские буквы, цифры, <code>_</code> или <code>-</code>; пароль не задаётся.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/admin/dispatchers" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Диспетчер №03","login":"dispatcher03","role":"Маршрутный диспетчер"}'</code></pre>
+    <h3><span class="method post">PUT</span> /api/admin/dispatchers/{dispatcher_id}/assignments</h3>
+    <p>Полностью заменяет назначения профиля. Тело <code>{"tr_ids":[]}</code> снимает все назначения. Все идентификаторы должны присутствовать в текущем расписании; иначе ответ <code>422</code>.</p>
+    <pre data-language="Shell"><code>curl -sS -X PUT "$TAKT_URL/api/admin/dispatchers/dispatcher-01/assignments" \
+  -H 'Content-Type: application/json' \
+  -d '{"tr_ids":[131672]}'</code></pre>
+  </section>
+
+  <section id="mode">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/mode</code><span class="service">Backend · меняет состояние</span></div><h2>Режимы live и replay</h2>
+    <p>Выбирает, откуда берутся данные для автоматических прогнозов. Тело содержит обязательную строку <code>mode</code>: <code>live</code> или <code>replay</code>. Другое значение вернёт <code>422</code>.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/mode" \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"live"}'</code></pre>
+    <pre data-language="JSON · 200"><code>{"mode":"live","clock":null,"index":0}</code></pre>
+    <p>Каждый вызов очищает историю телеметрии, сохранённые прогнозы, наблюдённые отклонения и таймеры прогноза. Индекс и часы сбрасываются; расписание восстанавливается из исходного шаблона. <strong>Очередь указаний и счётчики сохраняются.</strong></p>
+    <div class="note warn"><strong>Повторный выбор текущего режима тоже сбрасывает данные.</strong><p>Не вызывайте этот метод перед каждым пакетом телеметрии. Выберите live один раз при осознанном запуске потока. Изменение сразу затрагивает других пользователей этого backend.</p></div>
+  </section>
+
+  <section id="replay">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/replay/step</code><span class="service">Backend · меняет состояние</span></div><h2>Исторический прогон</h2>
+    <p>Обрабатывает ровно одну следующую прогнозную точку из <code>validate/points.csv</code>. Тело запроса не нужно. Данные идут по времени <code>T</code>; для каждой точки выбирается история этого ТС за предыдущие 10 минут, затем результат сохраняется в общем состоянии.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/replay/step"</code></pre>
+    <p>Пока точки есть, ответ содержит <code>done: false</code>, <code>prediction</code>, <code>mode</code>, <code>clock</code> и <code>index</code>. По завершении возвращается <code>done: true</code> вместе с режимом, часами и индексом, без <code>prediction</code>. Последние прогнозы остаются доступны через <code>/api/state</code>.</p>
+    <p><code>409</code> означает, что выбран live. <code>422</code> означает несоответствие точки активному расписанию. При недоступном ML шаг всё равно может завершиться с <code>200</code>, но прогноз будет резервным: <code>degraded: true</code>.</p>
+    <div class="note"><strong>Повтор — это следующий шаг.</strong><p>После сетевого тайм-аута сначала прочитайте <code>/api/state</code> и проверьте <code>index</code>. Повтор запроса может продвинуть прогон ещё на одну точку.</p></div>
+  </section>
+
+  <section id="telemetry">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/telemetry</code><span class="service">Backend · меняет состояние</span></div><h2>Приём телеметрии</h2>
+    <p>HTTP-вход для координат и скорости — удобен, если ваш источник не использует бинарный NDTP. Тело запроса — <strong>массив от 1 до 1000 событий</strong>. В одном массиве могут быть разные ТС; события каждого ТС передавайте по возрастанию времени.</p>
+    <div class="table-wrap"><table><thead><tr><th>Поле</th><th>Тип и ограничение</th><th>Назначение</th></tr></thead><tbody>
+      <tr><td><code>tr_id</code></td><td>integer, &gt; 0, обязательно</td><td>Идентификатор ТС, как в расписании.</td></tr>
+      <tr><td><code>event_time</code></td><td>string, обязательно</td><td>Время события; предпочтительно ISO 8601 с часовым поясом. Не более чем на 60 с впереди часов сервера.</td></tr>
+      <tr><td><code>lon</code></td><td>number, −180…180, обязательно</td><td>Долгота, градусы.</td></tr>
+      <tr><td><code>lat</code></td><td>number, −90…90, обязательно</td><td>Широта, градусы.</td></tr>
+      <tr><td><code>speed</code></td><td>number, 0…130, обязательно</td><td>Скорость в км/ч.</td></tr>
+      <tr><td><code>location_valid</code></td><td>boolean, по умолчанию true</td><td>Можно ли использовать GPS для признаков и положения. При false координаты и скорость всё равно должны пройти проверку полей.</td></tr>
+    </tbody></table></div>
+    <p>Лишние поля, бесконечные и нечисловые значения отклоняются. В примере используется историческое событие, чтобы его время оставалось воспроизводимым. Это демонстрация формата, а не подключение актуального live-потока.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/telemetry" \
+  -H 'Content-Type: application/json' \
+  -d '[{
+    "tr_id": 131672,
+    "event_time": "2026-01-06T03:34:50Z",
+    "lon": 37.60,
+    "lat": 55.75,
+    "speed": 25,
+    "location_valid": true
+  }]'</code></pre>
+    <pre data-language="JSON · 200"><code>{"accepted":1}</code></pre>
+    <p><code>accepted</code> — число событий в прошедшем проверку пакете. Событие с временем меньше или равным последнему принятому для того же ТС будет пропущено, но всё равно входит в <code>accepted</code>. Фактический прирост истории виден по <code>counters.telemetry_rows</code>, повторы — по <code>late_or_duplicate_packets</code>.</p>
+    <h3>Что происходит в live</h3>
+    <p>Сначала выберите live через <code>/api/mode</code>, затем отправляйте свежие события из своего источника. Backend переносит план на день события, пытается наблюдать текущее отклонение на остановках и, если прошло хотя бы 30 секунд времени событий с предыдущей попытки, выбирает цель и запускает прогноз. Сам ответ <code>/api/telemetry</code> не содержит прогноз: прочитайте его через <code>/api/state</code>.</p>
+    <p>В replay HTTP-события добавляются в буфер для ручного <code>/api/predict</code>, но не запускают автоматический прогноз и не заменяют CSV-историю шага replay. В памяти хранится максимум 1000 событий на ТС.</p>
+    <p><code>422</code> возвращается при неверных полях, пустом/слишком большом массиве, некорректной дате или времени из будущего. Проверка всех временных меток выполняется до добавления пакета в буфер.</p>
+  </section>
+
+  <section id="predict">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/predict</code><span class="service">Backend · сохраняет прогноз</span></div><h2>Запрос прогноза для выбранной точки</h2>
+    <p>Используйте, когда ваша интеграция сама задаёт момент расчёта, целевую остановку и текущее отклонение. Backend возьмёт ранее принятую историю этого ТС, проверит цель по активному расписанию и обратится к ML.</p>
+    <div class="table-wrap"><table><thead><tr><th>Поле</th><th>Тип</th><th>Правило</th></tr></thead><tbody>
+      <tr><td><code>tr_id</code></td><td>integer &gt; 0</td><td>ТС, чья история и расписание используются.</td></tr>
+      <tr><td><code>T</code></td><td>string</td><td>Время расчёта; не более 60 с в будущем относительно сервера.</td></tr>
+      <tr><td><code>target_stop_id</code></td><td>integer</td><td>Остановка с первым плановым временем в окне (T+10, T+15] минут.</td></tr>
+      <tr><td><code>target_time_begin</code></td><td>string</td><td>Плановое время этой остановки. Допустимое расхождение с расписанием — не больше 1 с.</td></tr>
+      <tr><td><code>cur_dev_s</code></td><td>number</td><td>Известное текущее отклонение в секундах, может быть отрицательным.</td></tr>
+    </tbody></table></div>
+    <p>Все поля обязательны; дополнительные поля запрещены. Пример соответствует первой точке поставляемого validate-набора и требует исходного исторического расписания (режим replay после сброса). Предварительно отправьте историю через <code>/api/telemetry</code>; сам шаг replay этот буфер не заполняет.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/predict" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "tr_id": 131672,
+    "T": "2026-01-06T03:35:00Z",
+    "target_stop_id": 53700172828,
+    "target_time_begin": "2026-01-06T03:50:00Z",
+    "cur_dev_s": 274
+  }'</code></pre>
+    <p>Ответ <code>200</code> — <a href="#prediction">объект прогноза</a> с <code>source: "api"</code>. Он также заменяет текущий результат этого ТС в <code>/api/state</code>. Без подходящей истории возможен числовой результат ML, но уровень будет <code>unknown</code>; один GPS-пакет не заменяет полноценную историю движения.</p>
+    <p><code>422</code> означает неверные поля, будущий момент расчёта или несовпадение цели с плановым окном. При недоступности ML backend возвращает <code>200</code> с <code>prediction_s = cur_dev_s</code>, <code>degraded: true</code>, <code>level: "unknown"</code> и пустой вероятностью.</p>
+  </section>
+
+  <section id="risk">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/risk</code><span class="service">Backend · риски</span></div><h2>Сводка рисков</h2>
+    <p>Готовая сводка для блока «Риск опоздания». Группирует сохранённые прогнозы по <code>tr_id</code> и сортирует группы: high, medium, low, unknown; внутри уровня — по идентификатору. Параметров нет.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/risk"</code></pre>
+    <pre data-language="JSON · пример 200"><code>{
+  "routes": [{
+    "tr_id": 131672, "level": "high", "vehicle_count": 1,
+    "high_count": 1, "max_late_probability": 0.8,
+    "vehicles": [131672]
+  }],
+  "high_routes": 1,
+  "medium_routes": 0,
+  "as_of": "2026-01-06T06:35:00+03:00"
+}</code></pre>
+    <p><code>vehicle_count</code> — размер группы, <code>high_count</code> — число записей high, <code>max_late_probability</code> — максимальная известная оценка в группе или <code>null</code>. <code>vehicles</code> содержит идентификаторы ТС. <code>high_routes</code> и <code>medium_routes</code> считают группы соответствующего уровня. <code>as_of</code> — общие часы потока, которые до старта могут быть <code>null</code>.</p>
+    <div class="note warn"><strong>Группа здесь соответствует ТС.</strong><p>В текущем хранилище одна запись на <code>tr_id</code>, поэтому обычно <code>vehicle_count = 1</code>. Название <code>routes</code> не означает, что API знает официальные номера маршрутов.</p></div>
+    <p>Сводка не пересчитывает возраст и берёт сохранённые уровни. Кроме того, при наличии числовой вероятности и отсутствии high/medium группа получает low, даже если исходный прогноз был unknown. Для решения о действии проверяйте актуальный <code>level</code> конкретного ТС через <code>/api/state</code>.</p>
+  </section>
+
+  <section id="incidents">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/incidents</code><span class="service">Backend · риски</span></div><h2>Инциденты и очередь внимания</h2>
+    <p>Выбирает из сохранённых прогнозов только high и medium. Сначала идут high, затем medium; внутри уровня — больший риск раньше. Это текущая очередь внимания, а не история происшествий: записи исчезают, когда прогноз ТС меняется на другой уровень.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/incidents"</code></pre>
+    <p>Ответ <code>200</code> содержит массив <code>items</code>, его размер <code>total</code> и общие часы <code>as_of</code>. Каждая запись содержит <code>vehicle_id</code>, <code>route_id</code>, <code>level</code>, <code>prediction_s</code>, <code>late_probability</code>, <code>reason</code>, <code>stop_address</code>, <code>source</code> и <code>recommendation</code>. Оба идентификатора в текущем API равны <code>tr_id</code>.</p>
+    <p>Без данных ответ: <code>{"items":[],"total":0,"as_of":null}</code>. Прогнозы unknown в очередь не входят: пустой список не подтверждает, что все ТС движутся без проблем. Метод также не обновляет давность — сопоставляйте его с <code>/api/state</code>.</p>
+  </section>
+
+  <section id="what-if">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/what-if</code><span class="service">Backend · не меняет состояние</span></div><h2>Сценарий «что, если»</h2>
+    <p>Показывает иллюстративное изменение риска при дополнительном выпуске ТС или сокращении интервала. Удобен для демонстрации сценарного блока интерфейса. Он не запускает симуляцию движения, не выпускает транспорт и не вызывает ML повторно.</p>
+    <div class="table-wrap"><table><thead><tr><th>Поле</th><th>Тип и диапазон</th><th>По умолчанию</th></tr></thead><tbody>
+      <tr><td><code>extra_vehicles</code></td><td>integer, от 0 до 20 — дополнительные ТС</td><td>0</td></tr>
+      <tr><td><code>headway_reduction_pct</code></td><td>number, от 0 до 50 — сокращение интервала в процентах</td><td>0</td></tr>
+    </tbody></table></div>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/what-if" \
+  -H 'Content-Type: application/json' \
+  -d '{"extra_vehicles":1,"headway_reduction_pct":0}'</code></pre>
+    <p>В ответе <code>assumptions</code> повторяет параметры и добавляет <code>risk_multiplier</code>. <code>baseline</code> содержит исходную сводку групп, <code>projected</code> — те же поля плюс <code>projected_late_probability</code> и <code>projected_level</code>.</p>
+    <pre data-language="Формула"><code>risk_multiplier = max(0.5, 1 - 0.15 × extra_vehicles - headway_reduction_pct / 100)
+projected_late_probability = max_late_probability × risk_multiplier</code></pre>
+    <p>При одной дополнительной машине множитель равен <code>0.85</code>: риск <code>0.8</code> станет <code>0.68</code>, то есть medium вместо high. Для <code>null</code> прогноз риска остаётся <code>null</code>, уровень — unknown. Нижняя граница множителя <code>0.5</code> ограничивает расчётное снижение 50%.</p>
+    <div class="note"><strong>Это фиксированная эвристика.</strong><p>Числа не доказывают, что реальный дополнительный автобус снизит риск именно на 15%. Расчёт не исправляет устаревшие данные и наследует ограничения <a href="#risk">исходной сводки риска</a>. Пустое состояние даёт пустые массивы.</p></div>
+    <p>Тело <code>{}</code> допустимо. Значения вне диапазонов возвращают <code>422</code>.</p>
+  </section>
+
+  <section id="network">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/network</code><span class="service">Backend · карта</span></div><h2>Плановые линии на карте</h2>
+    <p>Отдаёт последовательности координат плановых остановок для отрисовки линий. Не требует телеметрии: геометрия берётся из загруженного расписания. Параметров нет.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/network"</code></pre>
+    <pre data-language="JSON · пример 200"><code>{
+  "kind": "planned_stop_sequences",
+  "paths": [{"tr_id":131672,"points":[[37.60,55.75],[37.61,55.76]]}]
+}</code></pre>
+    <p><code>kind</code> явно обозначает тип геометрии. Каждая запись <code>paths</code> содержит <code>tr_id</code> и до 500 остановок с координатами. Порядок пары — <strong>[долгота, широта]</strong>. Перед использованием в Leaflet поменяйте его на <code>[lat, lon]</code>.</p>
+    <p>Прямая между остановками не является дорожным маршрутом. API не выполняет прокладку пути по улицам и не возвращает официальный номер маршрута.</p>
+  </section>
+
+  <section id="map-match">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/map-match</code><span class="service">Backend · не меняет состояние</span></div><h2>Ближайшая плановая остановка</h2>
+    <p>Находит ближайшую по расстоянию по прямой остановку в расписании выбранного ТС. Используйте для приблизительной привязки координат к плану. Привязка к дорожному графу не выполняется.</p>
+    <p>Все три поля обязательны: <code>tr_id</code> — целое число больше 0, <code>lon</code> — долгота от −180 до 180, <code>lat</code> — широта от −90 до 90.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/map-match" \
+  -H 'Content-Type: application/json' \
+  -d '{"tr_id":131672,"lon":37.60,"lat":55.75}'</code></pre>
+    <div class="table-wrap"><table><thead><tr><th>Поле ответа 200</th><th>Значение</th></tr></thead><tbody>
+      <tr><td><code>tr_id</code>, <code>stop_id</code>, <code>stop_address</code></td><td>ТС и найденная остановка.</td></tr>
+      <tr><td><code>distance_m</code></td><td>Расстояние по прямой до остановки, округлённое до сотых метра.</td></tr>
+      <tr><td><code>segment_index</code></td><td>Индекс найденной остановки с нуля в последовательности плановых остановок с координатами, отсортированной по времени.</td></tr>
+      <tr><td><code>next_stop_id</code></td><td>Следующая остановка в этой последовательности. Для последней совпадает с <code>stop_id</code>.</td></tr>
+      <tr><td><code>confidence</code></td><td><code>max(0, 1 - distance_m / 250)</code>, округлено до тысячных. Оценка близости, не калиброванная вероятность правильной привязки.</td></tr>
+    </tbody></table></div>
+    <p>При расстоянии 250 м и больше ответ всё ещё может быть <code>200</code>, но <code>confidence = 0</code>. <code>404</code> означает отсутствие геометрии для ТС, <code>422</code> — неверные поля запроса.</p>
+  </section>
+
+  <section id="commands-list">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/driver-commands</code><span class="service">Backend · локальная очередь</span></div><h2>Журнал указаний водителю</h2>
+    <p>Возвращает зарегистрированные диспетчером указания: от новых к старым, до 200 последних записей. Без параметров показывает всю очередь; необязательный query-параметр <code>tr_id</code> (целое число) фильтрует её по ТС.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/driver-commands?tr_id=131672"</code></pre>
+    <pre data-language="JSON · пустая очередь, 200"><code>{"items":[],"channel":"local_dispatch_outbox","external_delivery":false}</code></pre>
+    <p>Поля каждой записи описаны в следующем разделе. Пагинации, подтверждения получения и статуса прочтения нет. Очередь находится в памяти и очищается при перезапуске backend. Нечисловой <code>tr_id</code> вернёт <code>422</code>.</p>
+  </section>
+
+  <section id="commands-create">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/driver-commands</code><span class="service">Backend · создаёт запись</span></div><h2>Создание указания</h2>
+    <p>Регистрирует решение диспетчера для дальнейшей интеграции с каналом связи. Все поля обязательны: <code>role</code> — dispatcher или admin; <code>dispatcher_id</code> — существующий локальный профиль; <code>tr_id</code> — целое число больше 0; <code>action</code> — одно из действий ниже; <code>message</code> — строка от 5 до 300 символов.</p>
+    <div class="table-wrap"><table><thead><tr><th>action</th><th>Смысл</th></tr></thead><tbody>
+      <tr><td><code>contact</code></td><td>Связаться с водителем и уточнить обстановку.</td></tr>
+      <tr><td><code>maintain</code></td><td>Продолжать движение по графику.</td></tr>
+      <tr><td><code>accelerate_safely</code></td><td>При возможности безопасно сократить отставание.</td></tr>
+      <tr><td><code>slow_down_safely</code></td><td>При необходимости безопасно снизить темп.</td></tr>
+    </tbody></table></div>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/driver-commands" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "role":"dispatcher",
+    "dispatcher_id":"dispatcher-01",
+    "tr_id":131672,
+    "action":"contact",
+    "message":"Уточните причину задержки и текущую обстановку."
+  }'</code></pre>
+    <pre data-language="JSON · пример 201"><code>{
+  "id": "cmd-1780000000000-1",
+  "tr_id": 131672,
+  "role": "dispatcher",
+  "dispatcher": {"id":"dispatcher-01","name":"Диспетчер №01"},
+  "action": "contact",
+  "action_title": "Связаться с водителем",
+  "message": "Уточните причину задержки и текущую обстановку.",
+  "created_at": "2026-05-29T01:26:40+03:00",
+  "status": "queued_for_integration",
+  "channel": "local_dispatch_outbox",
+  "external_delivery": false
+}</code></pre>
+    <p><code>id</code> — идентификатор записи, <code>created_at</code> — время её создания, <code>action_title</code> — русское название действия. <code>status: "queued_for_integration"</code> означает, что запись добавлена в локальную очередь; <code>channel</code> называет эту очередь.</p>
+    <div class="note warn"><strong>Водителю ничего не доставлено.</strong><p><code>external_delivery: false</code> означает, что радио-, телефонный или телематический канал не подключён. Не показывайте пользователю «отправлено водителю» на основании этого ответа.</p></div>
+    <p>Существование <code>tr_id</code> в текущем состоянии не проверяется, но <code>dispatcher_id</code> обязан существовать. Роль берётся из тела запроса. Неверные поля или неизвестный профиль дают <code>422</code>. Повтор запроса создаёт новую запись — защиты от дублирования нет.</p>
+  </section>
+
+  <section id="simulation-status">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/admin/simulation</code><span class="service">Backend · симуляция</span></div><h2>Состояние симулятора</h2>
+    <p>Помогает подготовить административный тест: сообщает режим, допустимые сценарии и число ТС в текущем состоянии. Запрос без параметров; сам по себе не запускает генерацию событий.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/admin/simulation"</code></pre>
+    <pre data-language="JSON · пример 200"><code>{
+  "role_required":"admin",
+  "mode":"live",
+  "supported_scenarios":["normal","slow","stop"],
+  "active_vehicles":1
+}</code></pre>
+    <p><code>active_vehicles</code> — размер текущего хранилища прогнозов, включая unknown и устаревшие записи; это не число подключённых устройств. <code>role_required</code> сообщает требуемое значение для следующего POST, но не подтверждает права текущего пользователя.</p>
+  </section>
+
+  <section id="simulation-runs">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/admin/simulations</code><span class="service">Backend · асинхронный запуск</span></div><h2>Асинхронная симуляция</h2>
+    <p>Основной метод административного контура. Он создаёт запуск в SQLite и сразу отвечает <code>202</code> с идентификатором <code>sim-…</code>. Затем фоновая задача меняет <code>status</code> с <code>queued</code> на <code>running</code>, добавляет синтетические события и завершает запуск как <code>completed</code> или <code>failed</code>.</p>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/admin/simulations" \
+  -H 'Content-Type: application/json' \
+  -d '{"dispatcher_id":"admin-01","tr_id":131672,"scenario":"slow","count":5,"interval_s":30}'</code></pre>
+    <p>Запуск разрешён только профилю с точной ролью <code>Администратор</code> и при <code>mode: "live"</code>. <code>normal</code>, <code>slow</code> и <code>stop</code> используют 35, 8 и 0 км/ч. <code>count</code> — от 1 до 20, <code>interval_s</code> — от 5 до 300 секунд.</p>
+    <pre data-language="Shell"><code># Список запусков текущего backend
+curl -sS "$TAKT_URL/api/admin/simulations"
+
+# Статус и результат одного запуска; доступен и после перезапуска backend
+curl -sS "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx"</code></pre>
+    <p>Объект запуска содержит <code>operator</code>, <code>progress</code> с completed/total, массив <code>events</code> и <code>effect</code> с прогнозом, вероятностью и уровнем до/после. После перезапуска список активной памяти может стать пустым, но запрос по id читает сохранённую запись из SQLite. Ошибки: <code>403</code> — не администратор, <code>409</code> — выбран replay, <code>404</code> — неизвестный id при чтении.</p>
+  </section>
+
+  <section id="simulation-create">
+    <div class="endpoint"><span class="method post">POST</span><code>/api/admin/simulation</code><span class="service">Backend · legacy</span></div><h2>Legacy-симуляция</h2>
+    <p>Создаёт небольшую последовательность синтетических событий и пропускает её через живой обработчик телеметрии. Используйте для проверки отображения и обработки данных. Сначала осознанно переключите backend в live; выбор режима очищает текущую историю.</p>
+    <div class="table-wrap"><table><thead><tr><th>Поле</th><th>Правило</th></tr></thead><tbody>
+      <tr><td><code>role</code></td><td>Обязательная строка <code>admin</code>. Другая роль даёт 403.</td></tr>
+      <tr><td><code>tr_id</code></td><td>Обязательное целое число &gt; 0. Для ТС должны находиться координаты в состоянии или расписании.</td></tr>
+      <tr><td><code>scenario</code></td><td><code>normal</code> — 35 км/ч, <code>slow</code> — 8 км/ч, <code>stop</code> — 0 км/ч. По умолчанию slow.</td></tr>
+      <tr><td><code>count</code></td><td>Целое число от 1 до 20. По умолчанию 3 события.</td></tr>
+      <tr><td><code>interval_s</code></td><td>Целое число от 5 до 300. По умолчанию 30 секунд между событиями.</td></tr>
+    </tbody></table></div>
+    <pre data-language="Shell"><code>curl -sS -X POST "$TAKT_URL/api/admin/simulation" \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"admin","tr_id":131672,"scenario":"slow","count":3,"interval_s":30}'</code></pre>
+    <pre data-language="JSON · 200"><code>{
+  "accepted":3,
+  "scenario":"slow",
+  "tr_id":131672,
+  "role":"admin",
+  "message":"Simulation events injected into live pipeline"
+}</code></pre>
+    <p>События создаются в недавнем прошлом: первое — примерно <code>count × interval_s</code> секунд назад, последнее — <code>interval_s</code> секунд назад. Координаты берутся из состояния или плана и немного смещаются на каждом шаге, даже в сценарии stop. Это тестовый генератор, не физическая модель движения по маршруту.</p>
+    <p><code>accepted</code> считает попытки обработки. Если уже принята более свежая телеметрия, синтетические события могут быть пропущены как опоздавшие. Результат смотрите в <code>/api/state</code>; наличие прогноза и высокого риска не гарантируется.</p>
+    <p><code>403</code> — role не admin; <code>409</code> — выбран replay; <code>404</code> — для ТС нет координат; <code>422</code> — неверные поля. В отличие от <a href="#what-if">what-if</a>, этот метод действительно меняет историю и может изменить прогнозы.</p>
+  </section>
+
+  <section id="metrics">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/metrics</code><span class="service">Backend · качество модели</span></div><h2>Офлайн-метрики модели</h2>
+    <p>Возвращает результаты оценки на сохранённой тестовой выборке и важность признаков. Используйте для блока «Надёжность прогноза». Метод не сравнивает текущие live-прогнозы с реальными прибытиями и не пересчитывает качество на лету.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/metrics"</code></pre>
+    <div class="table-wrap"><table><thead><tr><th>Блок или поле</th><th>Что означает</th></tr></thead><tbody>
+      <tr><td><code>v5.model</code>, <code>v5.features</code>, <code>v5.test_points</code></td><td>Название модели, число признаков и число тестовых точек. В поставке: v5, 104 и 353.</td></tr>
+      <tr><td><code>v5.mae_s</code></td><td>Средняя абсолютная ошибка прогноза в секундах. Меньше — лучше; это средняя величина, не максимальная ошибка отдельного рейса.</td></tr>
+      <tr><td><code>v5.baseline_mae_s</code></td><td>Ошибка подхода «будущее отклонение равно текущему», без ML.</td></tr>
+      <tr><td><code>v5.improvement_pct</code></td><td><code>100 × (1 - mae_s / baseline_mae_s)</code>. Поле появляется, если обе оценки пригодны для расчёта.</td></tr>
+      <tr><td><code>v5.interval_radius_s</code>, <code>v5.late_threshold_s</code></td><td>Радиус интервала из метаданных и порог опоздания, по умолчанию 120 с.</td></tr>
+      <tr><td><code>v5.coverage</code>, <code>v5.batch_inference_ms</code></td><td>В текущей реализации взяты из прежнего <code>metrics.json</code>. Это не отдельно измеренные покрытие и скорость V5.</td></tr>
+      <tr><td><code>feature_importance</code></td><td>До шести наиболее важных признаков из артефакта V5: <code>feature</code> и <code>importance</code>. Глобальная важность для модели, не объяснение конкретного прогноза.</td></tr>
+      <tr><td><code>readable</code></td><td>Готовые строки <code>mae</code>, <code>baseline</code>, <code>coverage</code> для интерфейса. Для вычислений используйте числовые поля.</td></tr>
+      <tr><td>Верхнеуровневые метрики</td><td><code>test_mae_s</code>, <code>persistence_mae_s</code>, <code>interval_coverage</code> и остальные поля прежнего отчёта сохранены для совместимости. Они не заменяют <code>v5.mae_s</code>.</td></tr>
+    </tbody></table></div>
+    <p>Для поставляемых артефактов MAE V5 составляет около 47.6 с на 353 точках. Данные относятся к одному дню, поэтому эта оценка не подтверждает качество на будущих днях. При отсутствии части V5-артефактов соответствующие поля могут быть <code>null</code>, число признаков/точек — 0, а важности — пустым массивом.</p>
+    <p>Текущую длительность обращения к ML смотрите в <code>/api/state → counters.last_inference_ms</code>. Она включает HTTP-вызов и отличается от офлайн-времени пакетного инференса.</p>
+  </section>
+
+  <section id="ml">
+    <div class="eyebrow">Внутренний сервис · порт 8001</div><h2>Отдельный ML API</h2>
+    <p>ML-сервис рассчитывает модель и не хранит состояние транспорта. Обычной интеграции достаточно backend: он выбирает цель, готовит историю, оценивает свежесть и обеспечивает fallback. Прямой ML API нужен для проверки модели и пакетных расчётов.</p>
+    <p>Без Docker его Swagger находится по адресу <code>http://127.0.0.1:8001/docs</code>, схема — <code>/openapi.json</code> на том же порту. В Docker обращайтесь из сети Compose к <code>http://ml:8001</code>: запрос <code>/predict_v5</code> на backend-порту не проксируется в ML.</p>
+    <h3><span class="method get">GET</span> /health</h3>
+    <p>Ответ <code>{"status":"ok","model":"v5"}</code> сообщает имя загруженной модели. Этот метод не выполняет тестовый прогноз.</p>
+    <h3><span class="method post">POST</span> /predict_v5</h3>
+    <p>Основной метод инференса. Принимает три массива одинаковой длины — от 1 до 512 элементов каждый. Элементы на одинаковом индексе относятся к одному прогнозу; результаты возвращаются в том же порядке.</p>
+    <div class="table-wrap"><table><thead><tr><th>Массив</th><th>Содержимое одного элемента</th></tr></thead><tbody>
+      <tr><td><code>points</code></td><td>Объект точки: <code>tr_id</code>, <code>T</code>, <code>target_stop_id</code>, <code>target_time_begin</code>, <code>cur_dev_s</code>.</td></tr>
+      <tr><td><code>histories</code></td><td>Массив событий этого ТС: <code>tr_id</code>, <code>event_time</code>, <code>location_valid</code>, <code>lon</code>, <code>lat</code>, <code>speed</code>. Необязательные <code>alt</code> и <code>heading</code> заменяются на 0 при отсутствии. Пустая история допускается технически.</td></tr>
+      <tr><td><code>schedules</code></td><td>Массив плановых остановок: <code>tr_id</code>, <code>tt_action_item_id</code>, <code>time_begin</code> и геометрия <code>geom</code> в формате <code>POINT (lon lat)</code> либо отдельные <code>lon</code>, <code>lat</code>. Нужны целевая и окружающие остановки; backend передаёт окно ±30 минут от T.</td></tr>
+    </tbody></table></div>
+    <p>Следующий компактный пример иллюстрирует формат на одной точке и одном событии. Для содержательного прогноза передавайте полную доступную историю и плановый контекст.</p>
+    <pre data-language="Shell · прямой ML без Docker"><code>curl -sS -X POST http://127.0.0.1:8001/predict_v5 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "points":[{
+      "tr_id":131672,"T":"2026-01-06T03:35:00Z",
+      "target_stop_id":53700172828,
+      "target_time_begin":"2026-01-06T03:50:00Z","cur_dev_s":274
+    }],
+    "histories":[[{
+      "tr_id":131672,"event_time":"2026-01-06T03:34:50Z",
+      "location_valid":true,"lon":37.60,"lat":55.75,"speed":25
+    }]],
+    "schedules":[[{
+      "tr_id":131672,"tt_action_item_id":53700172828,
+      "time_begin":"2026-01-06T03:50:00Z",
+      "lon":37.61,"lat":55.76
+    }]]
+  }'</code></pre>
+    <pre data-language="JSON · пример 200, число условное"><code>{"predictions":[{"prediction_s":180.0,"model":"v5"}]}</code></pre>
+    <p>ML возвращает только отклонение и имя модели. Он не добавляет <code>level</code>, вероятность, интервал, координаты или признаки деградации — это делает backend. Неверные размеры массивов дают <code>422</code>. Вложенные объекты описаны как свободные словари: отсутствующие поля и неподходящие данные могут привести к <code>500</code>, поскольку полный контракт внутри ML пока не валидируется. Проверка первой остановки в окне выполняется в backend.</p>
+    <h3><span class="method post">POST</span> /predict — legacy</h3>
+    <p>Прежний метод принимает <code>{"rows":[{…}]}</code>: от 1 до 512 объектов с 15 числовыми полями <a href="#prediction">диагностических признаков</a>. Все поля обязательны; дополнительные поля и нечисловые значения запрещены. При совместимой legacy-модели ответ содержит <code>predictions</code> с отклонением, интервалом, вероятностью и именем модели.</p>
+    <div class="note warn"><strong>Для поставляемой V5 используйте /predict_v5.</strong><p>Схема legacy-запроса содержит 15 признаков, а V5 требует 104. Поэтому корректный по legacy-схеме запрос при загруженной V5 не обеспечивает успешный расчёт и может вернуть <code>500</code>. Backend уже использует новый метод.</p></div>
+  </section>
+
+  <section id="errors">
+    <h2>Ошибки и диагностика</h2>
+    <p>Сначала проверяйте HTTP-статус, затем содержимое ответа. Успешный HTTP-запрос к прогнозу ещё не означает, что ML доступен или данные пригодны: для этого есть <code>degraded</code>, <code>stale</code> и <code>level</code>.</p>
+    <div class="table-wrap"><table><thead><tr><th>Статус</th><th>Почему возникает</th><th>Что сделать</th></tr></thead><tbody>
+      <tr><td><code>200</code></td><td>Запрос обработан; прогноз может быть резервным.</td><td>Проверить поля качества и причину unknown.</td></tr>
+      <tr><td><code>201</code></td><td>Создана запись локального указания.</td><td>Сохранить id. Не считать это доставкой водителю.</td></tr>
+      <tr><td><code>403</code></td><td>Симуляция вызвана с ролью, отличной от admin.</td><td>Для административного теста передать role=admin. Это локальная проверка значения.</td></tr>
+      <tr><td><code>404</code></td><td>Неизвестный путь или нет плановой геометрии/координат для ТС.</td><td>Проверить порт сервиса, путь и наличие tr_id в расписании.</td></tr>
+      <tr><td><code>409</code></td><td>Метод несовместим с режимом: replay в live или симуляция в replay.</td><td>Прочитать /api/state. Переключать режим только с учётом сброса.</td></tr>
+      <tr><td><code>422</code></td><td>Неверная структура, диапазон, дата или прогнозная цель.</td><td>Изучить detail, исправить запрос и сверить цель с планом.</td></tr>
+      <tr><td><code>500</code></td><td>Необработанная ошибка: например, неполные вложенные данные прямого ML-запроса или повреждённые артефакты.</td><td>Проверить входные данные и логи backend/ML.</td></tr>
+      <tr><td><code>502</code> / <code>504</code></td><td>Возможная ошибка прокси nginx при недоступном или не ответившем вовремя backend.</td><td>Проверить /health напрямую на порту 8000 и логи контейнера.</td></tr>
+    </tbody></table></div>
+    <h3>Два формата detail</h3>
+    <p>Ошибки бизнес-проверок обычно содержат строку; ошибки валидации FastAPI — массив с расположением поля и пояснением. Не предполагайте, что <code>detail</code> всегда одного типа. Ошибки прокси и необработанные 500 могут вообще не быть JSON.</p>
+    <pre data-language="JSON · 409"><code>{"detail":"Switch to replay mode first"}</code></pre>
+    <pre data-language="JSON · 422, сокращённый пример"><code>{
+  "detail": [{
+    "type":"greater_than",
+    "loc":["body",0,"tr_id"],
+    "msg":"Input should be greater than 0",
+    "input":0,
+    "ctx":{"gt":0}
+  }]
+}</code></pre>
+    <p>В этом примере <code>loc</code> указывает на поле <code>tr_id</code> первого события в массиве тела запроса.</p>
+    <pre data-language="JavaScript · запрос из того же origin"><code>async function readState() {
+  const response = await fetch('/api/state');
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`HTTP ${response.status}: ${details}`);
+  }
+  return response.json();
+}
+
+try {
+  const { vehicles } = await readState();
+  console.log(vehicles.map(describePrediction));
+} catch (error) {
+  console.error('Не удалось получить состояние:', error.message);
+}</code></pre>
+    <p class="muted">Функция <code>describePrediction</code> приведена в разделе «Как читать результат». Для запуска примера используйте JavaScript-модуль или консоль браузера на странице Такт.</p>
+    <h3>Частые вопросы</h3>
+    <div class="table-wrap"><table><thead><tr><th>Наблюдение</th><th>Объяснение и следующий шаг</th></tr></thead><tbody>
+      <tr><td>После запуска vehicles пуст</td><td>В replay выполните шаг. В live проверьте приход событий, сопоставление unit_id → tr_id и выбранный режим.</td></tr>
+      <tr><td>accepted растёт, а прогноз не меняется</td><td>Проверьте mode, порядок event_time, счётчик дубликатов и 30-секундное ограничение расчёта на ТС.</td></tr>
+      <tr><td>«Нет плановой остановки…»</td><td>В текущем плане нет остановки в (T+10, T+15] минут. Сверьте ТС, время, часовой пояс и расписание. Map-match ищет ближайшую координату, а не подходящее время.</td></tr>
+      <tr><td>«Нет подтверждённого текущего отклонения»</td><td>Live ещё не наблюдал ТС возле остановки в условиях привязки. Случайные координаты эмулятора не подтверждают прибытие.</td></tr>
+      <tr><td>degraded=true</td><td>Backend использовал текущее отклонение вместо ML. Проверьте доступность ML, его логи и адрес ML_URL.</td></tr>
+      <tr><td>state показывает unknown, а risk — low/high</td><td>Сводка риска использует сохранённые данные и собственную группировку; state обновляет давность. Для решения по конкретному ТС используйте state.</td></tr>
+      <tr><td>Время отличается на три часа</td><td>UTC переводится в Europe/Moscow. Передавайте явный часовой пояс, не прибавляйте смещение вручную.</td></tr>
+      <tr><td>Указание есть в журнале, но водитель его не получил</td><td>В текущем MVP подключена только локальная очередь. Внешняя доставка не реализована.</td></tr>
+    </tbody></table></div>
+  </section>
+
+  <section id="limits">
+    <h2>Границы прототипа и дополнительные материалы</h2>
+    <p>Телеметрические буферы, текущие прогнозы и очередь указаний работают в памяти одного backend-процесса. Профили диспетчеров, назначения и запуски симуляций сохраняются в локальной SQLite. Здесь нет гарантированной внешней доставки, синхронизации нескольких backend-воркеров или полноценной аутентификации. Историческое качество модели, эвристический риск и сценарный коэффициент не заменяют проверку на реальном потоке.</p>
+    <p>Подробности в репозитории: <code>README.md</code> — установка и запуск; <code>docs/ANALYSIS.md</code> — модель, оценка и ограничения; <code>dataset/docs/Emulator-and-Telematic-Packets-Specification.md</code> — NDTP и эмулятор; <code>dashboard/MAP.md</code> — устройство карты. Снимки спецификаций: <code>docs/openapi-backend.json</code> и <code>docs/openapi-ml.json</code>. Актуальная схема работающего backend всегда доступна по <a href="/openapi.json">/openapi.json</a>.</p>
+    <p>Структура руководства опирается на практики <a href="https://docs.github.com/en/rest/quickstart" target="_blank" rel="noopener noreferrer">GitHub REST API Quickstart</a> (первый рабочий запрос), <a href="https://docs.stripe.com/api" target="_blank" rel="noopener noreferrer">Stripe API Reference</a> (соглашения и справочник) и <a href="https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api" target="_blank" rel="noopener noreferrer">GitHub Troubleshooting</a> (объяснение ошибок). Контракты и примеры Такт сверены с кодом этого проекта.</p>
+  </section>
+  <footer class="docs-footer">ТАКТ · Документация API 1.0.0 · <a href="#quickstart">Быстрый старт</a> · <a href="/docs/swagger">Swagger</a> · <a href="/openapi.json">OpenAPI</a></footer>
+</main>
+<div id="copy-status" role="status" aria-live="polite"></div>
+</body>
+</html>

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from ml.features import build_one, epoch, timestamp, load_traffic, load_schedule, haversine
 from backend.ndtp import handle
+from backend.api_docs import DESCRIPTION, TAGS, operation
 
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
@@ -23,62 +24,72 @@ DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
 simulation_runs={};simulation_tasks=set()
 
 class Telemetry(BaseModel):
+    """One HTTP telemetry event for a vehicle registered in the plan."""
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
-    tr_id:int=Field(gt=0)
-    event_time:str
-    lon:float=Field(ge=-180,le=180)
-    lat:float=Field(ge=-90,le=90)
-    speed:float=Field(ge=0,le=130)
-    location_valid:bool=True
+    tr_id:int=Field(gt=0,description='Идентификатор ТС в расписании, не NDTP unit_id.',examples=[131672])
+    event_time:str=Field(description='Время события; ISO 8601 с поясом предпочтителен, время без пояса считается UTC.',examples=['2026-01-06T03:34:50Z'])
+    lon:float=Field(ge=-180,le=180,description='Долгота в градусах.',examples=[37.60])
+    lat:float=Field(ge=-90,le=90,description='Широта в градусах.',examples=[55.75])
+    speed:float=Field(ge=0,le=130,description='Скорость в км/ч.',examples=[25])
+    location_valid:bool=Field(default=True,description='Можно ли использовать GPS-наблюдение для положения и признаков.')
 
 class Point(BaseModel):
+    """Manual forecast point tied to one scheduled stop in the 10–15 minute window."""
     model_config=ConfigDict(extra='forbid',allow_inf_nan=False)
-    tr_id:int=Field(gt=0)
-    T:str
-    target_stop_id:int
-    target_time_begin:str
-    cur_dev_s:float
+    tr_id:int=Field(gt=0,description='ТС, чья принятая история используется для расчёта.',examples=[131672])
+    T:str=Field(description='Момент расчёта; телеметрия позднее T не используется.',examples=['2026-01-06T03:35:00Z'])
+    target_stop_id:int=Field(description='Первая плановая остановка в окне (T+10, T+15] минут.',examples=[53700172828])
+    target_time_begin:str=Field(description='Плановое время целевой остановки; совпадает с активным расписанием.',examples=['2026-01-06T03:50:00Z'])
+    cur_dev_s:float=Field(description='Текущее отклонение в секундах: плюс — опоздание.',examples=[274])
 
 class Mode(BaseModel):
-    mode:str=Field(pattern='^(live|replay)$')
+    """Shared source mode for the whole backend process."""
+    mode:str=Field(pattern='^(live|replay)$',description='live принимает поток; replay восстанавливает архивный снимок и исторический прогон.',examples=['replay'])
 
 class WhatIf(BaseModel):
-    extra_vehicles:int=Field(default=0,ge=0,le=20)
-    headway_reduction_pct:float=Field(default=0,ge=0,le=50)
+    """Non-persistent risk scenario inputs."""
+    extra_vehicles:int=Field(default=0,ge=0,le=20,description='Дополнительные ТС только для эвристического расчёта.',examples=[1])
+    headway_reduction_pct:float=Field(default=0,ge=0,le=50,description='Сокращение интервала в процентах.',examples=[0])
 
 class MapMatch(BaseModel):
-    tr_id:int=Field(gt=0)
-    lon:float=Field(ge=-180,le=180)
-    lat:float=Field(ge=-90,le=90)
+    """Position that should be matched to a planned stop."""
+    tr_id:int=Field(gt=0,description='ТС, среди плановых остановок которого выполняется поиск.',examples=[131672])
+    lon:float=Field(ge=-180,le=180,description='Долгота в градусах.',examples=[37.60])
+    lat:float=Field(ge=-90,le=90,description='Широта в градусах.',examples=[55.75])
 
 class AdminSimulation(BaseModel):
-    role:str
-    tr_id:int=Field(gt=0)
-    scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$')
-    count:int=Field(default=3,ge=1,le=20)
-    interval_s:int=Field(default=30,ge=5,le=300)
+    """Legacy synchronous simulation body kept for compatibility."""
+    role:str=Field(description='Должно быть literal admin; это не проверка учётной записи.',examples=['admin'])
+    tr_id:int=Field(gt=0,description='ТС с координатами в состоянии или расписании.',examples=[131672])
+    scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$',description='normal=35, slow=8, stop=0 км/ч.')
+    count:int=Field(default=3,ge=1,le=20,description='Число синтетических событий.')
+    interval_s:int=Field(default=30,ge=5,le=300,description='Интервал между событиями, секунды.')
 
 class DriverCommand(BaseModel):
-    role:str=Field(pattern='^(dispatcher|admin)$')
-    dispatcher_id:str=Field(pattern='^dispatcher-[a-z0-9]{2,40}$')
-    tr_id:int=Field(gt=0)
-    action:str=Field(pattern='^(contact|maintain|accelerate_safely|slow_down_safely)$')
-    message:str=Field(min_length=5,max_length=300)
+    """Locally queued instruction; it is never delivered outside the MVP."""
+    role:str=Field(pattern='^(dispatcher|admin)$',description='Заявленная роль автора записи.',examples=['dispatcher'])
+    dispatcher_id:str=Field(pattern='^dispatcher-[a-z0-9]{2,40}$',description='Существующий локальный профиль диспетчера.',examples=['dispatcher-01'])
+    tr_id:int=Field(gt=0,description='Получатель указания.',examples=[131672])
+    action:str=Field(pattern='^(contact|maintain|accelerate_safely|slow_down_safely)$',description='contact, maintain, accelerate_safely или slow_down_safely.',examples=['contact'])
+    message:str=Field(min_length=5,max_length=300,description='Текст локального указания.',examples=['Уточните причину задержки и текущую обстановку.'])
 
 class DispatcherCreate(BaseModel):
-    name:str=Field(min_length=3,max_length=120)
-    login:str=Field(pattern='^[a-z0-9][a-z0-9_-]{2,40}$')
-    role:str=Field(default='Маршрутный диспетчер',min_length=3,max_length=80)
+    """New local dispatcher profile persisted in SQLite."""
+    name:str=Field(min_length=3,max_length=120,description='Отображаемое имя профиля.',examples=['Диспетчер №03'])
+    login:str=Field(pattern='^[a-z0-9][a-z0-9_-]{2,40}$',description='Уникальный локальный логин без пароля.',examples=['dispatcher03'])
+    role:str=Field(default='Маршрутный диспетчер',min_length=3,max_length=80,description='Название роли для интерфейса.',examples=['Маршрутный диспетчер'])
 
 class AssignmentUpdate(BaseModel):
-    tr_ids:list[int]=Field(min_length=0,max_length=100)
+    """Complete replacement for one profile's assigned vehicles."""
+    tr_ids:list[int]=Field(min_length=0,max_length=100,description='Полный список назначенных tr_id; пустой список снимает назначения.',examples=[[131672]])
 
 class SimulationCreate(BaseModel):
-    dispatcher_id:str=Field(pattern='^(admin|dispatcher)-\\d{2}$')
-    tr_id:int=Field(gt=0)
-    scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$')
-    count:int=Field(default=5,ge=1,le=20)
-    interval_s:int=Field(default=30,ge=5,le=300)
+    """Asynchronous simulation run owned by a local dispatcher profile."""
+    dispatcher_id:str=Field(pattern='^(admin|dispatcher)-\\d{2}$',description='Профиль оператора; запуск разрешён только роли «Администратор».',examples=['admin-01'])
+    tr_id:int=Field(gt=0,description='ТС для синтетического потока.',examples=[131672])
+    scenario:str=Field(default='slow',pattern='^(normal|slow|stop)$',description='normal=35, slow=8, stop=0 км/ч.')
+    count:int=Field(default=5,ge=1,le=20,description='Число событий в запуске.')
+    interval_s:int=Field(default=30,ge=5,le=300,description='Интервал событий, секунды.')
 
 def _account(row):
     return {'id':row['id'],'name':row['name'],'login':row['login'],'role':row['role'],'status':row['status']}
@@ -299,21 +310,25 @@ async def lifespan(app):
     server.close();await server.wait_closed();await client.aclose()
     if db is not None:db.close()
 
-app=FastAPI(title='Предиктор движения — Backend',version='1.0.0',lifespan=lifespan)
+app=FastAPI(title='Такт — Backend API',version='1.0.0',lifespan=lifespan,
+    description=DESCRIPTION,openapi_tags=TAGS,docs_url='/docs/swagger',
+    swagger_ui_parameters={'docExpansion':'none','displayRequestDuration':True,'filter':True})
 
-@app.get('/health')
-async def health():return {'status':'ok','mode':state['mode']}
+@app.get('/health',**operation('health'))
+async def health():
+    """Report backend availability and the current shared source mode."""
+    return {'status':'ok','mode':state['mode']}
 
-@app.get('/api/dispatchers')
+@app.get('/api/dispatchers',**operation('dispatchers'))
 async def dispatchers():return {'profiles':list_dispatchers(),'authentication':'managed_local_accounts'}
 
-@app.get('/api/dispatchers/{dispatcher_id}')
+@app.get('/api/dispatchers/{dispatcher_id}',**operation('dispatcher_profile'))
 async def dispatcher_profile(dispatcher_id:str):
     profile=get_dispatcher(dispatcher_id)
     if profile is None:raise HTTPException(404,'Dispatcher not found')
     return profile
 
-@app.post('/api/admin/dispatchers',status_code=201)
+@app.post('/api/admin/dispatchers',status_code=201,**operation('create_dispatcher'))
 async def create_dispatcher(body:DispatcherCreate):
     dispatcher_id=f"dispatcher-{uuid.uuid4().hex[:8]}"
     try:
@@ -321,7 +336,7 @@ async def create_dispatcher(body:DispatcherCreate):
     except sqlite3.IntegrityError:raise HTTPException(409,'Login already exists')
     return get_dispatcher(dispatcher_id)
 
-@app.put('/api/admin/dispatchers/{dispatcher_id}/assignments')
+@app.put('/api/admin/dispatchers/{dispatcher_id}/assignments',**operation('assignments'))
 async def set_dispatcher_assignments(dispatcher_id:str,body:AssignmentUpdate):
     if get_dispatcher(dispatcher_id) is None:raise HTTPException(404,'Dispatcher not found')
     known={int(item) for item in schedule.tr_id.unique()}
@@ -330,7 +345,7 @@ async def set_dispatcher_assignments(dispatcher_id:str,body:AssignmentUpdate):
     db.executemany('INSERT INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,item) for item in sorted(set(body.tr_ids))]);db.commit()
     return get_dispatcher(dispatcher_id)
 
-@app.post('/api/telemetry')
+@app.post('/api/telemetry',**operation('telemetry'))
 async def telemetry(events:list[Telemetry]):
     if not 1<=len(events)<=1000:raise HTTPException(422,'Batch size must be 1..1000')
     try:
@@ -342,14 +357,14 @@ async def telemetry(events:list[Telemetry]):
     except ValueError as e:raise HTTPException(422,str(e))
     return {'accepted':len(events)}
 
-@app.post('/api/predict')
+@app.post('/api/predict',**operation('predict'))
 async def predict(point:Point):
     try:
         if epoch(point.T)>time.time()+60:raise ValueError('Future forecast time')
         async with lock:return await forecast(point.model_dump(),list(history[point.tr_id]),'api')
     except ValueError as e:raise HTTPException(422,str(e))
 
-@app.post('/api/mode')
+@app.post('/api/mode',**operation('mode'))
 async def mode(body:Mode):
     global schedule,live_schedule_day
     async with lock:
@@ -359,7 +374,7 @@ async def mode(body:Mode):
             state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
     return state
 
-@app.post('/api/replay/step')
+@app.post('/api/replay/step',**operation('replay'))
 async def replay():
     async with lock:
         if state['mode']!='replay':raise HTTPException(409,'Switch to replay mode first')
@@ -375,7 +390,7 @@ async def replay():
         state['clock']=timestamp(p['T']).isoformat();state['index']+=1
         return {'done':False,'prediction':result,**state}
 
-@app.get('/api/state')
+@app.get('/api/state',**operation('state'))
 async def get_state(dispatcher_id:str|None=None):
     now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
     merged={tr:dict(vehicle) for tr,vehicle in archive_vehicles.items()}
@@ -404,16 +419,16 @@ async def get_state(dispatcher_id:str|None=None):
         output=[item for item in output if int(item['tr_id']) in assigned]
     return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points),'dispatcher_id':dispatcher_id}
 
-@app.get('/api/incidents')
+@app.get('/api/incidents',**operation('incidents'))
 async def get_incidents():
     return {'items':incidents(list(vehicles.values())),'total':len(incidents(list(vehicles.values()))),'as_of':state['clock']}
 
-@app.get('/api/risk')
+@app.get('/api/risk',**operation('risk'))
 async def get_risk():
     routes=route_risk(list(vehicles.values()))
     return {'routes':routes,'high_routes':sum(r['level']=='high' for r in routes),'medium_routes':sum(r['level']=='medium' for r in routes),'as_of':state['clock']}
 
-@app.post('/api/what-if')
+@app.post('/api/what-if',**operation('what_if'))
 async def what_if(body:WhatIf):
     baseline=route_risk(list(vehicles.values()))
     relief=max(0.5,1-0.15*body.extra_vehicles-body.headway_reduction_pct/100)
@@ -425,18 +440,18 @@ async def what_if(body:WhatIf):
         projected.append({**item,'projected_late_probability':adjusted,'projected_level':level})
     return {'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'risk_multiplier':relief},'baseline':baseline,'projected':projected}
 
-@app.post('/api/map-match')
+@app.post('/api/map-match',**operation('map_match'))
 async def map_match(body:MapMatch):
     result=match_stop(body.tr_id,body.lon,body.lat)
     if result is None:raise HTTPException(404,'No planned geometry for this route')
     return result
 
-@app.get('/api/driver-commands')
+@app.get('/api/driver-commands',**operation('commands'))
 async def get_driver_commands(tr_id:int|None=None):
     items=[item for item in driver_commands if tr_id is None or item['tr_id']==tr_id]
     return {'items':items,'channel':'local_dispatch_outbox','external_delivery':False}
 
-@app.post('/api/driver-commands',status_code=201)
+@app.post('/api/driver-commands',status_code=201,**operation('queue_command'))
 async def queue_driver_command(body:DriverCommand):
     dispatcher=get_dispatcher(body.dispatcher_id)
     if dispatcher is None:raise HTTPException(422,'Unknown dispatcher profile')
@@ -457,7 +472,7 @@ async def queue_driver_command(body:DriverCommand):
     driver_commands.appendleft(command)
     return command
 
-@app.get('/api/admin/simulation')
+@app.get('/api/admin/simulation',**operation('simulation_status'))
 async def simulation_status():
     return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':list(simulation_runs.values())[:10]}
 
@@ -487,7 +502,7 @@ async def execute_simulation(run):
     except Exception as exc:
         run['status']='failed';run['error']=str(exc);run['completed_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
 
-@app.post('/api/admin/simulations',status_code=202)
+@app.post('/api/admin/simulations',status_code=202,**operation('create_simulation'))
 async def create_simulation(body:SimulationCreate):
     operator=get_dispatcher(body.dispatcher_id)
     if operator is None or operator['role']!='Администратор':raise HTTPException(403,'Admin account required')
@@ -497,11 +512,11 @@ async def create_simulation(body:SimulationCreate):
     task=asyncio.create_task(execute_simulation(run));simulation_tasks.add(task);task.add_done_callback(simulation_tasks.discard)
     return run
 
-@app.get('/api/admin/simulations')
+@app.get('/api/admin/simulations',**operation('list_simulations'))
 async def list_simulations():
     return {'items':list(simulation_runs.values()),'mode':state['mode']}
 
-@app.get('/api/admin/simulations/{run_id}')
+@app.get('/api/admin/simulations/{run_id}',**operation('get_simulation'))
 async def get_simulation(run_id:str):
     run=simulation_runs.get(run_id)
     if run is None:
@@ -510,7 +525,7 @@ async def get_simulation(run_id:str):
         return json.loads(row['payload'])
     return run
 
-@app.post('/api/admin/simulation')
+@app.post('/api/admin/simulation',**operation('legacy_simulation'))
 async def admin_simulation(body:AdminSimulation):
     if body.role!='admin':raise HTTPException(403,'Admin role required')
     if state['mode']!='live':raise HTTPException(409,'Switch to live mode before starting admin simulation')
@@ -528,7 +543,7 @@ async def admin_simulation(body:AdminSimulation):
         await ingest(event);accepted+=1
     return {'accepted':accepted,'scenario':body.scenario,'tr_id':body.tr_id,'role':'admin','message':'Simulation events injected into live pipeline'}
 
-@app.get('/api/network')
+@app.get('/api/network',**operation('network'))
 async def network():
     # No route IDs in source: expose planned stop sequences, explicitly labeled.
     paths=[]
@@ -537,7 +552,7 @@ async def network():
         paths.append({'tr_id':int(tr),'points':g[['lon','lat']].values.tolist()})
     return {'kind':'planned_stop_sequences','paths':paths}
 
-@app.get('/api/metrics')
+@app.get('/api/metrics',**operation('metrics'))
 async def metrics():
     legacy=json.loads((ARTIFACT/'metrics.json').read_text(encoding='utf-8'))
     model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8')) if (ARTIFACT/'model_v5.json').exists() else {}
@@ -553,8 +568,13 @@ async def metrics():
 
 app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
 
-@app.get('/')
+@app.get('/docs',include_in_schema=False)
+async def documentation():
+    """Serve the human-readable API guide without modifying the dashboard UI."""
+    return FileResponse(ROOT/'dashboard/docs.html')
+
+@app.get('/',include_in_schema=False)
 async def index():return FileResponse(ROOT/'dashboard/dispatcher.html')
 
-@app.get('/admin')
+@app.get('/admin',include_in_schema=False)
 async def admin_page():return FileResponse(ROOT/'dashboard/admin-control.html')

@@ -13,7 +13,8 @@ python scripts/run_prototype.py
 ```
 
 - Дашборд: http://localhost:8080
-- Backend и Swagger: http://localhost:8000/docs
+- Руководство API: http://localhost:8080/docs (также http://localhost:8000/docs)
+- Интерактивный Swagger backend: http://localhost:8000/docs/swagger
 - NDTP: TCP localhost:9201
 - API эмулятора: http://localhost:18080
 - ML доступен внутри сети Compose по `http://ml:8001`.
@@ -93,6 +94,11 @@ docker compose up -d --build
 
 ## API
 
+Полное руководство с примерами, полями ответов и ошибками: `/docs`. Swagger для
+проверки запросов: `/docs/swagger`, спецификация: `/openapi.json`. Руководство
+учитывает профили диспетчеров, назначения рейсов, архивный снимок и
+асинхронные симуляции текущей версии backend.
+
 - `POST /api/telemetry` — массив до 1000 событий `{tr_id,event_time,lon,lat,speed,location_valid}`.
 - `POST /api/predict` — `{tr_id,T,target_stop_id,target_time_begin,cur_dev_s}`; проверяется первая остановка планового окна, признаки строятся из принятой истории.
 - `POST /api/replay/step` — следующий исторический прогноз.
@@ -109,7 +115,21 @@ docker compose up -d --build
 
 Полный интеграционный контроль запущенных локальных сервисов: `python scripts/verify_running.py`. Он сбрасывает replay, проверяет все 151 точки против submission, посылает фрагментированный TCP-пакет и пакет с ошибочным CRC, сохраняет задержки запросов в `artifacts/verification.json`.
 
-OpenAPI: `/openapi.json`, интерактивная документация `/docs`; сохранённые спецификации в `docs/`. Сгенерированный PyDoc в `docs/code/`. Не публикуйте этот локальный MVP в интернет без добавления авторизации.
+Сохранённые OpenAPI-спецификации находятся в `docs/`. Не публикуйте этот локальный MVP в интернет без добавления авторизации.
+
+## Документация кода (Sphinx)
+
+Sphinx строит справочник по backend, NDTP, ML V5, обучению и скриптам из
+docstrings. Зависимости документации отделены от runtime-образа:
+
+```sh
+python -m pip install -r requirements.txt -r requirements-docs.txt
+python -m sphinx -b html docs/sphinx docs/_build/html -W --keep-going
+```
+
+Откройте `docs/_build/html/index.html`. На macOS/Linux можно выполнить
+`make html` из `docs/sphinx`, на Windows — `docs\sphinx\make.bat html`.
+Каталог `docs/_build/` игнорируется Git.
 
 > Связь с водителем в текущем MVP — аудируемая локальная очередь диспетчерских указаний. Реальный радио-, телефонический или телематический канал не подключён: интерфейс прямо показывает этот статус и не заявляет о внешней доставке. Для промышленного применения нужны аутентификация диспетчера, интеграция с утверждённым каналом связи и подтверждение получения водителем.
 

@@ -1,1 +1,1272 @@
-{"openapi":"3.1.0","info":{"title":"Предиктор движения — Backend","version":"1.0.0"},"paths":{"/health":{"get":{"summary":"Health","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/api/telemetry":{"post":{"summary":"Telemetry","operationId":"telemetry_api_telemetry_post","requestBody":{"content":{"application/json":{"schema":{"items":{"$ref":"#/components/schemas/Telemetry"},"type":"array","title":"Events"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/predict":{"post":{"summary":"Predict","operationId":"predict_api_predict_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Point"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/mode":{"post":{"summary":"Mode","operationId":"mode_api_mode_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/Mode"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/replay/step":{"post":{"summary":"Replay","operationId":"replay_api_replay_step_post","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/api/state":{"get":{"summary":"Get State","operationId":"get_state_api_state_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/api/network":{"get":{"summary":"Network","operationId":"network_api_network_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/api/metrics":{"get":{"summary":"Metrics","operationId":"metrics_api_metrics_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}},"/":{"get":{"summary":"Index","operationId":"index__get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}}}}}},"components":{"schemas":{"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"Mode":{"properties":{"mode":{"type":"string","pattern":"^(live|replay)$","title":"Mode"}},"type":"object","required":["mode"],"title":"Mode"},"Point":{"properties":{"tr_id":{"type":"integer","exclusiveMinimum":0.0,"title":"Tr Id"},"T":{"type":"string","title":"T"},"target_stop_id":{"type":"integer","title":"Target Stop Id"},"target_time_begin":{"type":"string","title":"Target Time Begin"},"cur_dev_s":{"type":"number","title":"Cur Dev S"}},"additionalProperties":false,"type":"object","required":["tr_id","T","target_stop_id","target_time_begin","cur_dev_s"],"title":"Point"},"Telemetry":{"properties":{"tr_id":{"type":"integer","exclusiveMinimum":0.0,"title":"Tr Id"},"event_time":{"type":"string","title":"Event Time"},"lon":{"type":"number","maximum":180.0,"minimum":-180.0,"title":"Lon"},"lat":{"type":"number","maximum":90.0,"minimum":-90.0,"title":"Lat"},"speed":{"type":"number","maximum":130.0,"minimum":0.0,"title":"Speed"},"location_valid":{"type":"boolean","title":"Location Valid","default":true}},"additionalProperties":false,"type":"object","required":["tr_id","event_time","lon","lat","speed"],"title":"Telemetry"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"},"input":{"title":"Input"},"ctx":{"type":"object","title":"Context"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Такт — Backend API",
+    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили и\nназначения хранятся в SQLite, а история телеметрии и очередь указаний — в\nпамяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Состояние"
+        ],
+        "summary": "Проверить доступность backend",
+        "description": "Возвращает `status: ok` и текущий режим. Ответ не подтверждает доступность ML или наличие входящего NDTP-потока; для этого смотрите `GET /api/state`.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dispatchers": {
+      "get": {
+        "tags": [
+          "Диспетчеры"
+        ],
+        "summary": "Получить локальные профили",
+        "description": "Возвращает активные профили с массивом assigned_tr_ids и признаком `authentication: managed_local_accounts`. Это список рабочих мест, а не защищённые пользовательские сессии.",
+        "operationId": "dispatchers_api_dispatchers_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dispatchers/{dispatcher_id}": {
+      "get": {
+        "tags": [
+          "Диспетчеры"
+        ],
+        "summary": "Получить профиль диспетчера",
+        "description": "Возвращает один профиль и его назначения. Идентификаторы seed-профилей: admin-01, dispatcher-01, dispatcher-02.",
+        "operationId": "dispatcher_profile_api_dispatchers__dispatcher_id__get",
+        "parameters": [
+          {
+            "name": "dispatcher_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Профиль не найден."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/dispatchers": {
+      "post": {
+        "tags": [
+          "Диспетчеры"
+        ],
+        "summary": "Создать локальный профиль",
+        "description": "Создаёт активный профиль в SQLite и возвращает его. login уникален; пароль и внешняя аутентификация не предусмотрены.",
+        "operationId": "create_dispatcher_api_admin_dispatchers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DispatcherCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Такой login уже существует."
+          },
+          "422": {
+            "description": "Не пройдены правила name, login или role."
+          }
+        }
+      }
+    },
+    "/api/admin/dispatchers/{dispatcher_id}/assignments": {
+      "put": {
+        "tags": [
+          "Диспетчеры"
+        ],
+        "summary": "Заменить назначения рейсов",
+        "description": "Полностью заменяет назначения профиля значениями `tr_ids`. Пустой массив снимает все назначения. Допустимы только tr_id из загруженного расписания.",
+        "operationId": "set_dispatcher_assignments_api_admin_dispatchers__dispatcher_id__assignments_put",
+        "parameters": [
+          {
+            "name": "dispatcher_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Профиль не найден."
+          },
+          "422": {
+            "description": "В массиве есть неизвестное ТС/рейс или неверная структура тела."
+          }
+        }
+      }
+    },
+    "/api/telemetry": {
+      "post": {
+        "tags": [
+          "Источники и прогноз"
+        ],
+        "summary": "Принять пакет телеметрии",
+        "description": "Тело — массив из 1…1000 событий. Передавайте события каждого ТС по event_time. Повторы и опоздавшие события пропускаются, но `accepted` всё равно означает размер валидного пакета. В live прогноз для ТС запускается не чаще раза в 30 секунд времени событий.",
+        "operationId": "telemetry_api_telemetry_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "$ref": "#/components/schemas/Telemetry"
+                },
+                "type": "array",
+                "title": "Events"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Неверные поля, время более чем на 60 секунд в будущем или размер пакета вне 1…1000."
+          }
+        }
+      }
+    },
+    "/api/predict": {
+      "post": {
+        "tags": [
+          "Источники и прогноз"
+        ],
+        "summary": "Рассчитать прогноз для точки",
+        "description": "Берёт принятую историю ТС и активное расписание. Целевая остановка должна быть первой по времени в (T+600, T+900]; результат сохраняется в общей картине с `source: api`. Ошибка ML даёт `200` с `degraded: true` и persistence fallback.",
+        "operationId": "predict_api_predict_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Point"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Некорректная точка, будущее T либо цель не соответствует плану."
+          }
+        }
+      }
+    },
+    "/api/mode": {
+      "post": {
+        "tags": [
+          "Источники и прогноз"
+        ],
+        "summary": "Выбрать источник данных",
+        "description": "live очищает рабочую историю и прогнозы. replay восстанавливает архивный снимок: последний исторический прогноз каждого ТС доступен сразу, а первый replay-step начинает прогон заново. Режим общий для всех клиентов.",
+        "operationId": "mode_api_mode_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Mode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "mode должен быть live или replay."
+          }
+        }
+      }
+    },
+    "/api/replay/step": {
+      "post": {
+        "tags": [
+          "Источники и прогноз"
+        ],
+        "summary": "Сделать шаг исторического прогона",
+        "description": "В replay обрабатывает следующую точку validate и историю её ТС за 10 минут. Первый шаг после архивного снимка очищает снимок. До конца возвращает `done: false` и `prediction`; в конце — `done: true` без prediction.",
+        "operationId": "replay_api_replay_step_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Выбран live; переключение в replay меняет общую картину."
+          },
+          "422": {
+            "description": "Точка не соответствует активному расписанию."
+          }
+        }
+      }
+    },
+    "/api/state": {
+      "get": {
+        "tags": [
+          "Состояние"
+        ],
+        "summary": "Получить картину рейсов",
+        "description": "Возвращает архивный снимок, поверх которого накладывается актуальная live-позиция, а также mode, counters и total_points. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Прогнозы, не являющиеся архивными, старше 120 секунд становятся `stale`/`unknown` в ответе.",
+        "operationId": "get_state_api_state_get",
+        "parameters": [
+          {
+            "name": "dispatcher_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Профиль dispatcher_id не найден."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/incidents": {
+      "get": {
+        "tags": [
+          "Риски и сценарии"
+        ],
+        "summary": "Получить очередь внимания",
+        "description": "Возвращает сохранённые high/medium результаты: high идут первыми, затем medium. Это текущая очередь, не журнал; unknown в неё не входит. Для свежести конкретного рейса используйте /api/state.",
+        "operationId": "get_incidents_api_incidents_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/risk": {
+      "get": {
+        "tags": [
+          "Риски и сценарии"
+        ],
+        "summary": "Получить сводку риска",
+        "description": "Группирует сохранённые результаты по tr_id. В исходных данных нет отдельного route_id, поэтому `routes` фактически описывает ТС, а не официальные маршруты.",
+        "operationId": "get_risk_api_risk_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/what-if": {
+      "post": {
+        "tags": [
+          "Риски и сценарии"
+        ],
+        "summary": "Оценить иллюстративный сценарий",
+        "description": "Не вызывает ML и ничего не меняет. Вероятность умножается на max(0.5, 1 − 0.15 × extra_vehicles − headway_reduction_pct / 100). Это эвристика интерфейса, не прогноз эффекта выпуска резерва.",
+        "operationId": "what_if_api_what_if_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatIf"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Параметры вне допустимых диапазонов."
+          }
+        }
+      }
+    },
+    "/api/map-match": {
+      "post": {
+        "tags": [
+          "Карта"
+        ],
+        "summary": "Найти ближайшую плановую остановку",
+        "description": "Ищет ближайшую по прямой остановку выбранного ТС и возвращает distance_m, segment_index, next_stop_id и confidence=max(0,1−distance/250). confidence — оценка близости, не вероятность дорожного сопоставления.",
+        "operationId": "map_match_api_map_match_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MapMatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Для ТС нет плановой геометрии."
+          },
+          "422": {
+            "description": "Некорректный tr_id или координаты."
+          }
+        }
+      }
+    },
+    "/api/driver-commands": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Прочитать локальную очередь",
+        "description": "Необязательный `tr_id` фильтрует максимум 200 записей от новых к старым. В ответе `external_delivery: false`: канал связи с водителем не подключён и очередь очищается после перезапуска backend.",
+        "operationId": "get_driver_commands_api_driver_commands_get",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tr Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "tr_id должен быть целым числом."
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Зарегистрировать указание",
+        "description": "Создаёт запись только для существующего локального dispatcher_id. `queued_for_integration` означает, что запись находится в local_dispatch_outbox; это не доставка водителю. Каждый повтор создаёт новую запись.",
+        "operationId": "queue_driver_command_api_driver_commands_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DriverCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Неизвестный профиль или неверные поля указания."
+          }
+        }
+      }
+    },
+    "/api/admin/simulation": {
+      "get": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Получить состояние контура симуляций",
+        "description": "Возвращает требуемую роль, текущий mode, поддержанные сценарии и последние запущенные runs. Ничего не запускает.",
+        "operationId": "simulation_status_api_admin_simulation_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Синхронная симуляция (legacy)",
+        "description": "Сохранена для совместимости. Требует literal `role: admin`, live mode и сразу добавляет события. Для нового интерфейса используйте POST /api/admin/simulations: у него есть профиль оператора, id, прогресс и результат.",
+        "operationId": "admin_simulation_api_admin_simulation_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdminSimulation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "role не admin."
+          },
+          "404": {
+            "description": "Нет координат ТС."
+          },
+          "409": {
+            "description": "Выбран не live режим."
+          },
+          "422": {
+            "description": "Неверные поля."
+          }
+        }
+      }
+    },
+    "/api/admin/simulations": {
+      "get": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Получить запуски текущего процесса",
+        "description": "Возвращает runs, которые ещё есть в памяти текущего backend, и режим. Для конкретного сохранённого run используйте метод по id.",
+        "operationId": "list_simulations_api_admin_simulations_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Запустить асинхронную симуляцию",
+        "description": "Требует существующий профиль с ролью «Администратор» и live mode. Возвращает `202` и run с queued status; затем фоновая задача добавляет события и сохраняет progress, events, effect до/после в SQLite.",
+        "operationId": "create_simulation_api_admin_simulations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Профиль не является администратором."
+          },
+          "409": {
+            "description": "Симуляции работают только в live."
+          },
+          "422": {
+            "description": "Неверные параметры сценария."
+          }
+        }
+      }
+    },
+    "/api/admin/simulations/{run_id}": {
+      "get": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Получить запуск по id",
+        "description": "Возвращает текущий или сохранённый в SQLite запуск, включая статус, progress, events и effect. После перезапуска backend запись находится через SQLite.",
+        "operationId": "get_simulation_api_admin_simulations__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Симуляция не найдена."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network": {
+      "get": {
+        "tags": [
+          "Карта"
+        ],
+        "summary": "Получить плановые линии",
+        "description": "Возвращает `planned_stop_sequences`: до 500 пар `[lon, lat]` на tr_id. Это соединённые плановые остановки, не геометрия дорог; Leaflet обычно ожидает пары в обратном порядке.",
+        "operationId": "network_api_network_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics": {
+      "get": {
+        "tags": [
+          "Качество модели"
+        ],
+        "summary": "Прочитать офлайн-метрики",
+        "description": "Возвращает legacy-метрики, объект v5, feature_importance и строки readable. Для V5 используйте `v5.mae_s`; верхнеуровневый test_mae_s относится к прежнему отчёту. Текущая задержка ML — counters.last_inference_ms в /api/state.",
+        "operationId": "metrics_api_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AdminSimulation": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "title": "Role",
+            "description": "Должно быть literal admin; это не проверка учётной записи.",
+            "examples": [
+              "admin"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "ТС с координатами в состоянии или расписании.",
+            "examples": [
+              131672
+            ]
+          },
+          "scenario": {
+            "type": "string",
+            "pattern": "^(normal|slow|stop)$",
+            "title": "Scenario",
+            "description": "normal=35, slow=8, stop=0 км/ч.",
+            "default": "slow"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Count",
+            "description": "Число синтетических событий.",
+            "default": 3
+          },
+          "interval_s": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 5.0,
+            "title": "Interval S",
+            "description": "Интервал между событиями, секунды.",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "required": [
+          "role",
+          "tr_id"
+        ],
+        "title": "AdminSimulation",
+        "description": "Legacy synchronous simulation body kept for compatibility."
+      },
+      "AssignmentUpdate": {
+        "properties": {
+          "tr_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 0,
+            "title": "Tr Ids",
+            "description": "Полный список назначенных tr_id; пустой список снимает назначения.",
+            "examples": [
+              [
+                131672
+              ]
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "tr_ids"
+        ],
+        "title": "AssignmentUpdate",
+        "description": "Complete replacement for one profile's assigned vehicles."
+      },
+      "DispatcherCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 120,
+            "minLength": 3,
+            "title": "Name",
+            "description": "Отображаемое имя профиля.",
+            "examples": [
+              "Диспетчер №03"
+            ]
+          },
+          "login": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{2,40}$",
+            "title": "Login",
+            "description": "Уникальный локальный логин без пароля.",
+            "examples": [
+              "dispatcher03"
+            ]
+          },
+          "role": {
+            "type": "string",
+            "maxLength": 80,
+            "minLength": 3,
+            "title": "Role",
+            "description": "Название роли для интерфейса.",
+            "default": "Маршрутный диспетчер",
+            "examples": [
+              "Маршрутный диспетчер"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "login"
+        ],
+        "title": "DispatcherCreate",
+        "description": "New local dispatcher profile persisted in SQLite."
+      },
+      "DriverCommand": {
+        "properties": {
+          "role": {
+            "type": "string",
+            "pattern": "^(dispatcher|admin)$",
+            "title": "Role",
+            "description": "Заявленная роль автора записи.",
+            "examples": [
+              "dispatcher"
+            ]
+          },
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^dispatcher-[a-z0-9]{2,40}$",
+            "title": "Dispatcher Id",
+            "description": "Существующий локальный профиль диспетчера.",
+            "examples": [
+              "dispatcher-01"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "Получатель указания.",
+            "examples": [
+              131672
+            ]
+          },
+          "action": {
+            "type": "string",
+            "pattern": "^(contact|maintain|accelerate_safely|slow_down_safely)$",
+            "title": "Action",
+            "description": "contact, maintain, accelerate_safely или slow_down_safely.",
+            "examples": [
+              "contact"
+            ]
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 300,
+            "minLength": 5,
+            "title": "Message",
+            "description": "Текст локального указания.",
+            "examples": [
+              "Уточните причину задержки и текущую обстановку."
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "role",
+          "dispatcher_id",
+          "tr_id",
+          "action",
+          "message"
+        ],
+        "title": "DriverCommand",
+        "description": "Locally queued instruction; it is never delivered outside the MVP."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "MapMatch": {
+        "properties": {
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "ТС, среди плановых остановок которого выполняется поиск.",
+            "examples": [
+              131672
+            ]
+          },
+          "lon": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Lon",
+            "description": "Долгота в градусах.",
+            "examples": [
+              37.6
+            ]
+          },
+          "lat": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Lat",
+            "description": "Широта в градусах.",
+            "examples": [
+              55.75
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "tr_id",
+          "lon",
+          "lat"
+        ],
+        "title": "MapMatch",
+        "description": "Position that should be matched to a planned stop."
+      },
+      "Mode": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "pattern": "^(live|replay)$",
+            "title": "Mode",
+            "description": "live принимает поток; replay восстанавливает архивный снимок и исторический прогон.",
+            "examples": [
+              "replay"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "title": "Mode",
+        "description": "Shared source mode for the whole backend process."
+      },
+      "Point": {
+        "properties": {
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "ТС, чья принятая история используется для расчёта.",
+            "examples": [
+              131672
+            ]
+          },
+          "T": {
+            "type": "string",
+            "title": "T",
+            "description": "Момент расчёта; телеметрия позднее T не используется.",
+            "examples": [
+              "2026-01-06T03:35:00Z"
+            ]
+          },
+          "target_stop_id": {
+            "type": "integer",
+            "title": "Target Stop Id",
+            "description": "Первая плановая остановка в окне (T+10, T+15] минут.",
+            "examples": [
+              53700172828
+            ]
+          },
+          "target_time_begin": {
+            "type": "string",
+            "title": "Target Time Begin",
+            "description": "Плановое время целевой остановки; совпадает с активным расписанием.",
+            "examples": [
+              "2026-01-06T03:50:00Z"
+            ]
+          },
+          "cur_dev_s": {
+            "type": "number",
+            "title": "Cur Dev S",
+            "description": "Текущее отклонение в секундах: плюс — опоздание.",
+            "examples": [
+              274
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tr_id",
+          "T",
+          "target_stop_id",
+          "target_time_begin",
+          "cur_dev_s"
+        ],
+        "title": "Point",
+        "description": "Manual forecast point tied to one scheduled stop in the 10–15 minute window."
+      },
+      "SimulationCreate": {
+        "properties": {
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^(admin|dispatcher)-\\d{2}$",
+            "title": "Dispatcher Id",
+            "description": "Профиль оператора; запуск разрешён только роли «Администратор».",
+            "examples": [
+              "admin-01"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "ТС для синтетического потока.",
+            "examples": [
+              131672
+            ]
+          },
+          "scenario": {
+            "type": "string",
+            "pattern": "^(normal|slow|stop)$",
+            "title": "Scenario",
+            "description": "normal=35, slow=8, stop=0 км/ч.",
+            "default": "slow"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Count",
+            "description": "Число событий в запуске.",
+            "default": 5
+          },
+          "interval_s": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 5.0,
+            "title": "Interval S",
+            "description": "Интервал событий, секунды.",
+            "default": 30
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id",
+          "tr_id"
+        ],
+        "title": "SimulationCreate",
+        "description": "Asynchronous simulation run owned by a local dispatcher profile."
+      },
+      "Telemetry": {
+        "properties": {
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "Идентификатор ТС в расписании, не NDTP unit_id.",
+            "examples": [
+              131672
+            ]
+          },
+          "event_time": {
+            "type": "string",
+            "title": "Event Time",
+            "description": "Время события; ISO 8601 с поясом предпочтителен, время без пояса считается UTC.",
+            "examples": [
+              "2026-01-06T03:34:50Z"
+            ]
+          },
+          "lon": {
+            "type": "number",
+            "maximum": 180.0,
+            "minimum": -180.0,
+            "title": "Lon",
+            "description": "Долгота в градусах.",
+            "examples": [
+              37.6
+            ]
+          },
+          "lat": {
+            "type": "number",
+            "maximum": 90.0,
+            "minimum": -90.0,
+            "title": "Lat",
+            "description": "Широта в градусах.",
+            "examples": [
+              55.75
+            ]
+          },
+          "speed": {
+            "type": "number",
+            "maximum": 130.0,
+            "minimum": 0.0,
+            "title": "Speed",
+            "description": "Скорость в км/ч.",
+            "examples": [
+              25
+            ]
+          },
+          "location_valid": {
+            "type": "boolean",
+            "title": "Location Valid",
+            "description": "Можно ли использовать GPS-наблюдение для положения и признаков.",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tr_id",
+          "event_time",
+          "lon",
+          "lat",
+          "speed"
+        ],
+        "title": "Telemetry",
+        "description": "One HTTP telemetry event for a vehicle registered in the plan."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WhatIf": {
+        "properties": {
+          "extra_vehicles": {
+            "type": "integer",
+            "maximum": 20.0,
+            "minimum": 0.0,
+            "title": "Extra Vehicles",
+            "description": "Дополнительные ТС только для эвристического расчёта.",
+            "default": 0,
+            "examples": [
+              1
+            ]
+          },
+          "headway_reduction_pct": {
+            "type": "number",
+            "maximum": 50.0,
+            "minimum": 0.0,
+            "title": "Headway Reduction Pct",
+            "description": "Сокращение интервала в процентах.",
+            "default": 0,
+            "examples": [
+              0
+            ]
+          }
+        },
+        "type": "object",
+        "title": "WhatIf",
+        "description": "Non-persistent risk scenario inputs."
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Состояние",
+      "description": "Доступность backend, снимок рейсов, режим и диагностические счётчики."
+    },
+    {
+      "name": "Диспетчеры",
+      "description": "Локальные профили и закреплённые за ними транспортные средства."
+    },
+    {
+      "name": "Источники и прогноз",
+      "description": "Replay, live-телеметрия и ручной прогноз. Эти методы изменяют общую картину."
+    },
+    {
+      "name": "Риски и сценарии",
+      "description": "Очередь внимания и иллюстративный расчёт без изменения потока."
+    },
+    {
+      "name": "Карта",
+      "description": "Плановые линии и ближайшая остановка; дорожный граф не используется."
+    },
+    {
+      "name": "Указания водителю",
+      "description": "Локальная очередь указаний без внешней доставки."
+    },
+    {
+      "name": "Симуляции",
+      "description": "Тестовые сценарии live-контура с сохранённым жизненным циклом."
+    },
+    {
+      "name": "Качество модели",
+      "description": "Офлайн-метрики и важность признаков, не оценка текущего live-потока."
+    }
+  ]
+}

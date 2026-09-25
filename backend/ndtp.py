@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 SIZES={0:26,2:26,8:6,10:37,15:50,16:8}
 
 def crc16(data):
+    """Return the CRC-16/Modbus checksum for a byte sequence."""
     crc=0xffff
     for byte in data:
         crc^=byte
@@ -16,6 +17,7 @@ def crc16(data):
     return crc
 
 def decode(frame):
+    """Validate and decode one complete NDTP frame into normalized telemetry events."""
     if len(frame)<25: raise ValueError('short frame')
     sig,size,flags,stored,kind,unit,request=struct.unpack_from('<HHHHBIH',frame)
     if sig!=0x7e7e or len(frame)!=15+size or size<10 or kind!=2 or flags!=0: raise ValueError('invalid NPL')
@@ -40,6 +42,7 @@ def decode(frame):
     return events
 
 async def handle(reader,writer,callback,counters):
+    """Read NDTP frames from one TCP connection and forward valid events to callback."""
     try:
         while True:
             header=await asyncio.wait_for(reader.readexactly(15),timeout=120)

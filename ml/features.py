@@ -13,15 +13,18 @@ def timestamp(value):
     return t.tz_localize('UTC').tz_convert('Europe/Moscow') if t.tzinfo is None else t.tz_convert('Europe/Moscow')
 
 def epoch(value):
+    """Convert a timestamp accepted by :func:`timestamp` to Unix seconds."""
     return timestamp(value).timestamp()
 
 def load_traffic(path):
+    """Load telemetry columns permitted by the feature pipeline."""
     df = pd.read_csv(path, usecols=TRAFFIC_COLUMNS)
     df['ts'] = pd.to_datetime(df.event_time, format='mixed').map(epoch)
     df['location_valid'] = df.location_valid.astype(str).str.lower().eq('true')
     return df.sort_values('ts').drop_duplicates(['tr_id', 'ts'], keep='last')
 
 def load_schedule(path):
+    """Load plan stops without actual-arrival fields and parse point geometry."""
     # Explicit allow-list prevents accidental reads of time_fact_begin.
     df = pd.read_csv(path, usecols=['tt_action_item_id', 'tr_id', 'time_begin', 'geom', 'building_address'])
     df['ts'] = pd.to_datetime(df.time_begin, format='mixed').map(epoch)
@@ -30,11 +33,13 @@ def load_schedule(path):
     return df.sort_values('ts')
 
 def haversine(lon, lat, lon2, lat2):
+    """Return the great-circle distance between two points in metres."""
     p1, p2 = np.radians(lat), np.radians(lat2)
     a = np.sin((p2-p1)/2)**2 + np.cos(p1)*np.cos(p2)*np.sin(np.radians(lon2-lon)/2)**2
     return float(6371000*2*np.arcsin(np.sqrt(np.clip(a, 0, 1))))
 
 def build_one(point, history, stop=None):
+    """Build 15 causal features from one forecast point and preceding history."""
     t, target = epoch(point['T']), epoch(point['target_time_begin'])
     horizon = target-t
     if not 600 < horizon <= 900:
@@ -75,6 +80,7 @@ def build_one(point, history, stop=None):
     return f
 
 def build_table(points, traffic, schedule):
+    """Build compact causal feature rows for every labelled forecast point."""
     groups = {int(k):g.to_dict('records') for k,g in traffic.groupby('tr_id')}
     stops = {(int(r.tr_id),int(r.tt_action_item_id)):r._asdict() for r in schedule.itertuples()}
     # Searchsorted avoids rescanning a full vehicle day per point.
