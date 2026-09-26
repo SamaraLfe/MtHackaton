@@ -1808,7 +1808,7 @@ async def metrics():
     legacy=json.loads((ARTIFACT/'metrics.json').read_text(encoding='utf-8'))
     model_meta=json.loads((ARTIFACT/'model.json').read_text(encoding='utf-8')) if (ARTIFACT/'model.json').exists() else {}
     predictions=pd.read_csv(ARTIFACT/'test_predictions.csv') if (ARTIFACT/'test_predictions.csv').exists() else pd.DataFrame()
-    v5=dict(model='v5',version=model_meta.get('version'),target_mode=model_meta.get('target_mode'),ensemble=bool(model_meta.get('ensemble',False)),ensemble_primary_weight=model_meta.get('ensemble_primary_weight'),features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=legacy.get('test_mae_s'),baseline_mae_s=legacy.get('persistence_mae_s'),interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
+    v5=dict(model='v5',version=model_meta.get('version'),target_mode=model_meta.get('target_mode'),ensemble=bool(model_meta.get('ensemble',False)),ensemble_primary_weight=model_meta.get('ensemble_primary_weight'),features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=legacy.get('test_mae_s'),baseline_mae_s=legacy.get('persistence_mae_s'),leaderboard_score=legacy.get('leaderboard_score'),interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
     if v5['mae_s'] is not None and v5['baseline_mae_s']:
         v5['improvement_pct']=100*(1-v5['mae_s']/v5['baseline_mae_s'])
     importance=[]
