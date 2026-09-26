@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import pandas as pd
 import pytest
 
@@ -9,10 +10,10 @@ from ml.feature_builder import build_v5_row
 def test_v5_artifact_has_runtime_schema_and_catboost_model():
     predictor = Predictor("artifacts")
     assert predictor.kind == "v5"
-    assert predictor.meta["version"] == "v5.4"
-    assert predictor.meta["target_mode"] == "residual_to_current_deviation"
-    assert predictor.meta["ensemble"] is True
-    assert predictor.secondary_model is not None
+    assert predictor.meta["version"] == "v5.5"
+    assert predictor.meta["target_mode"] == "direct_delay"
+    assert predictor.meta["ensemble"] is False
+    assert predictor.secondary_model is None
     assert len(predictor.v5_features) == 102
     assert "tr_id" not in predictor.v5_features
     assert "target_stop_id" not in predictor.v5_features
@@ -40,3 +41,19 @@ def test_v5_rejects_target_outside_causal_horizon():
     point["target_time_begin"] = point["T"]
     with pytest.raises(ValueError, match="окне"):
         build_v5_row(point, [], [])
+
+
+def test_submission_matches_verified_leaderboard_champion():
+    submission = pd.read_csv(Path("artifacts")/"submission.csv", sep=";")
+    payload = "\n".join(
+        f"{sample_id};{float(prediction):.17g}"
+        for sample_id, prediction in zip(
+            submission.sample_id.astype(str), submission.prediction
+        )
+    )
+    assert len(submission) == 151
+    assert submission.sample_id.is_unique
+    assert submission.prediction.notna().all()
+    assert hashlib.sha256(payload.encode()).hexdigest() == (
+        "439b1978e709b171e3baf6e18778575a1c8c9af310b8a8d2e29bd6a4d0d5f4c4"
+    )

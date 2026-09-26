@@ -1,6 +1,6 @@
 {
-  "version": "v5.4",
-  "target_mode": "residual_to_current_deviation",
+  "version": "v5.5",
+  "target_mode": "direct_delay",
   "features": [
     "cur_dev_s",
     "horizon_s",
