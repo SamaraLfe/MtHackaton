@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from ml.features import build_one, epoch, load_schedule
+from backend.app import align_schedule_to_event_day
 from backend.ndtp import decode, crc16
 
 def point(minutes=12):
@@ -58,6 +59,19 @@ def test_schedule_cannot_read_actuals():
     from io import StringIO
     text=pd.DataFrame([dict(tt_action_item_id=7,tr_id=1,time_begin='2026-01-06 10:12:00',time_fact_begin='2099-01-01',geom='POINT (37.6 55.7)',building_address='Stop')]).to_csv(index=False)
     assert 'time_fact_begin' not in load_schedule(StringIO(text)).columns
+
+def test_live_schedule_can_be_anchored_to_event_day():
+    schedule = pd.DataFrame([{
+        'tt_action_item_id': 7, 'tr_id': 1,
+        'time_begin': '2026-01-06 10:12:00',
+        'ts': epoch('2026-01-06 10:12:00'),
+        'geom': 'POINT (37.6 55.7)', 'building_address': 'Stop',
+        'lon': 37.6, 'lat': 55.7,
+    }])
+    aligned = align_schedule_to_event_day(schedule, '2026-09-25 10:00:00')
+    assert aligned.iloc[0].time_begin.startswith('2026-09-25 10:12:00')
+    assert aligned.iloc[0].ts == epoch('2026-09-25 10:12:00')
+
 
 def test_submission_complete_and_finite():
     from pathlib import Path
