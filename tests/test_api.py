@@ -147,7 +147,8 @@ def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     assert 'github.com/SamaraLfe/MtHackaton' in page
     assert 'late_probability' in source
     assert 'reason_is_hypothesis' in source
-    assert 'prototype-3' in page
+    assert 'prototype-4' in page
+    assert '/docs#what-if' in page
 
 
 def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
