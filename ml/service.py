@@ -12,11 +12,11 @@ FeatureRow=create_model('FeatureRow',__config__=ConfigDict(extra='forbid',allow_
 class Forecast(BaseModel):
     """One calibrated prediction returned by the ML service."""
     prediction_s:float=Field(description='Прогноз отклонения в секундах; плюс означает опоздание.',examples=[61.2])
-    lower_s:float=Field(description='Нижняя граница split-conformal интервала, секунды.',examples=[-231.5])
-    upper_s:float=Field(description='Верхняя граница split-conformal интервала, секунды.',examples=[353.9])
+    lower_s:float=Field(description='Нижняя граница эмпирического интервала, секунды.',examples=[-68.5])
+    upper_s:float=Field(description='Верхняя граница эмпирического интервала, секунды.',examples=[190.9])
     late_probability:float|None=Field(description='Эмпирическая вероятность отклонения больше 120 с.',examples=[0.42])
     model:str=Field(description='Выбранный артефакт модели.',examples=['v5'])
-    uncertainty:str|None=Field(default=None,description='Метод оценки неопределённости.',examples=['split_conformal'])
+    uncertainty:str|None=Field(default=None,description='Метод оценки неопределённости.',examples=['empirical_test_residual'])
 
 class ForecastResponse(BaseModel):
     """Ordered batch of forecasts; item i corresponds to input item i."""
@@ -35,8 +35,8 @@ app=FastAPI(title='Такт — ML API',version='1.1.0',description='''
 Внутренний сервис инференса V5. Он возвращает отклонение от расписания в
 секундах: положительное значение означает опоздание. Основной контракт —
 **POST /predict_v5**. Backend выбирает цель и хранит историю, а ML-сервис
-возвращает прогноз, split-conformal интервал и риск задержки по отдельной
-калибровочной части. V5.5 напрямую оценивает задержку на целевой остановке;
+возвращает прогноз, эмпирический интервал и риск задержки по сохранённым
+остаткам. Модель champion-b4b напрямую оценивает задержку на целевой остановке;
 `cur_dev_s` остаётся одним из причинных признаков, а не прибавляется постфактум.
 Внешняя интеграция обычно обращается именно к backend.
 ''',openapi_tags=[
@@ -67,7 +67,7 @@ def custom_openapi():
         operation_schema.setdefault('requestBody',{}).setdefault('content',{}).setdefault('application/json',{}).setdefault('examples',{})['basic']={
             'summary':'Одна точка V5','value':V5Batch.model_config['json_schema_extra']['examples'][0]}
         operation_schema.setdefault('responses',{}).setdefault('200',{}).setdefault('content',{}).setdefault('application/json',{}).setdefault('examples',{})['basic']={
-            'summary':'Форма ответа','value':{'predictions':[{'prediction_s':61.2,'lower_s':-231.5,'upper_s':353.9,'late_probability':0.42,'model':'v5','uncertainty':'split_conformal'}]}}
+            'summary':'Форма ответа','value':{'predictions':[{'prediction_s':61.2,'lower_s':-68.5,'upper_s':190.9,'late_probability':0.42,'model':'v5','uncertainty':'empirical_test_residual'}]}}
     app.openapi_schema=schema
     return schema
 

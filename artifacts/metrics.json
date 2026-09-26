@@ -1,36 +1,89 @@
 {
-  "model": "v5.5",
+  "model": "champion-b4b",
+  "reference_commit": "b4b636b",
   "target_mode": "direct_delay",
-  "rows_train": 1141,
-  "fit": 937,
-  "tune": 198,
-  "calibration": 194,
-  "official_test": 353,
-  "validate": 151,
-  "features": 102,
-  "identifiers_excluded": [
-    "target_stop_id",
-    "tr_id"
-  ],
-  "test_mae_s": 78.24647742773581,
-  "persistence_mae_s": 93.35977337110482,
-  "zero_mae_s": 103.33711048158641,
-  "interval_coverage": 0.9773371104815864,
-  "interval_radius_s": 292.72971741472077,
-  "brier_score": 0.14161459519345693,
-  "alert_precision": 0.85,
-  "alert_recall": 0.19767441860465115,
-  "batch_inference_ms": 2.184800003306009,
-  "batch_size": 353,
-  "leaderboard_score": 1.0,
-  "tuning_mae": {
-    "catboost": 68.96716036971482,
-    "torch_lad": 85.14700748342456,
-    "persistence": 87.13131313131314
+  "rows": {
+    "train": 4434,
+    "test": 353,
+    "validate": 151
   },
-  "limitations": [
-    "Only one historical day is available.",
-    "Test overlaps train in vehicles and calendar day.",
-    "Door state, official route IDs and labelled incident causes are absent."
-  ]
+  "feature_count": 60,
+  "mae_test": {
+    "zero": 103.33711048158641,
+    "cur_dev_s": 93.35977337110482,
+    "catboost": 62.093775229964216
+  },
+  "interval_coverage": 0.9036827195467422,
+  "interval_radius_s": 129.69478997221682,
+  "brier_score": 0.10326466318960725,
+  "batch_inference_ms": 6.927300011739135,
+  "best_iteration": 499,
+  "leaderboard": {
+    "status": "user-reported best commit",
+    "commit": "b4b636b",
+    "score": 1.0
+  },
+  "real_vehicle_group_holdout": {
+    "method": "5 folds by real tr_id; synthetic rows excluded",
+    "folds": [
+      {
+        "fold": 1,
+        "vehicles": [
+          122048,
+          122613,
+          122658
+        ],
+        "rows": 269,
+        "mae_cur_dev_s": 75.6728624535316,
+        "mae_catboost": 78.11295799140066
+      },
+      {
+        "fold": 2,
+        "vehicles": [
+          129964,
+          130072,
+          130238
+        ],
+        "rows": 229,
+        "mae_cur_dev_s": 71.37554585152839,
+        "mae_catboost": 65.31046205618908
+      },
+      {
+        "fold": 3,
+        "vehicles": [
+          131672,
+          132430,
+          133300
+        ],
+        "rows": 305,
+        "mae_cur_dev_s": 115.76065573770492,
+        "mae_catboost": 97.44025379009967
+      },
+      {
+        "fold": 4,
+        "vehicles": [
+          133957,
+          134040
+        ],
+        "rows": 227,
+        "mae_cur_dev_s": 73.49779735682819,
+        "mae_catboost": 78.77562032797049
+      },
+      {
+        "fold": 5,
+        "vehicles": [
+          134494,
+          135081
+        ],
+        "rows": 111,
+        "mae_cur_dev_s": 93.6036036036036,
+        "mae_catboost": 71.96889858816837
+      }
+    ],
+    "weighted": {
+      "mae_cur_dev_s": 86.8378615249781,
+      "mae_catboost": 80.24397237008804
+    }
+  },
+  "warning": "The supplied test and validate telemetry files are identical and also occur in train. Test MAE is a pipeline diagnostic, not an independent estimate for a new day."
 }

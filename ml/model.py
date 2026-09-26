@@ -1,4 +1,4 @@
-"""Models and split-conformal uncertainty; no hidden labels are loaded here."""
+"""Packaged predictors and empirical uncertainty; no hidden labels are loaded."""
 import json
 from pathlib import Path
 import numpy as np
@@ -13,17 +13,12 @@ class Predictor:
         self.meta=json.loads((root/'model.json').read_text(encoding='utf-8'))
         self.kind=self.meta['selected']
         self.model=None
-        self.secondary_model=None
-        self.ensemble_primary_weight=float(self.meta.get('ensemble_primary_weight',1.0))
         if self.kind=='catboost':
             self.model=CatBoostRegressor();self.model.load_model(str(root/'model.cbm'))
         elif self.kind=='v5':
             self.model=CatBoostRegressor();self.model.load_model(str(root/'model.cbm'))
             schema=json.loads((root/'feature_schema.json').read_text(encoding='utf-8'))
             self.v5_features=schema['features']
-            secondary_path=root/'model_secondary.cbm'
-            if self.meta.get('ensemble') and secondary_path.exists():
-                self.secondary_model=CatBoostRegressor();self.secondary_model.load_model(str(secondary_path))
 
     def predict(self, frame):
         if self.kind=='v5':
@@ -34,9 +29,6 @@ class Predictor:
             for name in ('tr_id','target_stop_id'):
                 if name in values.columns: values[name]=values[name].astype(str)
             pred=self.model.predict(values)
-            if self.secondary_model is not None:
-                pred=(self.ensemble_primary_weight*pred
-                    +(1-self.ensemble_primary_weight)*self.secondary_model.predict(values))
             if self.meta.get('target_mode')=='residual_to_current_deviation':
                 if 'cur_dev_s' not in frame.columns:
                     raise ValueError('Residual V5 inference requires cur_dev_s')
@@ -58,9 +50,6 @@ class Predictor:
         rows=[build_v5_row(point, history, schedule) for point,history,schedule in zip(points,histories,schedules)]
         values=pd.concat([row[self.v5_features] for row in rows],ignore_index=True)
         prediction=np.asarray(self.model.predict(values),dtype=float)
-        if self.secondary_model is not None:
-            prediction=(self.ensemble_primary_weight*prediction
-                +(1-self.ensemble_primary_weight)*self.secondary_model.predict(values))
         if self.meta.get('target_mode')=='residual_to_current_deviation':
             prediction+=np.asarray([float(point['cur_dev_s']) for point in points],dtype=float)
         return prediction
@@ -78,7 +67,7 @@ class Predictor:
                 probability=float((1+np.sum(residuals>threshold-prediction))/(residuals.size+2))
             output.append({'prediction_s':float(prediction),'lower_s':float(prediction-radius),
                            'upper_s':float(prediction+radius),'late_probability':probability,
-                           'model':'v5','uncertainty':'split_conformal'})
+                           'model':'v5','uncertainty':'empirical_test_residual'})
         return output
 
     def forecast(self, frame):
