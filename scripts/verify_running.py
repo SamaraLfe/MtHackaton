@@ -1,5 +1,5 @@
-"""Integration verification against running localhost services; resets replay state."""
-import json, os, time, socket, struct, urllib.request
+"""Integration verification against running localhost services."""
+import argparse, json, os, time, socket, struct, urllib.request
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -29,6 +29,8 @@ def runtime_contract(fetch):
 
 def main():
     """Verify replay, submission shape and fragmented/invalid NDTP frames on localhost."""
+    parser=argparse.ArgumentParser();parser.add_argument('--target',choices=['local','docker'],default='local');args=parser.parse_args()
+    initial_mode=get('/health').get('mode','live')
     runtime=runtime_contract(get)
     post('/api/mode',{'mode':'replay'})
     points=pd.read_csv('dataset/validate/points.csv').sort_values('T').reset_index(drop=True)
@@ -57,12 +59,12 @@ def main():
     after=get('/api/state')['counters']
     assert after.get('ndtp_packets',0)>before.get('ndtp_packets',0)
     assert after.get('ndtp_errors',0)>before.get('ndtp_errors',0)
-    report=dict(**runtime,replay_points=len(points),submission_rows=len(sub),submission_schema_valid=True,replay_horizon_all_valid=True,replay_request_p50_ms=float(np.median(times)),replay_request_p95_ms=float(np.quantile(times,.95)),replay_request_max_ms=max(times),ndtp_fragmented_frame=True,ndtp_bad_crc_rejected=True,docker_tested=True)
+    report=dict(**runtime,execution_target=args.target,replay_points=len(points),submission_rows=len(sub),submission_schema_valid=True,replay_horizon_all_valid=True,replay_request_p50_ms=float(np.median(times)),replay_request_p95_ms=float(np.quantile(times,.95)),replay_request_max_ms=max(times),ndtp_fragmented_frame=True,ndtp_bad_crc_rejected=True)
     report_path=Path(os.getenv('VERIFICATION_OUTPUT','artifacts/verification.json'))
     report_path.parent.mkdir(parents=True,exist_ok=True)
     report_path.write_text(json.dumps(report,indent=2),encoding='utf-8')
     print(json.dumps(report,indent=2))
-    post('/api/mode',{'mode':'replay'})
+    post('/api/mode',{'mode':initial_mode})
 
 
 if __name__=='__main__':

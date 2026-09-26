@@ -123,7 +123,7 @@ curl -sS "$TAKT_URL/health"</code></pre>
       <tr><td><code>target_stop_id</code>, <code>target_time_begin</code>, <code>stop_address</code></td><td>Куда и на какое плановое время построен прогноз. Плановое время плюс <code>prediction_s</code> даёт прогнозируемое время прибытия.</td></tr>
       <tr><td><code>horizon_s</code></td><td>Разница между плановым временем целевой остановки и <code>T</code>. Для рассчитанной точки: <code>600 &lt; horizon_s &lt;= 900</code>.</td></tr>
       <tr><td><code>prediction_s</code></td><td>Отклонение в секундах: плюс — позднее плана, минус — раньше. При отсутствии целевой остановки значение <code>null</code>.</td></tr>
-      <tr><td><code>lower_s</code>, <code>upper_s</code></td><td>Границы интервала отклонения. Backend V5 использует радиус около 104.78 с вокруг прогноза. Это оценка неопределённости, не гарантированные пределы. При fallback оба поля <code>null</code>.</td></tr>
+      <tr><td><code>lower_s</code>, <code>upper_s</code></td><td>Границы split-conformal интервала отклонения. В текущем артефакте радиус около 292.73 с вокруг прогноза. Это оценка неопределённости, не гарантированные пределы.</td></tr>
       <tr><td><code>late_probability</code></td><td>Эвристическая оценка риска опоздания более чем на 120 с: <code>1 / (1 + exp(-(prediction_s - 120) / 45))</code>. Не является подтверждённой калиброванной вероятностью для live-потока.</td></tr>
       <tr><td><code>level</code></td><td><code>low</code>, <code>medium</code>, <code>high</code> или <code>unknown</code>. Правила ниже. Нельзя определять уровень только по величине <code>prediction_s</code>.</td></tr>
       <tr><td><code>model</code>, <code>degraded</code></td><td>В штатном режиме <code>v5</code> и <code>false</code>. При ошибке ML — <code>persistence_fallback</code> и <code>true</code>: прогноз равен текущему <code>cur_dev_s</code>, вероятность отсутствует.</td></tr>
@@ -132,7 +132,7 @@ curl -sS "$TAKT_URL/health"</code></pre>
       <tr><td><code>source</code>, <code>telemetry_source</code></td><td><code>source</code> обозначает контекст расчёта: <code>live</code>, <code>historical_replay</code> или <code>api</code>. <code>telemetry_source</code> показывает путь живой координаты: <code>ndtp_nav00</code> — Nav00 с проверкой CRC и разбором NDTP; <code>http_json</code> — событие POST <code>/api/telemetry</code>.</td></tr>
       <tr><td><code>reason</code>, <code>reason_is_hypothesis</code>, <code>recommendation</code></td><td>Текст наблюдаемого паттерна и рекомендуемого действия. Причина является гипотезой: низкая скорость сама по себе не доказывает пробку или поломку.</td></tr>
       <tr><td><code>lon</code>, <code>lat</code>, <code>position_time</code></td><td>Последняя подходящая позиция и её Unix-время в секундах. Координаты могут быть <code>null</code>; <code>position_time</code> — число, в отличие от строкового <code>T</code>.</td></tr>
-      <tr><td><code>features</code></td><td>Диагностические признаки backend: скорость, возраст GPS, простой и другие значения. Это компактный набор из 15 полей, а не полный набор из 104 признаков V5.</td></tr>
+      <tr><td><code>features</code></td><td>Диагностические признаки backend: скорость, возраст GPS, простой и другие значения. Это компактный набор полей для объяснения, а не полный вход модели из 102 признаков.</td></tr>
     </tbody></table></div>
     <div class="table-wrap"><table><thead><tr><th>Уровень</th><th>Условие и смысл</th></tr></thead><tbody>
       <tr><td><code>low</code></td><td>Риск меньше 0.35 при пригодных данных. Наблюдать в обычном режиме.</td></tr>
@@ -179,7 +179,7 @@ curl -sS "$TAKT_URL/health"</code></pre>
   "counters": {},
   "total_points": 151
 }</code></pre>
-    <p><code>vehicles</code> содержит <a href="#prediction">объекты прогноза</a>. После запуска replay уже показывает <code>source: "historical_archive"</code>: это последняя архивная точка каждого ТС. Live-позиция без подходящей новой цели добавляется к ней как <code>live_position: true</code>, не смешивая сегодняшние координаты с архивным прогнозом. <code>state.clock</code> — время последнего события или replay-точки, <code>state.index</code> — шаги прогона, <code>total_points</code> — размер validate-набора.</p>
+    <p><code>vehicles</code> содержит <a href="#prediction">объекты прогноза</a>. В replay используется <code>source: "historical_v5"</code>: это сохранённый прогноз V5 для validate-набора. В live новая телеметрия заменяет архивную запись только после успешного прогноза; до этого интерфейс явно помечает резервные данные. <code>state.clock</code> — время последнего события или replay-точки, <code>state.index</code> — шаги прогона, <code>total_points</code> — размер validate-набора.</p>
     <p>При чтении backend проверяет давность: если с <code>T</code> прошло больше 120 секунд, в ответе появляются <code>stale: true</code>, <code>level: "unknown"</code> и объяснение. В replay сравнение идёт с часами прогона, поэтому остановленный прогон не стареет вместе с реальными часами. Проверка меняет только копию ответа.</p>
     <div class="table-wrap"><table><thead><tr><th>Счётчик</th><th>Что показывает</th></tr></thead><tbody>
       <tr><td><code>telemetry_rows</code></td><td>Сколько новых событий добавлено в историю через ingest. Replay читает CSV напрямую и этот счётчик не увеличивает.</td></tr>
@@ -466,7 +466,7 @@ curl -sS -X POST "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx/cancel" \
     <p>Возвращает результаты оценки на сохранённой тестовой выборке и важность признаков. Используйте для блока «Надёжность прогноза». Метод не сравнивает текущие live-прогнозы с реальными прибытиями и не пересчитывает качество на лету.</p>
     <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/metrics"</code></pre>
     <div class="table-wrap"><table><thead><tr><th>Блок или поле</th><th>Что означает</th></tr></thead><tbody>
-      <tr><td><code>v5.model</code>, <code>v5.features</code>, <code>v5.test_points</code></td><td>Название модели, число признаков и число тестовых точек. В поставке: v5, 104 и 353.</td></tr>
+      <tr><td><code>v5.model</code>, <code>v5.features</code>, <code>v5.test_points</code></td><td>Название модели, число признаков и число тестовых точек. В поставке: v5, 102 и 353.</td></tr>
       <tr><td><code>v5.mae_s</code></td><td>Средняя абсолютная ошибка прогноза в секундах. Меньше — лучше; это средняя величина, не максимальная ошибка отдельного рейса.</td></tr>
       <tr><td><code>v5.baseline_mae_s</code></td><td>Ошибка подхода «будущее отклонение равно текущему», без ML.</td></tr>
       <tr><td><code>v5.improvement_pct</code></td><td><code>100 × (1 - mae_s / baseline_mae_s)</code>. Поле появляется, если обе оценки пригодны для расчёта.</td></tr>
@@ -476,7 +476,7 @@ curl -sS -X POST "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx/cancel" \
       <tr><td><code>readable</code></td><td>Готовые строки <code>mae</code>, <code>baseline</code>, <code>coverage</code> для интерфейса. Для вычислений используйте числовые поля.</td></tr>
       <tr><td>Верхнеуровневые метрики</td><td><code>test_mae_s</code>, <code>persistence_mae_s</code>, <code>interval_coverage</code> и остальные поля прежнего отчёта сохранены для совместимости. Они не заменяют <code>v5.mae_s</code>.</td></tr>
     </tbody></table></div>
-    <p>Для поставляемых артефактов MAE V5 составляет около 47.6 с на 353 точках. Данные относятся к одному дню, поэтому эта оценка не подтверждает качество на будущих днях. При отсутствии части V5-артефактов соответствующие поля могут быть <code>null</code>, число признаков/точек — 0, а важности — пустым массивом.</p>
+    <p>Для поставляемых артефактов честная хронологическая оценка MAE V5 составляет около 78.25 с на 353 точках против 93.36 с у persistence-baseline. Данные относятся к одному дню, поэтому эта оценка не подтверждает качество на будущих днях. При отсутствии части V5-артефактов соответствующие поля могут быть <code>null</code>, число признаков/точек — 0, а важности — пустым массивом.</p>
     <p>Текущую длительность обращения к ML смотрите в <code>/api/state → counters.last_inference_ms</code>. Она включает HTTP-вызов и отличается от офлайн-времени пакетного инференса.</p>
   </section>
 
@@ -516,7 +516,7 @@ curl -sS -X POST "$TAKT_URL/api/admin/simulations/sim-xxxxxxxxxx/cancel" \
     <p>ML возвращает только отклонение и имя модели. Он не добавляет <code>level</code>, вероятность, интервал, координаты или признаки деградации — это делает backend. Неверные размеры массивов дают <code>422</code>. Вложенные объекты описаны как свободные словари: отсутствующие поля и неподходящие данные могут привести к <code>500</code>, поскольку полный контракт внутри ML пока не валидируется. Проверка первой остановки в окне выполняется в backend.</p>
     <h3><span class="method post">POST</span> /predict — legacy</h3>
     <p>Прежний метод принимает <code>{"rows":[{…}]}</code>: от 1 до 512 объектов с 15 числовыми полями <a href="#prediction">диагностических признаков</a>. Все поля обязательны; дополнительные поля и нечисловые значения запрещены. При совместимой legacy-модели ответ содержит <code>predictions</code> с отклонением, интервалом, вероятностью и именем модели.</p>
-    <div class="note warn"><strong>Для поставляемой V5 используйте /predict_v5.</strong><p>Схема legacy-запроса содержит 15 признаков, а V5 требует 104. Поэтому корректный по legacy-схеме запрос при загруженной V5 не обеспечивает успешный расчёт и может вернуть <code>500</code>. Backend уже использует новый метод.</p></div>
+    <div class="note warn"><strong>Для поставляемой V5 используйте /predict_v5.</strong><p>Схема legacy-запроса содержит 15 признаков, а V5 строит 102 модельных признака из сырой точки, истории и расписания. Поэтому legacy endpoint явно отвечает <code>410</code>; Backend использует новый метод.</p></div>
   </section>
 
   <section id="errors">

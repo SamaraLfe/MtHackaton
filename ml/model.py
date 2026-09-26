@@ -24,7 +24,7 @@ class Predictor:
         if self.kind=='v5':
             missing=[name for name in self.v5_features if name not in frame.columns]
             if missing:
-                raise ValueError('V5 inference requires raw points or a complete 104-feature frame')
+                raise ValueError(f'V5 inference requires raw points or a complete {len(self.v5_features)}-feature frame')
             values=frame[self.v5_features].copy()
             for name in ('tr_id','target_stop_id'):
                 if name in values.columns: values[name]=values[name].astype(str)
@@ -41,11 +41,27 @@ class Predictor:
 
     def predict_v5(self, points, histories, schedules):
         """Predict V5 from raw prediction points and causal NDTP histories."""
+        if self.kind!='v5':
+            raise ValueError('Loaded artifact is not a V5 model; retrain with python -m ml.train')
         rows=[build_v5_row(point, history, schedule) for point,history,schedule in zip(points,histories,schedules)]
         values=pd.concat([row[self.v5_features] for row in rows],ignore_index=True)
-        for name in ('tr_id','target_stop_id'):
-            if name in values.columns: values[name]=values[name].astype(str)
         return np.asarray(self.model.predict(values),dtype=float)
+
+    def forecast_v5(self, points, histories, schedules):
+        """Return calibrated V5 point forecasts, intervals and late-risk estimates."""
+        predictions=self.predict_v5(points,histories,schedules)
+        residuals=np.asarray(self.meta.get('calibration_residuals',[]),dtype=float)
+        radius=float(self.meta.get('interval_radius_s',0.0))
+        threshold=float(self.meta.get('late_threshold_s',120.0))
+        output=[]
+        for prediction in predictions:
+            probability=None
+            if residuals.size:
+                probability=float((1+np.sum(residuals>threshold-prediction))/(residuals.size+2))
+            output.append({'prediction_s':float(prediction),'lower_s':float(prediction-radius),
+                           'upper_s':float(prediction+radius),'late_probability':probability,
+                           'model':'v5','uncertainty':'split_conformal'})
+        return output
 
     def forecast(self, frame):
         preds=self.predict(frame);res=np.array(self.meta['calibration_residuals'])

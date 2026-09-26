@@ -1,41 +1,34 @@
 {
-  "rows_train": 4434,
-  "rows_real": 1141,
-  "fit": 728,
+  "model": "v5.1",
+  "rows_train": 1141,
+  "fit": 937,
   "tune": 198,
   "calibration": 194,
   "official_test": 353,
   "validate": 151,
-  "selected": "catboost",
-  "tuning_mae": {
-    "persistence": 87.13131313131314,
-    "shrinkage": 78.327398989899,
-    "catboost": 72.3398844101914,
-    "torch_lad": 75.2807834934552
-  },
-  "test_mae_s": 83.94505189968454,
-  "zero_mae_s": 103.33711048158641,
+  "features": 102,
+  "identifiers_excluded": [
+    "target_stop_id",
+    "tr_id"
+  ],
+  "test_mae_s": 78.24647742773581,
   "persistence_mae_s": 93.35977337110482,
-  "mae_vehicle_bootstrap_95": [
-    69.21925431277259,
-    100.40704966298773
-  ],
-  "interval_coverage": 0.9830028328611898,
-  "interval_radius_s": 296.9566738500424,
-  "brier_score": 0.15338679410019196,
-  "late_count": 86,
-  "alert_precision": 0.9411764705882353,
-  "alert_recall": 0.18604651162790697,
-  "chronological_cutoffs": [
-    "2026-01-06T17:55:00+03:00",
-    "2026-01-06T21:06:00+03:00"
-  ],
+  "zero_mae_s": 103.33711048158641,
+  "interval_coverage": 0.9773371104815864,
+  "interval_radius_s": 292.72971741472077,
+  "brier_score": 0.14161459519345693,
+  "alert_precision": 0.85,
+  "alert_recall": 0.19767441860465115,
+  "batch_inference_ms": 2.9974000062793493,
+  "batch_size": 353,
+  "tuning_mae": {
+    "catboost": 68.96716036971482,
+    "torch_lad": 85.14700748342456,
+    "persistence": 87.13131313131314
+  },
   "limitations": [
-    "Only one day; official test is interleaved with train on the same vehicles.",
-    "Test/validate telemetry is byte-identical. No schedule actuals used as features.",
-    "Real route IDs and door statuses absent; no route identity or boarding cause can be inferred.",
-    "Conformal coverage needs exchangeability; measured coverage is reported, not guaranteed."
-  ],
-  "batch_inference_ms": 0.9388000005856156,
-  "batch_size": 353
+    "Only one historical day is available.",
+    "Test overlaps train in vehicles and calendar day.",
+    "Door state, official route IDs and labelled incident causes are absent."
+  ]
 }

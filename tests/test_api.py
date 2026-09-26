@@ -8,6 +8,7 @@ import pytest
 import time
 import pandas as pd
 from fastapi.testclient import TestClient
+from ml.features import FEATURES
 from ml.service import app as ml_app
 from backend import app as backend
 
@@ -29,7 +30,7 @@ def test_metrics_expose_readable_v5_summary():
         assert response.status_code==200
         data=response.json()
         assert data['v5']['model']=='v5'
-        assert data['v5']['features']==104
+        assert data['v5']['features']==102
         assert data['v5']['test_points']==353
         assert data['v5']['mae_s']<data['v5']['baseline_mae_s']
         assert data['v5']['improvement_pct']>0
@@ -139,13 +140,14 @@ def test_vehicle_detail_identifies_the_position_source():
 def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
     source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
-    assert 'ПРОГНОЗ НА КОНТРОЛЬНОЙ ТОЧКЕ' in page
-    assert 'КАК ПОНЯТЬ ПРОГНОЗ' in page
-    assert 'ОТКУДА ДАННЫЕ' in source
+    assert 'ПРОГНОЗ НА 10–15 МИНУТ' in page
+    assert 'Как читать прогноз' in page
+    assert 'Архивный fallback' in source
     assert '/docs' in page
     assert 'github.com/SamaraLfe/MtHackaton' in page
     assert 'late_probability' in source
     assert 'reason_is_hypothesis' in source
+    assert 'prototype-3' in page
 
 
 def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
@@ -154,7 +156,7 @@ def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
         assert response.status_code==200
         snapshot=client.get('/api/state').json()
         assert len(snapshot['vehicles'])==11
-        assert {v['source'] for v in snapshot['vehicles']}=={'historical_archive'}
+        assert {v['source'] for v in snapshot['vehicles']}=={'historical_v5'}
         assert all(v['prediction_s'] is not None for v in snapshot['vehicles'])
 
 
@@ -307,8 +309,9 @@ def test_live_track_excludes_positions_older_than_the_track_ttl():
         backend.history.pop(tr_id,None)
 
 
-def test_live_telemetry_overlays_the_historical_snapshot_without_switching_modes():
+def test_replay_telemetry_overlays_the_historical_snapshot_without_switching_modes():
     with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'replay'})
         assert backend.state['mode']=='replay'
         response=client.post('/api/telemetry',json=[{
             'tr_id':131672,'event_time':pd.Timestamp.now(tz='UTC').isoformat(),
@@ -319,7 +322,7 @@ def test_live_telemetry_overlays_the_historical_snapshot_without_switching_modes
         state=client.get('/api/state',params={'dispatcher_id':'dispatcher-01'}).json()
         vehicle=next(item for item in state['vehicles'] if item['tr_id']==131672)
         assert state['state']['mode']=='replay'
-        assert vehicle['source']=='historical_archive'
+        assert vehicle['source']=='historical_v5'
         assert vehicle['live_position'] is True
         assert vehicle['lon']==37.81 and vehicle['lat']==55.75
 
@@ -343,6 +346,8 @@ def test_ml_rejects_nonfinite_and_missing_features():
     with TestClient(ml_app) as client:
         assert client.get('/health').status_code==200
         assert client.post('/predict',json={'rows':[{}]}).status_code==422
+        legacy={feature:0 for feature in FEATURES}
+        assert client.post('/predict',json={'rows':[legacy]}).status_code==410
 
 @pytest.mark.skipif(not Path(os.getenv('DATA_DIR','dataset')).exists(),reason='Dataset required')
 def test_replay_live_and_degradation():
@@ -352,6 +357,7 @@ def test_replay_live_and_degradation():
         try:
             assert client.get('/openapi.json').status_code==200
             assert client.get('/').status_code==200
+            client.post('/api/mode',json={'mode':'replay'})
             r=client.post('/api/replay/step')
             assert r.status_code==200,r.text
             result=r.json()['prediction']

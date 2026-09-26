@@ -5,32 +5,33 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-3">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/"><span>Т</span><b>ТАКТ</b><small>ДИСПЕТЧЕРСКАЯ</small></a>
-    <div class="shift"><span class="shift-dot"></span><div><b>Смена открыта</b><small id="archive-time">Архивный снимок</small></div></div>
+    <div class="shift"><span class="shift-dot" id="stream-dot"></span><div><b id="stream-title">Подключение к потоку</b><small id="archive-time">Проверка источника</small></div></div>
     <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" title="Описание полей, источников и логики прогноза">Описание API</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
     <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ДИСПЕТЧЕР</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
   </header>
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">РАБОЧЕЕ МЕСТО ДИСПЕТЧЕРА</p><h1>Контроль рейсов и действия по отклонениям</h1><p class="intro-copy">Экран сразу показывает архивную картину по маршрутам. Технический NDTP-контур и модель работают в фоне и не требуют ручного переключения диспетчером.</p></div>
-      <div class="archive-note"><b>Источник данных</b><span>Последняя подтверждённая историческая телеметрия</span><small>Для локального прототипа: 6 января 2026 года</small></div>
+      <div><p class="eyebrow">ПРОГНОЗ НА 10–15 МИНУТ</p><h1>Рейсы, требующие внимания</h1><p class="intro-copy">NDTP-телеметрия автоматически проходит проверку, сопоставляется с расписанием и поступает в модель V5. При отсутствии потока показан явно помеченный архивный fallback.</p></div>
+      <div class="archive-note"><b id="source-title">Источник данных</b><span id="source-detail">Проверка Backend</span><small id="source-note">Архив и live-поток никогда не смешиваются в одном прогнозе</small></div>
     </section>
 
-    <section class="explain-grid" aria-label="Как читать прогноз">
-      <article><p class="eyebrow">ПРОГНОЗ НА КОНТРОЛЬНОЙ ТОЧКЕ</p><h2>Сколько секунд до отклонения от плана</h2><p><b>+180 с</b> означает ожидаемое прибытие на 3 минуты позже планового времени следующей контрольной остановки. Отрицательное значение — раньше плана. Это прогноз отклонения, не длительность поездки.</p></article>
-      <article><p class="eyebrow">КАК ПОНЯТЬ ПРОГНОЗ</p><h2>Уровень внимания — не диагноз</h2><p>«Высокий» означает, что расчёт оценивает вероятность опоздать <b>более чем на 120 секунд</b> не ниже 70%. Причина рядом с прогнозом — наблюдаемый сигнал из данных, а не установленная причина задержки.</p></article>
-      <article><p class="eyebrow">ОТКУДА БЕРУТСЯ ДАННЫЕ</p><h2>Путь каждой оценки виден в карточке ТС</h2><p>Архивная телеметрия или свежая позиция Live NDTP → разбор backend → расписание → модель V5. В карточке показаны источник позиции, момент данных и основание прогноза.</p></article>
+    <section class="truth-strip" aria-label="Как читать прогноз">
+      <span><b>+180 с</b> — прогноз опоздания на контрольной остановке, не время в пути</span>
+      <span><b>Риск</b> — калиброванная оценка, причина — наблюдаемый сигнал, а не диагноз</span>
+      <a href="/docs">Методика и API →</a>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
       <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя точка по каждому ТС</small></article>
       <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск опоздания</small></article>
-      <article><span>УКАЗАНИЙ В ЖУРНАЛЕ</span><b id="kpi-commands">—</b><small>по профилю текущего диспетчера</small></article>
+      <article><span>NDTP-ПАКЕТОВ</span><b id="kpi-packets">—</b><small id="kpi-telemetry">с начала запуска</small></article>
+      <article><span>ПРОГНОЗОВ V5</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание модели</small></article>
     </section>
 
     <section class="main-grid">
@@ -57,7 +58,7 @@
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js"></script>
-  <script src="/static/dispatcher.js"></script>
+  <script src="/static/map.js?v=prototype-3"></script>
+  <script src="/static/dispatcher.js?v=prototype-3"></script>
 </body>
 </html>

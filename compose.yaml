@@ -15,6 +15,7 @@ services:
     environment:
       ML_URL: http://ml:8001
       NDTP_PORT: "9201"
+      START_MODE: live
     volumes:
       - ./dataset:/app/dataset:ro
       - ./artifacts:/app/artifacts:ro

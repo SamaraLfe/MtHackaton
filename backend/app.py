@@ -20,7 +20,7 @@ ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
 LIVE_TRACK_TTL_S=int(os.getenv('LIVE_TRACK_TTL_S','3600'))
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
-schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock()
+schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
 simulation_runs={};simulation_tasks={}
 runtime_stats={'started_at':time.time(),'requests_total':0,'requests_errors':0,'recent_request_ms':deque(maxlen=500)}
@@ -190,6 +190,10 @@ def clean(value):
     if isinstance(value,(np.floating,float)):return float(value) if np.isfinite(value) else None
     return value
 
+def display_text(value,fallback='Не указано'):
+    """Convert nullable CSV display fields without leaking the string ``nan``."""
+    return fallback if value is None or pd.isna(value) or not str(value).strip() else str(value)
+
 def target_for(tr,t,stop_id=None):
     candidates=schedule[(schedule.tr_id==tr)&(schedule.ts>t+600)&(schedule.ts<=t+900)]
     if candidates.empty:return None
@@ -197,6 +201,16 @@ def target_for(tr,t,stop_id=None):
     candidates=candidates[candidates.ts==first_time]
     if stop_id is not None:candidates=candidates[candidates.tt_action_item_id==stop_id]
     return None if candidates.empty else candidates.sort_values('tt_action_item_id').iloc[0].to_dict()
+
+def stop_neighbors(tr,stop):
+    """Return readable neighbouring planned stops for a selected target."""
+    route=schedule[schedule.tr_id==tr].sort_values('ts').reset_index(drop=True)
+    matches=np.flatnonzero((route.ts.to_numpy()==stop['ts'])&(route.tt_action_item_id.to_numpy()==stop['tt_action_item_id']))
+    if not len(matches):return 'Не указана','Не указана'
+    position=int(matches[0])
+    previous=route.iloc[position-1].building_address if position else None
+    following=route.iloc[position+1].building_address if position+1<len(route) else None
+    return display_text(previous,'Начало маршрута'),display_text(following,'Конец маршрута')
 
 def route_risk(items):
     grouped={}
@@ -213,9 +227,23 @@ def route_risk(items):
 def incidents(items):
     return [dict(vehicle_id=int(v['tr_id']),route_id=int(v['tr_id']),level=v.get('level','unknown'),prediction_s=v.get('prediction_s'),late_probability=v.get('late_probability'),reason=v.get('reason'),stop_address=v.get('stop_address'),source=v.get('source'),recommendation=v.get('recommendation')) for v in sorted(items,key=lambda x:({'high':0,'medium':1,'low':2,'unknown':3}[x.get('level','unknown')],-(x.get('late_probability') or -1))) if v.get('level') in {'high','medium'}]
 
+def calibrated_uncertainty(prediction):
+    """Apply the same frozen residual calibration as the ML service."""
+    residuals=np.asarray(model_meta.get('calibration_residuals',[]),dtype=float)
+    radius=float(model_meta.get('interval_radius_s',0.0))
+    threshold=float(model_meta.get('late_threshold_s',120.0))
+    probability=float((1+np.sum(residuals>threshold-prediction))/(len(residuals)+2)) if len(residuals) else None
+    level='unknown' if probability is None else 'high' if probability>=.7 else 'medium' if probability>=.35 else 'low'
+    return {'lower_s':prediction-radius,'upper_s':prediction+radius,'late_probability':probability,'level':level}
+
 def load_historical_snapshot():
-    """Build the dispatcher default view from the latest archived point per route."""
+    """Build a fallback view from frozen V5 validate predictions."""
     vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+    predictions={}
+    prediction_path=ARTIFACT/'submission_v5.csv'
+    if prediction_path.exists():
+        prediction_frame=pd.read_csv(prediction_path,sep=';')
+        predictions=dict(zip(prediction_frame.sample_id.astype(str),prediction_frame.prediction.astype(float)))
     snapshot=points.sort_values('T').groupby('tr_id',as_index=False).tail(1).sort_values('tr_id')
     for _,point in snapshot.iterrows():
         tr=int(point['tr_id']);event_time=point['T'];t=epoch(event_time)
@@ -229,17 +257,16 @@ def load_historical_snapshot():
         records=traffic[(traffic.tr_id==tr)&(traffic.ts<=t)&(traffic.ts>=t-600)]
         valid=records[records.location_valid].dropna(subset=['lon','lat'])
         last=valid.iloc[-1] if not valid.empty else None
-        prediction=float(point.cur_dev_s)
-        probability=float(1/(1+np.exp(-(prediction-120)/45)))
-        level='high' if probability>=.7 else 'medium' if probability>=.35 else 'low'
+        prediction=predictions.get(str(point.get('sample_id','')))
+        uncertainty=calibrated_uncertainty(prediction) if prediction is not None else {'lower_s':None,'upper_s':None,'late_probability':None,'level':'unknown'}
         address='Контрольная точка не указана' if pd.isna(stop.building_address) else str(stop.building_address)
         snapshot_vehicle=dict(
             tr_id=tr,T=timestamp(event_time).isoformat(),target_time_begin=timestamp(point.target_time_begin).isoformat(),
             target_stop_id=int(point.target_stop_id),stop_address=address,prediction_s=prediction,
             previous_stop='Контрольная точка не указана' if pd.isna(previous) else str(previous),next_stop='Контрольная точка не указана' if pd.isna(following) else str(following),
-            lower_s=prediction-104.78,upper_s=prediction+104.78,late_probability=probability,level=level,
-            reason='Историческое отклонение по архивной телеметрии',recommendation='Связаться с водителем и уточнить обстановку' if level in {'high','medium'} else 'Продолжить наблюдение',
-            source='historical_archive',model='v5',degraded=False,stale=False,position_time=float(last.ts) if last is not None else None,
+            lower_s=uncertainty['lower_s'],upper_s=uncertainty['upper_s'],late_probability=uncertainty['late_probability'],level=uncertainty['level'],
+            reason='Офлайн-прогноз V5 по архивной телеметрии',recommendation='Связаться с водителем и уточнить обстановку' if uncertainty['level'] in {'high','medium'} else 'Продолжить наблюдение',
+            source='historical_v5',model='v5_offline',degraded=prediction is None,stale=False,position_time=float(last.ts) if last is not None else None,
             lon=float(last.lon) if last is not None else None,lat=float(last.lat) if last is not None else None,
         )
         archive_vehicles[tr]=snapshot_vehicle
@@ -293,7 +320,6 @@ async def forecast(point,records,source):
     try:
         response=await client.post(ML_URL+'/predict_v5',json={'points':[clean(point)],'histories':[[clean(x) for x in records]],'schedules':[[clean(x) for x in schedule[(schedule.tr_id==tr)&(schedule.ts>=t-1800)&(schedule.ts<=t+1800)].to_dict('records')]]});response.raise_for_status()
         result=response.json()['predictions'][0]
-        result.update(lower_s=result['prediction_s']-104.7845011097,upper_s=result['prediction_s']+104.7845011097,late_probability=float(1/(1+np.exp(-(result['prediction_s']-120)/45))))
     except (httpx.HTTPError,KeyError,ValueError):
         counters['ml_failures']+=1;degraded=True
         result=dict(prediction_s=point['cur_dev_s'],lower_s=None,upper_s=None,late_probability=None,model='persistence_fallback')
@@ -307,8 +333,10 @@ async def forecast(point,records,source):
     if stale:reason='Нет свежей достоверной телеметрии'
     valid=[r for r in records if r.get('location_valid') and r['ts']<=t and np.isfinite(r.get('lon',np.nan)) and np.isfinite(r.get('lat',np.nan))]
     last=max(valid,key=lambda r:r['ts']) if valid else None
+    previous_stop,next_stop=stop_neighbors(tr,stop)
     result.update(tr_id=tr,T=timestamp(point['T']).isoformat(),target_time_begin=timestamp(point['target_time_begin']).isoformat(),target_stop_id=int(stop['tt_action_item_id']),
-      stop_address=str(stop['building_address']),level=level,reason=reason,reason_is_hypothesis=True,
+      stop_address=display_text(stop['building_address'],'Контрольная точка не указана'),level=level,reason=reason,reason_is_hypothesis=True,
+      previous_stop=previous_stop,next_stop=next_stop,
       recommendation='Проверить ситуацию с водителем и доступность резерва' if level=='high' else 'Наблюдать за движением',
       source=source,degraded=degraded,stale=stale,features=features,lon=last['lon'] if last else None,lat=last['lat'] if last else None,
       position_time=last['ts'] if last else None,horizon_s=epoch(point['target_time_begin'])-t)
@@ -358,7 +386,7 @@ async def ingest(event):
     result['telemetry_source']=event.get('telemetry_source','unknown')
     vehicles[tr]=clean(result)
     if tr not in deviations:
-        result.update(level='unknown',reason='Нет подтверждённого текущего отклонения',deviation_estimated=True)
+        result.update(reason=f"{result['reason']}; текущее отклонение пока принято равным 0 с",deviation_estimated=True)
         vehicles[tr]=result
 
 async def on_ndtp(event):
@@ -373,7 +401,7 @@ async def on_ndtp(event):
 
 @asynccontextmanager
 async def lifespan(app):
-    global schedule,schedule_template,traffic,points,mapping,client
+    global schedule,schedule_template,traffic,points,mapping,client,model_meta
     init_store()
     schedule=load_schedule(DATA/'validate/schedule_plan.csv')
     schedule_template=schedule.copy()
@@ -388,7 +416,10 @@ async def lifespan(app):
     mapping={int(r.unit_id):int(r.tr_id) for r in ids.itertuples()}
     mapping.update({int(k):int(v) for k,v in json.loads(os.getenv('UNIT_MAP','{}')).items()})
     client=httpx.AsyncClient(timeout=2)
+    model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8'))
     load_historical_snapshot()
+    if os.getenv('START_MODE','live')=='live':
+        state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear()
     server=await asyncio.start_server(lambda r,w:handle(r,w,on_ndtp,counters),'0.0.0.0',int(os.getenv('NDTP_PORT','9201')))
     yield
     server.close();await server.wait_closed();await client.aclose()
@@ -529,7 +560,9 @@ async def get_state(dispatcher_id:str|None=None):
     now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
     merged={tr:dict(vehicle) for tr,vehicle in archive_vehicles.items()}
     for tr,live in vehicles.items():
-        if tr in merged and live.get('source')=='live':
+        if tr in merged and live.get('source')=='live' and time.time()-float(live.get('position_time',0))>LIVE_TRACK_TTL_S:
+            continue
+        if tr in merged and live.get('source')=='live' and live.get('prediction_s') is None:
             # Keep an archived forecast internally coherent when live telemetry
             # has no valid current 10–15 minute target. Live coordinates are an
             # overlay, not permission to pair today's timestamp with January's
@@ -546,7 +579,7 @@ async def get_state(dispatcher_id:str|None=None):
         v=dict(original)
         track=live_track(int(v['tr_id']))
         if track:v['live_track']=track
-        if v.get('source')!='historical_archive' and now-epoch(v['T'])>120:
+        if v.get('source') not in {'historical_archive','historical_v5'} and now-epoch(v['T'])>120:
             v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
         output.append(v)
     if dispatcher_id:
@@ -717,7 +750,7 @@ async def metrics():
     legacy=json.loads((ARTIFACT/'metrics.json').read_text(encoding='utf-8'))
     model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8')) if (ARTIFACT/'model_v5.json').exists() else {}
     predictions=pd.read_csv(ARTIFACT/'test_predictions_v5.csv') if (ARTIFACT/'test_predictions_v5.csv').exists() else pd.DataFrame()
-    v5=dict(model='v5',features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=float(predictions.abs_error.mean()) if not predictions.empty else None,baseline_mae_s=float(predictions.baseline_abs_error.mean()) if not predictions.empty else None,interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
+    v5=dict(model='v5',features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=legacy.get('test_mae_s'),baseline_mae_s=legacy.get('persistence_mae_s'),interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
     if v5['mae_s'] is not None and v5['baseline_mae_s']:
         v5['improvement_pct']=100*(1-v5['mae_s']/v5['baseline_mae_s'])
     importance=[]

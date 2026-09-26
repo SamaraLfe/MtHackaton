@@ -1,5 +1,4 @@
-/* Map integration only. Replay, live monitoring, inspector and filters are owned
- * by app.js and retain the behavior of the existing operations monitor. */
+/* Shared Leaflet integration for the dispatcher workspace. */
 (() => {
   'use strict';
   const colors={low:'#198038',medium:'#b28600',high:'#da1e28',unknown:'#6f6f6f'};
