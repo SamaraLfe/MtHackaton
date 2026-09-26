@@ -42,11 +42,7 @@ def build_one(point, history, stop=None):
     """Build 15 causal features from one forecast point and preceding history."""
     t, target = epoch(point['T']), epoch(point['target_time_begin'])
     horizon = target-t
-    # Sparse live routes may expose the nearest stop after T+10 when the
-    # strict 10–15 minute window is empty.  Backend marks that point with
-    # ``horizon_fallback`` so it remains explicit instead of being confused
-    # with a regular training target.
-    if not 600 < horizon <= 900 and not (point.get('horizon_fallback') and horizon > 600):
+    if not 600 < horizon <= 900:
         raise ValueError('Целевая остановка должна находиться в окне (T+10, T+15] минут')
     dt = timestamp(point['T'])
     f = dict.fromkeys(FEATURES, 0.0)
