@@ -21,6 +21,7 @@ EXCLUDED_IDENTIFIERS={"tr_id","target_stop_id"}
 LATE_THRESHOLD_S=120.0
 NOMINAL_COVERAGE=.90
 TARGET_MODE="residual_to_current_deviation"
+MODEL_VERSION="v5.3"
 
 
 def mae(actual,prediction):
@@ -89,7 +90,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--data",default="dataset")
     parser.add_argument("--out",default="artifacts")
-    parser.add_argument("--iterations",type=int,default=1200)
+    parser.add_argument("--iterations",type=int,default=1600)
     args=parser.parse_args()
     root=Path(args.data);out=Path(args.out);out.mkdir(parents=True,exist_ok=True)
 
@@ -118,7 +119,7 @@ def main():
     calibration=point_time>=cut2
     if min(fit.sum(),tune.sum(),calibration.sum())<20:raise RuntimeError("Chronological split is too small")
 
-    selector=CatBoostRegressor(iterations=args.iterations,depth=4,learning_rate=.03,l2_leaf_reg=8,
+    selector=CatBoostRegressor(iterations=args.iterations,depth=4,learning_rate=.03,l2_leaf_reg=16,
         loss_function="MAE",random_seed=42,verbose=False,allow_writing_files=False,thread_count=4)
     selector.fit(train_x[fit],training_target[fit],eval_set=(train_x[tune],training_target[tune]),early_stopping_rounds=100)
     best_iterations=max(50,selector.get_best_iteration()+1)
@@ -126,7 +127,7 @@ def main():
     torch_tune+=train.loc[tune,"cur_dev_s"].to_numpy(dtype=float)
 
     development=available<cut2
-    model=CatBoostRegressor(iterations=best_iterations,depth=4,learning_rate=.03,l2_leaf_reg=8,
+    model=CatBoostRegressor(iterations=best_iterations,depth=4,learning_rate=.03,l2_leaf_reg=16,
         loss_function="MAE",random_seed=42,verbose=False,allow_writing_files=False,thread_count=4)
     model.fit(train_x[development],training_target[development])
     calibration_prediction=model.predict(train_x[calibration])+train.loc[calibration,"cur_dev_s"].to_numpy(dtype=float)
@@ -141,7 +142,7 @@ def main():
     coverage=float(np.mean((truth>=test_prediction-radius)&(truth<=test_prediction+radius)))
 
     feature_names=train_x.columns.tolist()
-    metadata={"selected":"v5","version":"v5.2","target_mode":TARGET_MODE,"features":feature_names,
+    metadata={"selected":"v5","version":MODEL_VERSION,"target_mode":TARGET_MODE,"features":feature_names,
         "calibration_residuals":residuals.tolist(),"interval_radius_s":radius,
         "late_threshold_s":LATE_THRESHOLD_S,"nominal_coverage":NOMINAL_COVERAGE,
         "training":{"split":"purged_chronological","fit_rows":int(development.sum()),
@@ -149,10 +150,10 @@ def main():
                     "identifiers_excluded":sorted(EXCLUDED_IDENTIFIERS)}}
     model.save_model(str(out/"model_v5.cbm"))
     (out/"model.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
-    schema={"version":"v5.2","target_mode":TARGET_MODE,"features":feature_names}
+    schema={"version":MODEL_VERSION,"target_mode":TARGET_MODE,"features":feature_names}
     (out/"v5_feature_schema.json").write_text(json.dumps(schema,ensure_ascii=False,indent=2),encoding="utf-8")
 
-    report={"model":"v5.2","target_mode":TARGET_MODE,"rows_train":len(train),"fit":int(development.sum()),
+    report={"model":MODEL_VERSION,"target_mode":TARGET_MODE,"rows_train":len(train),"fit":int(development.sum()),
         "tune":int(tune.sum()),"calibration":int(calibration.sum()),"official_test":len(test),
         "validate":len(validate),"features":len(feature_names),"identifiers_excluded":sorted(EXCLUDED_IDENTIFIERS),
         "test_mae_s":mae(truth,test_prediction),"persistence_mae_s":mae(truth,test.cur_dev_s),
