@@ -1792,7 +1792,7 @@
         .close();
 
       if (currentProfile()?.role === 'Администратор') {
-        window.location.href = '/admin';
+        window.open('/admin', '_blank', 'noopener,noreferrer');
         return;
       }
 

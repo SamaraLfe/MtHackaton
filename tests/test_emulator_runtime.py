@@ -1,7 +1,9 @@
 from pathlib import Path
+import asyncio
 import subprocess
 import sys
 
+from backend import app as backend
 from emulator.service import load_vehicles
 from scripts import run_prototype
 
@@ -40,3 +42,18 @@ def test_prototype_runner_does_not_require_github_credentials_for_emulation():
 def test_emulator_uses_many_units_present_in_validate_dataset():
     vehicles = load_vehicles(ROOT / "dataset")
     assert len(vehicles) >= 10
+
+
+def test_prototype_startup_explicitly_resumes_the_original_emulator(monkeypatch):
+    requested_states = []
+
+    async def configure(enabled=None):
+        requested_states.append(enabled)
+        return {"status": "running", "units": 13}
+
+    monkeypatch.setattr(backend, "official_emulator_config", configure)
+
+    result = asyncio.run(backend.warm_official_source())
+
+    assert result == {"status": "running", "units": 13}
+    assert requested_states == [True]

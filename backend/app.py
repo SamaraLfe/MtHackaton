@@ -1555,9 +1555,12 @@ async def official_emulator_config(enabled:bool|None=None):
 
 
 async def warm_official_source():
-    """Seed the mandatory 13-unit official source when its container is ready."""
+    """Seed and start the mandatory official source when its container is ready."""
     for _ in range(12):
-        status=await official_emulator_config()
+        # A previous pause is persisted so that the source can be resumed with
+        # the same connection settings.  Prototype startup, however, is a new
+        # run and must always bring the original emulator online.
+        status=await official_emulator_config(True)
         if status.get('status')!='unavailable':
             return status
         await asyncio.sleep(1)
