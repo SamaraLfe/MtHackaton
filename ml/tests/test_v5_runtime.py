@@ -9,6 +9,8 @@ from ml.v5_features import build_v5_row
 def test_v5_artifact_has_runtime_schema_and_catboost_model():
     predictor = Predictor("artifacts")
     assert predictor.kind == "v5"
+    assert predictor.meta["version"] == "v5.3"
+    assert predictor.meta["target_mode"] == "residual_to_current_deviation"
     assert len(predictor.v5_features) == 102
     assert "tr_id" not in predictor.v5_features
     assert "target_stop_id" not in predictor.v5_features
