@@ -1,5 +1,5 @@
 """Dispatcher backend: NDTP/JSON -> causal features -> independent ML service."""
-import asyncio, json, logging, math, os, sqlite3, time, uuid
+import asyncio, json, logging, math, os, sqlite3, time, uuid, urllib.parse
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,22 +7,53 @@ import httpx
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from ml.features import build_one, epoch, timestamp, load_traffic, load_schedule, haversine
 from backend.ndtp import handle
-from backend.api_docs import DESCRIPTION, TAGS, operation
+from backend.api_docs import CONTACT, DESCRIPTION, LICENSE, OPENAPI_EXAMPLES, SERVERS, TAGS, operation
 
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
+CUSTOM_EMULATOR_URL=os.getenv('CUSTOM_EMULATOR_URL','http://127.0.0.1:18081').rstrip('/')
+OFFICIAL_EMULATOR_URL=os.getenv('OFFICIAL_EMULATOR_URL','http://127.0.0.1:18080').rstrip('/')
 LIVE_TRACK_TTL_S=int(os.getenv('LIVE_TRACK_TTL_S','3600'))
+CUSTOM_TR_ID_OFFSET = int(
+    os.getenv(
+        'CUSTOM_TR_ID_OFFSET',
+        '1000000'
+    )
+)
+
+CUSTOM_UNIT_ID_OFFSET = int(
+    os.getenv(
+        'CUSTOM_UNIT_ID_OFFSET',
+        '100000000'
+    )
+)
+LIVE_STALE_S = int(
+    os.getenv(
+        'LIVE_STALE_S',
+        '15'
+    )
+)
+
+LIVE_FALLBACK_S = int(
+    os.getenv(
+        'LIVE_FALLBACK_S',
+        '60'
+    )
+)
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
-deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
+deviations={};position_offsets={};position_states={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
+OFFICIAL_CONFIG_PATH=Path(os.getenv('STATE_DIR','state'))/'official_emulator_config.json'
 simulation_runs={};simulation_tasks={}
+official_config_cache=None
 runtime_stats={'started_at':time.time(),'requests_total':0,'requests_errors':0,'recent_request_ms':deque(maxlen=500)}
 logger=logging.getLogger('takt.backend')
 
@@ -51,6 +82,7 @@ class Mode(BaseModel):
 
 class WhatIf(BaseModel):
     """Non-persistent risk scenario inputs."""
+    tr_id:int|None=Field(default=None,gt=0,description='ТС/линия, для которой проверяется выпуск резерва.',examples=[131672])
     extra_vehicles:int=Field(default=0,ge=0,le=20,description='Дополнительные ТС только для эвристического расчёта.',examples=[1])
     headway_reduction_pct:float=Field(default=0,ge=0,le=50,description='Сокращение интервала в процентах.',examples=[0])
 
@@ -97,6 +129,14 @@ class SimulationCreate(BaseModel):
 class SimulationCancel(BaseModel):
     """Cancellation request for one running local simulation."""
     dispatcher_id:str=Field(pattern='^(admin|dispatcher)-\\d{2}$',description='Профиль оператора; отмена доступна только администратору.',examples=['admin-01'])
+
+class EmulatorControl(BaseModel):
+    """Local prototype operator allowed to pause a telemetry source."""
+    dispatcher_id:str=Field(pattern='^(admin|dispatcher)-[a-z0-9-]{2,40}$',description='Существующий рабочий профиль, управляющий источниками эмуляции.',examples=['dispatcher-01'])
+
+class AdminAction(BaseModel):
+    """Administrator profile authorizing a destructive local account action."""
+    operator_id:str=Field(pattern='^admin-[a-z0-9-]{2,40}$',description='Существующий профиль администратора.',examples=['admin-01'])
 
 def _account(row):
     return {'id':row['id'],'name':row['name'],'login':row['login'],'role':row['role'],'status':row['status']}
@@ -165,8 +205,16 @@ def live_track(tr_id,limit=100):
     if rows:
         cutoff=max(float(row['ts']) for row in rows)-LIVE_TRACK_TTL_S
         rows=[row for row in rows if float(row['ts'])>=cutoff]
-    return [clean({'lon':row['lon'],'lat':row['lat'],'event_time':timestamp(row['event_time']).isoformat(),
-                   'simulated':bool(row.get('simulated',False))}) for row in rows[-limit:]]
+    track=[]
+    for row in rows[-limit:]:
+        item={'lon':row['lon'],'lat':row['lat'],'event_time':timestamp(row['event_time']).isoformat(),
+              'simulated':bool(row.get('simulated',False))}
+        # The original image's raw Nav00 coordinate is retained for audit,
+        # while the public map coordinate remains the route projection.
+        if row.get('raw_lon') is not None and row.get('raw_lat') is not None:
+            item['raw_lon']=row['raw_lon']; item['raw_lat']=row['raw_lat']
+        track.append(clean(item))
+    return track
 
 def align_schedule_to_event_day(frame, event_time):
     """Move a historical day-plan to the local calendar day of live telemetry."""
@@ -194,18 +242,98 @@ def display_text(value,fallback='Не указано'):
     """Convert nullable CSV display fields without leaking the string ``nan``."""
     return fallback if value is None or pd.isna(value) or not str(value).strip() else str(value)
 
-def target_for(tr,t,stop_id=None):
-    candidates=schedule[(schedule.tr_id==tr)&(schedule.ts>t+600)&(schedule.ts<=t+900)]
-    if candidates.empty:return None
-    first_time=candidates.ts.min()
-    candidates=candidates[candidates.ts==first_time]
+def target_for(tr,t,stop_id=None,time_offset=0.0):
+    """Find the first stop in the 10–15 minute window.
+
+    ``time_offset`` is used only for a live source whose synthetic run starts
+    at a different point of the historical day plan. It shifts the effective
+    clock without changing the stored route geometry.
+    """
+    offset=float(time_offset or 0)
+    route=schedule[schedule.tr_id==tr].sort_values('ts')
+    if route.empty:return None
+    candidates=route[(route.ts+offset>t+600)&(route.ts+offset<=t+900)]
+    effective_offset=offset
+    horizon_fallback=False
+    if candidates.empty:
+        # A source can start just after the last planned point of a short
+        # route (the original emulator is especially prone to this). Treat
+        # the plan as a repeated service pattern and expose the applied cycle.
+        period=max(3600.0,float(route.ts.max())-float(route.ts.min()))
+        midpoint=t+750
+        options=[]
+        for cycle in range(-3,4):
+            candidate_offset=offset+cycle*period
+            shifted=route.ts+candidate_offset
+            window=route[(shifted>t+600)&(shifted<=t+900)]
+            if not window.empty:
+                first_time=float((window.ts+candidate_offset).min())
+                options.append((abs(first_time-midpoint),candidate_offset,window))
+        if options:
+            _,effective_offset,candidates=min(options,key=lambda item:item[0])
+        else:
+            # Sparse routes may have no stop exactly in the 10–15 minute
+            # interval. Use the nearest available stop after T+10 instead of
+            # dropping the vehicle from the operational picture.
+            floor_options=[]
+            for cycle in range(-3,4):
+                candidate_offset=offset+cycle*period
+                shifted=route.ts+candidate_offset
+                future=route[shifted>t+600]
+                if not future.empty:
+                    first_time=float((future.ts+candidate_offset).min())
+                    floor_options.append((first_time,candidate_offset,future))
+            if not floor_options:return None
+            _,effective_offset,candidates=min(floor_options,key=lambda item:item[0])
+            horizon_fallback=True
+    first_time=(candidates.ts+effective_offset).min()
+    candidates=candidates[(candidates.ts+effective_offset)==first_time]
     if stop_id is not None:candidates=candidates[candidates.tt_action_item_id==stop_id]
-    return None if candidates.empty else candidates.sort_values('tt_action_item_id').iloc[0].to_dict()
+    if candidates.empty:return None
+    result=candidates.sort_values('tt_action_item_id').iloc[0].to_dict()
+    if effective_offset:
+        result['raw_ts']=float(result['ts'])
+        result['ts']=float(result['ts'])+effective_offset
+        result['time_begin']=(pd.Timestamp(result['time_begin'])+pd.to_timedelta(effective_offset,unit='s')).isoformat(sep=' ')
+        result['schedule_offset']=effective_offset
+    if horizon_fallback:
+        result['horizon_fallback']=True
+    return result
+
+def planned_position_at(tr, ts):
+    """Project an original-emulator packet onto its scheduled route.
+
+    The supplied Java image generates random GPS coordinates when ``cells``
+    is empty. Those coordinates are valid NDTP packets but are not a valid
+    observation of the selected line. For the prototype we keep the packet's
+    identity/source and replace only its map position with a deterministic
+    interpolation along the same scheduled geometry shown in the dashboard.
+    """
+    route=schedule[schedule.tr_id==tr].dropna(subset=['lon','lat']).sort_values('ts').reset_index(drop=True)
+    if route.empty:return None
+    if len(route)==1:
+        return {'lon':float(route.iloc[0].lon),'lat':float(route.iloc[0].lat),'speed':0.0}
+    first=float(route.iloc[0].ts); last=float(route.iloc[-1].ts)
+    period=max(3600.0,last-first)
+    target=first+((float(ts)-first)%period)
+    right=int(np.searchsorted(route.ts.to_numpy(dtype=float),target,side='right'))
+    left=max(0,min(len(route)-1,right-1))
+    if right>=len(route):
+        start=route.iloc[-1]; end=route.iloc[0]; end_ts=float(end.ts)+period; start_ts=float(start.ts)
+    else:
+        start=route.iloc[left]; end=route.iloc[right]; start_ts=float(start.ts); end_ts=float(end.ts)
+    fraction=0.0 if end_ts<=start_ts else min(1.0,max(0.0,(target-start_ts)/(end_ts-start_ts)))
+    lon=float(start.lon)+(float(end.lon)-float(start.lon))*fraction
+    lat=float(start.lat)+(float(end.lat)-float(start.lat))*fraction
+    distance=haversine(float(start.lon),float(start.lat),float(end.lon),float(end.lat))
+    speed=min(130.0,max(1.0,distance/max(1.0,end_ts-start_ts)*3.6))
+    return {'lon':lon,'lat':lat,'speed':speed}
 
 def stop_neighbors(tr,stop):
     """Return readable neighbouring planned stops for a selected target."""
     route=schedule[schedule.tr_id==tr].sort_values('ts').reset_index(drop=True)
-    matches=np.flatnonzero((route.ts.to_numpy()==stop['ts'])&(route.tt_action_item_id.to_numpy()==stop['tt_action_item_id']))
+    raw_ts=float(stop.get('raw_ts',stop['ts']-float(stop.get('schedule_offset',0) or 0)))
+    matches=np.flatnonzero((route.ts.to_numpy()==raw_ts)&(route.tt_action_item_id.to_numpy()==stop['tt_action_item_id']))
     if not len(matches):return 'Не указана','Не указана'
     position=int(matches[0])
     previous=route.iloc[position-1].building_address if position else None
@@ -227,6 +355,61 @@ def route_risk(items):
 def incidents(items):
     return [dict(vehicle_id=int(v['tr_id']),route_id=int(v['tr_id']),level=v.get('level','unknown'),prediction_s=v.get('prediction_s'),late_probability=v.get('late_probability'),reason=v.get('reason'),stop_address=v.get('stop_address'),source=v.get('source'),recommendation=v.get('recommendation')) for v in sorted(items,key=lambda x:({'high':0,'medium':1,'low':2,'unknown':3}[x.get('level','unknown')],-(x.get('late_probability') or -1))) if v.get('level') in {'high','medium'}]
 
+def reserve_placement(vehicle):
+    """Choose a concrete on-route position for the non-persistent reserve.
+
+    The reserve starts at the selected vehicle's current projected point. That
+    is the only position supported by the available evidence: the backend has
+    no depot, driver or turn-around data from which to invent another start.
+    The returned track follows the remaining planned stop sequence so the UI
+    can draw and animate the scenario on the same line.
+    """
+    tr=int(vehicle['tr_id'])
+    route=schedule[schedule.tr_id==tr].dropna(subset=['lon','lat']).sort_values('ts').reset_index(drop=True)
+    if route.empty:
+        return None
+    match=vehicle.get('position_match')
+    if match is None and vehicle.get('lon') is not None and vehicle.get('lat') is not None:
+        match=match_stop(tr,float(vehicle['lon']),float(vehicle['lat']))
+    if match is None:
+        match={'segment_index':0,'projected_lon':float(route.iloc[0].lon),'projected_lat':float(route.iloc[0].lat),
+               'segment_start_stop_address':display_text(route.iloc[0].building_address),'next_stop_address':display_text(route.iloc[1].building_address if len(route)>1 else route.iloc[0].building_address),
+               'distance_m':None,'confidence':0}
+    index=max(0,min(len(route)-2,int(match.get('segment_index',0)))) if len(route)>1 else 0
+    target_rows=route[route.tt_action_item_id==int(vehicle.get('target_stop_id',-1))]
+    target_index=int(target_rows.index[0]) if not target_rows.empty else min(len(route)-1,index+1)
+    if target_index <= index:
+        target_index=min(len(route)-1,index+1)
+    target=route.iloc[target_index]
+    track=[{'lon':float(match.get('projected_lon',route.iloc[index].lon)),'lat':float(match.get('projected_lat',route.iloc[index].lat)),'simulated':True}]
+    for row in route.iloc[index+1:min(len(route),index+13)].itertuples():
+        track.append({'lon':float(row.lon),'lat':float(row.lat),'simulated':True})
+    current=float(vehicle.get('current_deviation_s') or 0)
+    forecast=float(vehicle.get('prediction_s') or current)
+    positive_delay=max(0.0,forecast,current)
+    # One additional vehicle relieves a portion of a positive delay.  The
+    # coefficient is deliberately explicit and bounded; it is not presented
+    # as a second ML prediction.
+    relief=round(min(positive_delay,max(30.0,180.0*(1-0.85))),1) if positive_delay else 0.0
+    after_prediction=round(forecast-relief if forecast>0 else forecast,1)
+    after_current=round(current-min(max(0.0,current),relief),1)
+    distance_to_target=0.0
+    if len(route)>1:
+        first_fraction=1.0-float(match.get('fraction',0.0)) if match.get('segment_index')==index else 1.0
+        distance_to_target+=haversine(float(match.get('projected_lon',route.iloc[index].lon)),float(match.get('projected_lat',route.iloc[index].lat)),route.iloc[index+1].lon,route.iloc[index+1].lat)*first_fraction
+        for left,right in zip(route.iloc[index+1:target_index].itertuples(),route.iloc[index+2:target_index+1].itertuples()):
+            distance_to_target+=haversine(left.lon,left.lat,right.lon,right.lat)
+    return {
+        'tr_id':tr,'segment_index':index,'lon':track[0]['lon'],'lat':track[0]['lat'],
+        'start_stop_address':display_text(match.get('segment_start_stop_address',route.iloc[index].building_address)),
+        'next_stop_address':display_text(match.get('next_stop_address',route.iloc[index+1].building_address if len(route)>1 else route.iloc[index].building_address)),
+        'target_stop_address':display_text(target.building_address),'target_stop_id':int(target.tt_action_item_id),
+        'distance_to_target_m':round(distance_to_target,1),'confidence':match.get('confidence'),
+        'reason':'Позиция выбрана по текущей проекции на плановый сегмент; резерв следует к целевой остановке.',
+        'relief_s':relief,'before_current_deviation_s':round(current,1),'after_current_deviation_s':after_current,
+        'before_prediction_s':round(forecast,1),'after_prediction_s':after_prediction,'track':track,
+    }
+
 def calibrated_uncertainty(prediction):
     """Apply the same frozen residual calibration as the ML service."""
     residuals=np.asarray(model_meta.get('calibration_residuals',[]),dtype=float)
@@ -238,7 +421,7 @@ def calibrated_uncertainty(prediction):
 
 def load_historical_snapshot():
     """Build a fallback view from frozen V5 validate predictions."""
-    vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+    vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear()
     predictions={}
     prediction_path=ARTIFACT/'submission_v5.csv'
     if prediction_path.exists():
@@ -266,7 +449,7 @@ def load_historical_snapshot():
             previous_stop='Контрольная точка не указана' if pd.isna(previous) else str(previous),next_stop='Контрольная точка не указана' if pd.isna(following) else str(following),
             lower_s=uncertainty['lower_s'],upper_s=uncertainty['upper_s'],late_probability=uncertainty['late_probability'],level=uncertainty['level'],
             reason='Офлайн-прогноз V5 по архивной телеметрии',recommendation='Связаться с водителем и уточнить обстановку' if uncertainty['level'] in {'high','medium'} else 'Продолжить наблюдение',
-            source='historical_v5',model='v5_offline',degraded=prediction is None,stale=False,position_time=float(last.ts) if last is not None else None,
+            source='historical_v5',model='v5_offline',reason_is_hypothesis=True,degraded=prediction is None,stale=False,position_time=float(last.ts) if last is not None else None,
             lon=float(last.lon) if last is not None else None,lat=float(last.lat) if last is not None else None,
         )
         archive_vehicles[tr]=snapshot_vehicle
@@ -286,39 +469,157 @@ def _segment_projection(lon,lat,start_lon,start_lat,end_lon,end_lat):
     distance=math.hypot(px-ax*fraction,py-ay*fraction)
     return fraction,projected_lon,projected_lat,distance
 
-def match_stop(tr_id, lon, lat):
+def match_stop(tr_id, lon, lat, segment_hint=None):
     candidates=schedule[schedule.tr_id==tr_id].dropna(subset=['lon','lat']).sort_values('ts')
     if candidates.empty:return None
     if len(candidates)==1:
         row=candidates.iloc[0];distance=haversine(lon,lat,row.lon,row.lat)
-        return {'tr_id':int(tr_id),'match_kind':'planned_stop','road_graph_matched':False,'stop_id':int(row.tt_action_item_id),'stop_address':str(row.building_address),'distance_m':round(distance,2),'segment_index':0,'next_stop_id':int(row.tt_action_item_id),'confidence':round(max(0.,1-distance/250),3)}
+        return {'tr_id':int(tr_id),'match_kind':'planned_stop','road_graph_matched':False,'stop_id':int(row.tt_action_item_id),'stop_address':display_text(row.building_address),'distance_m':round(distance,2),'segment_index':0,'next_stop_id':int(row.tt_action_item_id),'next_stop_address':display_text(row.building_address),'confidence':round(max(0.,1-distance/250),3)}
     best=None
+    # A route can contain several runs through the same street. Once a live
+    # source has been matched, keep the next match close to its previous
+    # segment instead of jumping to an identical geometry from another run.
+    hint = int(segment_hint) if segment_hint is not None else None
+    allowed = None
+    if hint is not None:
+        allowed = set(range(max(0, hint - 2), min(len(candidates) - 1, hint + 8) + 1))
     rows=list(candidates.itertuples())
     for position,(start,end) in enumerate(zip(rows,rows[1:])):
+        if allowed is not None and position not in allowed:
+            continue
         fraction,projected_lon,projected_lat,distance=_segment_projection(lon,lat,start.lon,start.lat,end.lon,end.lat)
         if best is None or distance<best['distance']:
             heading=(math.degrees(math.atan2((end.lon-start.lon)*math.cos(math.radians((start.lat+end.lat)/2)),end.lat-start.lat))+360)%360
             best={'position':position,'start':start,'end':end,'fraction':fraction,'lon':projected_lon,'lat':projected_lat,'distance':distance,'heading':heading}
+    if best is None:
+        # A synthetic source may wrap to the first point of its route. In that
+        # case recover with a global geometry match and let the estimator
+        # reset its calibrated pass.
+        for position,(start,end) in enumerate(zip(rows,rows[1:])):
+            fraction,projected_lon,projected_lat,distance=_segment_projection(lon,lat,start.lon,start.lat,end.lon,end.lat)
+            if best is None or distance<best['distance']:
+                heading=(math.degrees(math.atan2((end.lon-start.lon)*math.cos(math.radians((start.lat+end.lat)/2)),end.lat-start.lat))+360)%360
+                best={'position':position,'start':start,'end':end,'fraction':fraction,'lon':projected_lon,'lat':projected_lat,'distance':distance,'heading':heading}
     start,end=best['start'],best['end']
     nearest=start if best['fraction']<.5 else end
     distance_to_next=haversine(best['lon'],best['lat'],end.lon,end.lat)
     return {'tr_id':int(tr_id),'match_kind':'planned_trajectory_segment','road_graph_matched':False,
-            'stop_id':int(nearest.tt_action_item_id),'stop_address':str(nearest.building_address),
+            'stop_id':int(nearest.tt_action_item_id),'stop_address':display_text(nearest.building_address),
             'distance_m':round(best['distance'],2),'segment_index':best['position'],
+            'fraction':round(best['fraction'],6),
             'segment_start_stop_id':int(start.tt_action_item_id),'next_stop_id':int(end.tt_action_item_id),
+            'segment_start_stop_address':display_text(start.building_address),
+            'next_stop_address':display_text(end.building_address),
             'projected_lon':round(best['lon'],7),'projected_lat':round(best['lat'],7),
             'distance_to_next_stop_m':round(distance_to_next,2),'direction_degrees':round(best['heading'],1),
             'direction':'along_planned_trajectory','confidence':round(max(0.,1-best['distance']/250),3)}
 
+def estimate_position(tr_id, lon, lat, ts, speed=None):
+    """Estimate live schedule offset from the vehicle's position on the plan.
+
+    The emulator moves between planned stop coordinates, so a stop-arrival-only
+    detector leaves most packets at zero.  We instead project every valid GPS
+    point onto the planned segment and interpolate the segment's scheduled time.
+    The first valid point calibrates the historical plan to the live source's
+    wall clock; later points therefore measure movement against the same
+    planned sequence without pretending that an arrival was observed.
+    """
+    previous_state = position_states.get(tr_id, {})
+    match = match_stop(tr_id, lon, lat, previous_state.get('segment_index'))
+    # A nearest point many kilometres away is not an operational match.  The
+    # source may be live, but its coordinate is not evidence for this route.
+    if not match or float(match.get('distance_m', float('inf'))) > 250:
+        return None
+    route = schedule[schedule.tr_id == tr_id].dropna(subset=['lon', 'lat']).sort_values('ts').reset_index(drop=True)
+    if route.empty:
+        return None
+    position = int(match.get('segment_index', 0))
+    if previous_state.get('segment_index') is not None and position < int(previous_state['segment_index']) - 2:
+        # The planned sequence wrapped; start a new calibrated pass rather
+        # than comparing this point with a stale segment from yesterday.
+        position_offsets.pop(tr_id, None)
+    if len(route) == 1 or position >= len(route) - 1:
+        raw_expected = float(route.iloc[-1].ts)
+        segment_start = route.iloc[-1]
+        segment_end = route.iloc[-1]
+    else:
+        start = route.iloc[position]
+        end = route.iloc[position + 1]
+        segment_start = start
+        segment_end = end
+        fraction = 0.0
+        if match.get('segment_index') == position:
+            # Use the same projection as the geometry matcher rather than a
+            # nearest-stop snap so the expected time moves continuously.
+            fraction, _, _, _ = _segment_projection(lon, lat, start.lon, start.lat, end.lon, end.lat)
+        raw_expected = float(start.ts) + fraction * max(0.0, float(end.ts) - float(start.ts))
+    # A near-zero speed packet at a planned stop is the one case where the
+    # feed gives us an observed arrival signal rather than only a geometric
+    # estimate.  Keep this explicit so the UI/API can distinguish it.
+    observed = route[route.tt_action_item_id == int(match['stop_id'])]
+    if speed is not None and float(speed) < 5 and not observed.empty and float(match.get('distance_m', 9999)) <= 60:
+        planned = float(observed.iloc[(observed.ts - ts).abs().argmin()].ts)
+        deviation = max(-1800.0, min(1800.0, float(ts) - planned))
+        offset = float(position_offsets.get(tr_id, 0.0))
+        position_states[tr_id] = {'segment_index': position, 'ts': float(ts)}
+        return {
+            **match,
+            'match_kind': 'observed_slow_stop',
+            'deviation_s': round(deviation, 1),
+            'expected_ts': planned,
+            'expected_position_time': pd.Timestamp(planned, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+            'previous_stop_time': pd.Timestamp(float(segment_start.ts) + offset, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+            'next_stop_time': pd.Timestamp(float(segment_end.ts) + offset, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+            'stop_times_estimated': False,
+            'estimated': False,
+        }
+
+    first_ts = float(route.iloc[0].ts)
+    last_ts = float(route.iloc[-1].ts)
+    period = max(3600.0, last_ts - first_ts)
+    # Calibrate the plan to the first valid point from this source.  The
+    # emulator intentionally starts at the first geometry point at wall-clock
+    # time, so comparing it to the historical 06:00 plan would otherwise
+    # produce a permanent multi-hour error.  Subsequent packets then change
+    # the value as the vehicle progresses through scheduled segments.
+    if tr_id not in position_offsets:
+        position_offsets[tr_id] = float(ts) - raw_expected
+    expected = raw_expected + position_offsets[tr_id]
+    # If a route wraps, keep the equivalent planned timestamp closest to the
+    # previous live estimate rather than jumping back to the source day.
+    previous_expected = deviations.get(tr_id, {}).get('expected_ts')
+    if previous_expected is not None:
+        while expected - previous_expected > period / 2:
+            expected -= period
+        while previous_expected - expected > period / 2:
+            expected += period
+    deviation = max(-1800.0, min(1800.0, float(ts) - expected))
+    position_states[tr_id] = {'segment_index': position, 'ts': float(ts)}
+    return {
+        **match,
+        'deviation_s': round(deviation, 1),
+        'expected_ts': expected,
+        'expected_position_time': pd.Timestamp(expected, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+        'previous_stop_time': pd.Timestamp(float(segment_start.ts) + position_offsets.get(tr_id, 0.0), unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+        'next_stop_time': pd.Timestamp(float(segment_end.ts) + position_offsets.get(tr_id, 0.0), unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+        'stop_times_estimated': True,
+        'estimated': True,
+    }
+
 async def forecast(point,records,source):
     t=epoch(point['T']);tr=int(point['tr_id'])
-    stop=target_for(tr,t,int(point['target_stop_id']))
+    schedule_offset=float(point.get('schedule_offset',0) or 0)
+    stop=target_for(tr,t,int(point['target_stop_id']),schedule_offset)
     if stop is None or int(stop['tt_action_item_id'])!=int(point['target_stop_id']) or abs(stop['ts']-epoch(point['target_time_begin']))>1:
         raise ValueError('Точка не соответствует первой остановке в окне (T+10, T+15]')
     features=build_one(point,records,stop)
     start=time.perf_counter();degraded=False
     try:
-        response=await client.post(ML_URL+'/predict_v5',json={'points':[clean(point)],'histories':[[clean(x) for x in records]],'schedules':[[clean(x) for x in schedule[(schedule.tr_id==tr)&(schedule.ts>=t-1800)&(schedule.ts<=t+1800)].to_dict('records')]]});response.raise_for_status()
+        schedule_window=schedule[(schedule.tr_id==tr)&(schedule.ts+schedule_offset>=t-1800)&(schedule.ts+schedule_offset<=t+1800)].copy()
+        if schedule_offset:
+            schedule_window['ts']=schedule_window['ts'].astype(float)+schedule_offset
+            schedule_window['time_begin']=(pd.to_datetime(schedule_window['time_begin'],format='mixed')+pd.to_timedelta(schedule_offset,unit='s')).map(lambda value:value.isoformat(sep=' '))
+        response=await client.post(ML_URL+'/predict_v5',json={'points':[clean(point)],'histories':[[clean(x) for x in records]],'schedules':[[clean(x) for x in schedule_window.to_dict('records')]]});response.raise_for_status()
         result=response.json()['predictions'][0]
     except (httpx.HTTPError,KeyError,ValueError):
         counters['ml_failures']+=1;degraded=True
@@ -328,23 +629,50 @@ async def forecast(point,records,source):
     risk=result['late_probability']
     level='unknown' if degraded or stale else ('high' if risk>=.7 else 'medium' if risk>=.35 else 'low')
     reason='Устойчивое отклонение от графика'
-    if features['idle_s']>=90:reason='Длительная остановка: возможный простой'
-    elif features['speed_trend']<-2:reason='Снижение скорости за последние 10 минут'
-    if stale:reason='Нет свежей достоверной телеметрии'
+    reason_explanation='Положение на плановом сегменте устойчиво отличается от ожидаемого времени; это сигнал для проверки, а не установленная причина.'
+    if features['idle_s']>=90:
+        reason='Длительная остановка: возможный простой'
+        reason_explanation='Телеметрия показывает не менее 90 секунд почти без движения; причина простоя в прототипе не подтверждается.'
+    elif features['speed_trend']<-2:
+        reason='Снижение скорости за последние 10 минут'
+        reason_explanation='Средняя скорость за последние 10 минут снижается; это может объяснять отклонение, но не доказывает пробку или неисправность.'
+    if stale:
+        reason='Нет свежей достоверной телеметрии'
+        reason_explanation='Свежесть или качество GPS недостаточны, поэтому риск нельзя трактовать как подтверждённый.'
     valid=[r for r in records if r.get('location_valid') and r['ts']<=t and np.isfinite(r.get('lon',np.nan)) and np.isfinite(r.get('lat',np.nan))]
     last=max(valid,key=lambda r:r['ts']) if valid else None
+    position_match=point.get('position_match')
     previous_stop,next_stop=stop_neighbors(tr,stop)
+    # The forecast target is 10–15 minutes ahead.  Keep its neighbouring
+    # stops separately, while the operational card uses the segment currently
+    # occupied by the vehicle (and its estimated stop times).
+    target_previous_stop, target_next_stop = previous_stop, next_stop
+    if position_match:
+        previous_stop = position_match.get('segment_start_stop_address', previous_stop)
+        next_stop = position_match.get('next_stop_address', next_stop)
     result.update(tr_id=tr,T=timestamp(point['T']).isoformat(),target_time_begin=timestamp(point['target_time_begin']).isoformat(),target_stop_id=int(stop['tt_action_item_id']),
-      stop_address=display_text(stop['building_address'],'Контрольная точка не указана'),level=level,reason=reason,reason_is_hypothesis=True,
+      stop_address=display_text(stop['building_address'],'Контрольная точка не указана'),level=level,reason=reason,reason_explanation=reason_explanation,reason_is_hypothesis=True,
       previous_stop=previous_stop,next_stop=next_stop,
+      target_previous_stop=target_previous_stop,target_next_stop=target_next_stop,
+      previous_stop_time=position_match.get('previous_stop_time') if position_match else None,
+      next_stop_time=position_match.get('next_stop_time') if position_match else None,
+      stop_times_estimated=bool(position_match and position_match.get('stop_times_estimated', True)),
       recommendation='Проверить ситуацию с водителем и доступность резерва' if level=='high' else 'Наблюдать за движением',
       source=source,degraded=degraded,stale=stale,features=features,lon=last['lon'] if last else None,lat=last['lat'] if last else None,
-      position_time=last['ts'] if last else None,horizon_s=epoch(point['target_time_begin'])-t)
+      position_time=last['ts'] if last else None,horizon_s=epoch(point['target_time_begin'])-t,
+      current_deviation_s=point.get('cur_dev_s'),
+      deviation_estimated=bool(point.get('deviation_estimated', False)),
+      schedule_offset_s=round(schedule_offset,1),
+      horizon_fallback=bool(point.get('horizon_fallback', False)),
+      position_match=point.get('position_match'))
     vehicles[tr]=clean(result);counters['predictions']+=1
     return clean(result)
 
 async def ingest(event):
     global schedule,live_schedule_day
+    if state.get('ingest_paused'):
+        counters['paused_packets']+=1
+        return
     tr=event['tr_id'];ts=epoch(event['event_time'])
     if ts>time.time()+60: raise ValueError('Телеметрия из будущего')
     event_day=timestamp(event['event_time']).date()
@@ -358,62 +686,263 @@ async def ingest(event):
     if state['mode']!='live':
         # The historical forecast stays visible by default. Only a fresh NDTP
         # coordinate can overlay it, so delayed source traffic never looks live.
+        # A live custom/original packet for a vehicle absent from the frozen
+        # archive must not create a half-empty "archive" row in replay.
+        if tr not in archive_vehicles:
+            return
         if event['location_valid'] and ts>=time.time()-LIVE_TRACK_TTL_S:
-            vehicles[tr]={
-                'tr_id':tr,'T':timestamp(event['event_time']).isoformat(),
-                'level':'unknown','reason':'Live NDTP: позиция получена; прогноз остаётся историческим',
-                'source':'live','prediction_s':None,'late_probability':None,
-                'telemetry_source':event.get('telemetry_source','unknown'),
+            historical=dict(archive_vehicles.get(tr, {}))
+            vehicles[tr]={**historical,
+                'tr_id':tr,'reason':'Live NDTP: позиция получена; прогноз остаётся историческим','reason_is_hypothesis':True,
+                'source':'historical_v5','telemetry_source':event.get('telemetry_source','unknown'),
+                'live_position':True,'live_position_time':timestamp(event['event_time']).isoformat(),
                 'lon':event['lon'],'lat':event['lat'],'position_time':ts,
             }
         return
     state['clock']=timestamp(event['event_time']).isoformat()
-    # Conservative arrival match: only already observed stop proximity. No schedule actuals.
-    known=schedule[(schedule.tr_id==tr)&(schedule.ts>=ts-1800)&(schedule.ts<=ts+300)]
-    if event['location_valid'] and event['speed']<5 and not known.empty:
-        dist=known.apply(lambda s:haversine(event['lon'],event['lat'],s.lon,s.lat),axis=1)
-        nearest=known.loc[dist.idxmin()]
-        if dist.min()<60 and deviations.get(tr,{}).get('stop')!=int(nearest.tt_action_item_id):
-            deviations[tr]={'stop':int(nearest.tt_action_item_id),'value':ts-nearest.ts}
-    if ts-last_forecast.get(tr,0)<30:return
-    last_forecast[tr]=ts
-    stop=target_for(tr,ts)
-    if stop is None:
-        vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),prediction_s=None,late_probability=None,position_time=ts)
+    if event.get('telemetry_source')=='ndtp_nav00' and event.get('location_valid'):
+        # The external image's empty-cell auto generator emits random GPS.
+        # Keep the original NDTP source for provenance, but make its map
+        # position follow the same planned geometry as the dashboard route.
+        raw_lon,raw_lat=float(event['lon']),float(event['lat'])
+        projected=planned_position_at(tr,ts)
+        if projected is not None:
+            event['raw_lon']=raw_lon; event['raw_lat']=raw_lat
+            event['lon']=projected['lon']; event['lat']=projected['lat']; event['speed']=projected['speed']
+            event['position_adjusted']=True
+            # ``row`` was copied into history before the projection so the
+            # raw packet remains available for provenance.  Forecast builds
+            # its current position from history, therefore keep the observed
+            # row in sync with the route-projected coordinates as well.  If
+            # this is omitted, every ML refresh briefly puts the marker back
+            # at the random GPS coordinate emitted by the stock emulator.
+            if records and records[-1].get('ts') == ts:
+                records[-1].update({
+                    'lon': event['lon'],
+                    'lat': event['lat'],
+                    'speed': event.get('speed'),
+                    'raw_lon': event.get('raw_lon'),
+                    'raw_lat': event.get('raw_lat'),
+                    'position_adjusted': True,
+                })
+    position_match = None
+    if event['location_valid']:
+        position_match = estimate_position(tr, event['lon'], event['lat'], ts, event.get('speed'))
+        if position_match is not None:
+            deviations[tr] = {
+                'stop': int(position_match['stop_id']),
+                'value': float(position_match['deviation_s']),
+                'expected_ts': float(position_match['expected_ts']),
+                'position_match': position_match,
+            }
+
+    # Position is refreshed for every valid NDTP packet.
+    # ML inference stays throttled separately below.
+    current = vehicles.get(tr)
+
+    if current is not None and event['location_valid']:
+        current['lon'] = event['lon']
+        current['lat'] = event['lat']
+        current['position_time'] = ts
+        current['telemetry_source'] = event.get(
+            'telemetry_source',
+            'unknown',
+        )
+        current['position_adjusted'] = bool(event.get('position_adjusted', current.get('position_adjusted', False)))
+        if event.get('raw_lon') is not None and event.get('raw_lat') is not None:
+            current['raw_lon'] = event['raw_lon']
+            current['raw_lat'] = event['raw_lat']
+        current['live_position_time'] = timestamp(
+            event['event_time']
+        ).isoformat()
+        if position_match is not None:
+            current['current_deviation_s'] = position_match['deviation_s']
+            current['deviation_estimated'] = bool(position_match.get('estimated', False))
+            current['position_match'] = position_match
+            current['previous_stop'] = position_match.get('segment_start_stop_address', current.get('previous_stop'))
+            current['next_stop'] = position_match.get('next_stop_address', current.get('next_stop'))
+            current['previous_stop_time'] = position_match.get('previous_stop_time')
+            current['next_stop_time'] = position_match.get('next_stop_time')
+            current['stop_times_estimated'] = bool(position_match.get('stop_times_estimated', True))
+        else:
+            current['current_deviation_s'] = None
+            current['deviation_estimated'] = False
+            current['position_match'] = None
+
+    if ts - last_forecast.get(tr, 0) < 30:
         return
-    point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],cur_dev_s=deviations.get(tr,{}).get('value',0))
+    last_forecast[tr]=ts
+    schedule_offset=float(position_offsets.get(tr,0) or 0) if position_match is not None else 0.0
+    stop=target_for(tr,ts,time_offset=schedule_offset)
+    if stop is None:
+        vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',reason_is_hypothesis=True,lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),position_adjusted=bool(event.get('position_adjusted',False)),position_origin='planned_route_projection' if event.get('position_adjusted') else None,prediction_s=None,late_probability=None,position_time=ts)
+        return
+    schedule_offset=float(stop.get('schedule_offset',schedule_offset) or 0)
+    current_deviation = deviations.get(tr, {}).get('value')
+    point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],
+               cur_dev_s=float(current_deviation if current_deviation is not None else 0),
+               deviation_estimated=bool(position_match and position_match.get('estimated', False)),
+               position_match=position_match,schedule_offset=schedule_offset,
+               horizon_fallback=bool(stop.get('horizon_fallback',False)))
     result=await forecast(point,list(records),'live')
     result['telemetry_source']=event.get('telemetry_source','unknown')
+    result['position_adjusted']=bool(event.get('position_adjusted',False))
+    if event.get('position_adjusted'):
+        result['position_origin']='planned_route_projection'
+        result['raw_lon']=event.get('raw_lon')
+        result['raw_lat']=event.get('raw_lat')
     vehicles[tr]=clean(result)
-    if tr not in deviations:
-        result.update(reason=f"{result['reason']}; текущее отклонение пока принято равным 0 с",deviation_estimated=True)
-        vehicles[tr]=result
+    if current_deviation is None:
+        result.update(current_deviation_s=None,deviation_estimated=False,
+                      reason=f"{result['reason']}; текущее отклонение не удалось оценить по положению")
+        vehicles[tr]=clean(result)
 
 async def on_ndtp(event):
-    unit=event.pop('unit_id');tr=mapping.get(unit)
-    if tr is None: counters['unknown_units']+=1;return
-    event['tr_id']=tr
+    unit = event.pop('unit_id')
+
+    tr = mapping.get(unit)
+
+    if tr is None:
+        counters['unknown_units'] += 1
+        return
+
+    is_custom = (
+        unit
+        >= CUSTOM_UNIT_ID_OFFSET
+    )
+
+    event['tr_id'] = tr
+
     try:
-        validated=Telemetry(**event)
-        payload=validated.model_dump();payload['telemetry_source']='ndtp_nav00'
-        async with lock: await ingest(payload)
-    except ValueError: counters['invalid_events']+=1
+        validated = Telemetry(
+            **event
+        )
+
+        payload = (
+            validated.model_dump()
+        )
+
+        payload[
+            'telemetry_source'
+        ] = (
+            'custom_ndtp_nav00'
+            if is_custom
+            else 'ndtp_nav00'
+        )
+
+        payload[
+            'simulated'
+        ] = is_custom
+
+        async with lock:
+            await ingest(
+                payload
+            )
+
+    except ValueError:
+        counters[
+            'invalid_events'
+        ] += 1
 
 @asynccontextmanager
 async def lifespan(app):
     global schedule,schedule_template,traffic,points,mapping,client,model_meta
     init_store()
-    schedule=load_schedule(DATA/'validate/schedule_plan.csv')
-    schedule_template=schedule.copy()
+    schedule = load_schedule(
+        DATA / 'validate/schedule_plan.csv'
+    )
+
+    base_schedule = schedule.copy()
+
+    custom_schedule = (
+        base_schedule.copy()
+    )
+
+    custom_schedule['tr_id'] = (
+        custom_schedule['tr_id']
+        .astype(int)
+        + CUSTOM_TR_ID_OFFSET
+    )
+
+    schedule = pd.concat(
+        [
+            base_schedule,
+            custom_schedule,
+        ],
+        ignore_index=True,
+    )
+
+    schedule_template = schedule.copy()
     all_ids=sorted({int(item) for item in schedule.tr_id.unique()})
     for dispatcher_id,parity in (('dispatcher-01',0),('dispatcher-02',1)):
         if db.execute('SELECT COUNT(*) AS count FROM assignments WHERE dispatcher_id=?',(dispatcher_id,)).fetchone()['count']==0:
             db.executemany('INSERT OR IGNORE INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,tr_id) for index,tr_id in enumerate(all_ids) if index%2==parity])
     db.commit()
+    # Если базовое ТС назначено диспетчеру,
+    # автоматически назначаем ему и его custom-копию.
+    existing_assignments = db.execute(
+        '''
+        SELECT dispatcher_id, tr_id
+        FROM assignments
+        '''
+    ).fetchall()
+
+    custom_assignments = []
+
+    for assignment in existing_assignments:
+        tr_id = int(
+            assignment['tr_id']
+        )
+
+        # Не создаём custom-копию
+        # от уже виртуального ТС.
+        if tr_id >= CUSTOM_TR_ID_OFFSET:
+            continue
+
+        custom_tr_id = (
+            tr_id
+            + CUSTOM_TR_ID_OFFSET
+        )
+
+        custom_assignments.append(
+            (
+                assignment[
+                    'dispatcher_id'
+                ],
+                custom_tr_id,
+            )
+        )
+
+    db.executemany(
+        '''
+        INSERT OR IGNORE INTO assignments(
+            dispatcher_id,
+            tr_id
+        )
+        VALUES (?, ?)
+        ''',
+        custom_assignments,
+    )
+
+    db.commit()
     traffic=load_traffic(DATA/'validate/traffic.csv')
     points=pd.read_csv(DATA/'validate/points.csv').sort_values('T').reset_index(drop=True)
     ids=pd.read_csv(DATA/'validate/traffic.csv',usecols=['unit_id','tr_id']).drop_duplicates()
     mapping={int(r.unit_id):int(r.tr_id) for r in ids.itertuples()}
+    for row in ids.itertuples():
+        custom_unit_id = (
+            int(row.unit_id)
+            + CUSTOM_UNIT_ID_OFFSET
+        )
+
+        custom_tr_id = (
+            int(row.tr_id)
+            + CUSTOM_TR_ID_OFFSET
+        )
+
+        mapping[
+            custom_unit_id
+        ] = custom_tr_id
     mapping.update({int(k):int(v) for k,v in json.loads(os.getenv('UNIT_MAP','{}')).items()})
     client=httpx.AsyncClient(timeout=2)
     model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8'))
@@ -425,9 +954,80 @@ async def lifespan(app):
     server.close();await server.wait_closed();await client.aclose()
     if db is not None:db.close()
 
-app=FastAPI(title='Такт — Backend API',version='1.0.0',lifespan=lifespan,
-    description=DESCRIPTION,openapi_tags=TAGS,docs_url='/docs/swagger',
-    swagger_ui_parameters={'docExpansion':'none','displayRequestDuration':True,'filter':True})
+app=FastAPI(title='Такт — Backend API',version='1.1.0',lifespan=lifespan,
+    description=DESCRIPTION,openapi_tags=TAGS,servers=SERVERS,
+    contact=CONTACT,license_info=LICENSE,docs_url='/docs/swagger',redoc_url='/redoc',
+    swagger_ui_parameters={
+        # Keep the operation list readable while leaving request/response
+        # schemas available in the Models section.
+        'docExpansion':'list',
+        'defaultModelsExpandDepth':0,
+        'defaultModelExpandDepth':1,
+        'displayOperationId':True,
+        'displayRequestDuration':True,
+        'filter':True,
+        'deepLinking':True,
+        'persistAuthorization':True,
+        'tryItOutEnabled':True,
+        'requestSnippetsEnabled':True,
+        'showExtensions':False,
+        'showCommonExtensions':False,
+        'syntaxHighlight':{'theme':'arta'},
+    })
+
+
+def custom_openapi():
+    """Build the published contract with examples and integration metadata."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema=get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        tags=TAGS,
+        servers=SERVERS,
+        contact=CONTACT,
+        license_info=LICENSE,
+    )
+    schema['externalDocs']={
+        'description':'Руководство API и примеры сценариев',
+        'url':'/docs',
+    }
+    schema['info']['x-contract-status']='prototype-local'
+    schema['info']['x-generated-by']='scripts/export_openapi.py'
+    schema['x-tagGroups']=[
+        {'name':'Рабочий контур','tags':['Состояние','Источники и прогноз','Карта','Риски и what-if']},
+        {'name':'Операционная работа','tags':['Диспетчеры','Указания водителю','Источники данных']},
+        {'name':'Диагностика и совместимость','tags':['Качество модели','Совместимость API']},
+    ]
+    for path, methods in OPENAPI_EXAMPLES.items():
+        path_item=schema.get('paths',{}).get(path)
+        if not path_item:
+            continue
+        for method, example in methods.items():
+            operation_schema=path_item.get(method)
+            if not operation_schema:
+                continue
+            if 'request' in example:
+                request_body=operation_schema.setdefault('requestBody',{})
+                media=request_body.setdefault('content',{}).setdefault('application/json',{})
+                media.setdefault('examples',{})['basic']={
+                    'summary':'Минимальный рабочий пример',
+                    'value':example['request'],
+                }
+            if 'response' in example:
+                response=operation_schema.setdefault('responses',{}).setdefault('200',{})
+                media=response.setdefault('content',{}).setdefault('application/json',{})
+                media.setdefault('examples',{})['basic']={
+                    'summary':'Форма успешного ответа',
+                    'value':example['response'],
+                }
+    app.openapi_schema=schema
+    return schema
+
+
+app.openapi=custom_openapi
 
 @app.middleware('http')
 async def observe_request(request:Request,call_next):
@@ -508,6 +1108,21 @@ async def set_dispatcher_assignments(dispatcher_id:str,body:AssignmentUpdate):
     db.executemany('INSERT INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,item) for item in sorted(set(body.tr_ids))]);db.commit()
     return get_dispatcher(dispatcher_id)
 
+@app.delete('/api/admin/dispatchers/{dispatcher_id}',**operation('delete_dispatcher'))
+async def delete_dispatcher(dispatcher_id:str,body:AdminAction):
+    operator=get_dispatcher(body.operator_id)
+    target=get_dispatcher(dispatcher_id)
+    if operator is None or operator['role']!='Администратор':
+        raise HTTPException(403,'Admin account required')
+    if target is None:
+        raise HTTPException(404,'Dispatcher not found')
+    if target['role']=='Администратор':
+        raise HTTPException(422,'Admin account cannot be deleted')
+    db.execute('DELETE FROM assignments WHERE dispatcher_id=?',(dispatcher_id,))
+    db.execute('DELETE FROM dispatchers WHERE id=?',(dispatcher_id,))
+    db.commit()
+    return {'deleted':True,'dispatcher_id':dispatcher_id}
+
 @app.post('/api/telemetry',**operation('telemetry'))
 async def telemetry(events:list[Telemetry]):
     if not 1<=len(events)<=1000:raise HTTPException(422,'Batch size must be 1..1000')
@@ -536,7 +1151,7 @@ async def mode(body:Mode):
         schedule=schedule_template.copy();live_schedule_day=None
         if body.mode=='replay':load_historical_snapshot()
         else:
-            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear()
     return state
 
 @app.post('/api/replay/step',**operation('replay'))
@@ -544,7 +1159,7 @@ async def replay():
     async with lock:
         if state['mode']!='replay':raise HTTPException(409,'Switch to replay mode first')
         if state.get('snapshot'):
-            vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+            vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear()
             state.update(index=0,clock=None,snapshot=False)
         i=state['index']
         if i>=len(points):return {'done':True,**state}
@@ -555,39 +1170,279 @@ async def replay():
         state['clock']=timestamp(p['T']).isoformat();state['index']+=1
         return {'done':False,'prediction':result,**state}
 
-@app.get('/api/state',**operation('state'))
-async def get_state(dispatcher_id:str|None=None):
-    now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
-    merged={tr:dict(vehicle) for tr,vehicle in archive_vehicles.items()}
-    for tr,live in vehicles.items():
-        if tr in merged and live.get('source')=='live' and time.time()-float(live.get('position_time',0))>LIVE_TRACK_TTL_S:
+@app.get('/api/state', **operation('state'))
+async def get_state(
+    dispatcher_id: str | None = None
+):
+
+    merged = {}
+
+    # -------------------------------------------------
+    # REPLAY
+    # -------------------------------------------------
+
+    if state['mode'] == 'replay':
+        merged = {
+            tr: dict(vehicle)
+            for tr, vehicle
+            in archive_vehicles.items()
+        }
+
+    # -------------------------------------------------
+    # LIVE:
+    # сначала готовим historical fallback
+    # -------------------------------------------------
+
+    else:
+        for tr, archived in archive_vehicles.items():
+            fallback = dict(archived)
+
+            # Сохраняем архивный прогноз отдельно.
+            # Его нельзя выдавать за текущий live-прогноз.
+            fallback['historical_prediction_s'] = (
+                fallback.get(
+                    'prediction_s'
+                )
+            )
+
+            fallback['historical_level'] = (
+                fallback.get(
+                    'level'
+                )
+            )
+
+            fallback['historical_source'] = (
+                fallback.get(
+                    'source'
+                )
+            )
+
+            fallback['source'] = (
+                'historical_fallback'
+            )
+
+            fallback['connection_state'] = (
+                'historical'
+            )
+
+            fallback['prediction_s'] = None
+            fallback['late_probability'] = None
+
+            fallback['level'] = 'unknown'
+            fallback['stale'] = True
+            fallback['degraded'] = True
+
+            fallback['reason'] = (
+                'Нет свежей NDTP-телеметрии; '
+                'показано историческое состояние'
+            )
+
+            merged[tr] = fallback
+
+        # Keep every configured vehicle visible while a source is coming up.
+        # This makes the configured 13+13 fleet count honest: a unit that has
+        # not emitted its first packet is shown at the first planned point as
+        # explicitly waiting, never as an invented forecast.  The source is
+        # kept in the row so an operator can tell whether the missing packet
+        # belongs to the original or custom stream.
+        planned_ids=sorted({int(item) for item in schedule.tr_id.unique()})
+        for tr in planned_ids:
+            if tr in merged or tr in vehicles:
+                continue
+            route=schedule[schedule.tr_id==tr].dropna(subset=['lon','lat']).sort_values('ts')
+            first=route.iloc[0] if not route.empty else None
+            custom=tr>=CUSTOM_TR_ID_OFFSET
+            merged[tr]={
+                'tr_id':tr,'source':'waiting_for_live','connection_state':'waiting',
+                'telemetry_source':'custom_ndtp_nav00' if custom else 'ndtp_nav00',
+                'level':'unknown','stale':True,'degraded':True,
+                'prediction_s':None,'late_probability':None,
+                'reason':('Ожидание первого пакета custom-emulator' if custom else 'Ожидание первого NDTP-пакета оригинального эмулятора'),
+                'reason_is_hypothesis':True,
+                'lon':float(first.lon) if first is not None else None,
+                'lat':float(first.lat) if first is not None else None,
+                'position_time':None,
+            }
+
+    # -------------------------------------------------
+    # Накладываем LIVE
+    # -------------------------------------------------
+
+    for tr, live in vehicles.items():
+        item = dict(live)
+
+        position_time = float(
+            item.get(
+                'position_time',
+                0
+            )
+            or 0
+        )
+
+        age = (
+            time.time() -
+            position_time
+            if position_time
+            else float('inf')
+        )
+
+        item['telemetry_age_s'] = (
+            round(
+                max(
+                    0,
+                    age
+                ),
+                1
+            )
+            if math.isfinite(age)
+            else None
+        )
+
+        # В replay просто используем
+        # состояние replay.
+        if state['mode'] != 'live':
+            merged[tr] = item
             continue
-        if tr in merged and live.get('source')=='live' and live.get('prediction_s') is None:
-            # Keep an archived forecast internally coherent when live telemetry
-            # has no valid current 10–15 minute target. Live coordinates are an
-            # overlay, not permission to pair today's timestamp with January's
-            # archived target stop and prediction.
-            position={key:live[key] for key in ('lon','lat','position_time') if key in live}
-            merged[tr].update(position)
-            merged[tr]['live_position']=True
-            merged[tr]['live_position_time']=live.get('T')
-            merged[tr]['live_status']=live.get('reason')
-            merged[tr]['telemetry_source']=live.get('telemetry_source','unknown')
-        else:merged[tr]=dict(live)
-    output=[]
-    for original in sorted(merged.values(),key=lambda item:(not item.get('live_position',False),int(item['tr_id']))):
-        v=dict(original)
-        track=live_track(int(v['tr_id']))
-        if track:v['live_track']=track
-        if v.get('source') not in {'historical_archive','historical_v5'} and now-epoch(v['T'])>120:
-            v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
-        output.append(v)
+
+        # ---------------------------------------------
+        # 1. Свежий LIVE
+        # ---------------------------------------------
+
+        if age <= LIVE_STALE_S:
+            item['connection_state'] = (
+                'live'
+            )
+
+            merged[tr] = item
+            continue
+
+        # ---------------------------------------------
+        # 2. Связь недавно пропала:
+        #    последнее известное состояние
+        # ---------------------------------------------
+
+        if age <= LIVE_FALLBACK_S:
+            item['source'] = (
+                'last_known_live'
+            )
+
+            item['connection_state'] = (
+                'stale'
+            )
+
+            item['stale'] = True
+            item['degraded'] = True
+
+            item['prediction_s'] = None
+            item['late_probability'] = None
+
+            item['level'] = 'unknown'
+
+            item['reason'] = (
+                'Связь с ТС временно потеряна; '
+                'показано последнее известное '
+                'положение'
+            )
+
+            merged[tr] = item
+            continue
+
+        # ---------------------------------------------
+        # 3. LIVE давно нет.
+        #
+        # Если есть исторический fallback —
+        # оставляем его.
+        #
+        # Если архивного состояния нет вообще —
+        # оставляем последнее live-состояние,
+        # но явно как устаревшее.
+        # ---------------------------------------------
+
+        if tr not in merged:
+            item['source'] = (
+                'last_known_live'
+            )
+
+            item['connection_state'] = (
+                'offline'
+            )
+
+            item['stale'] = True
+            item['degraded'] = True
+
+            item['prediction_s'] = None
+            item['late_probability'] = None
+
+            item['level'] = 'unknown'
+
+            item['reason'] = (
+                'Нет связи с ТС; '
+                'показано последнее известное '
+                'состояние'
+            )
+
+            merged[tr] = item
+
+    # -------------------------------------------------
+    # Добавляем трек и формируем ответ
+    # -------------------------------------------------
+
+    output = []
+
+    for original in sorted(
+        merged.values(),
+        key=lambda item: int(
+            item['tr_id']
+        )
+    ):
+        vehicle = dict(original)
+
+        track = live_track(
+            int(
+                vehicle['tr_id']
+            )
+        )
+
+        if track:
+            vehicle['live_track'] = track
+
+        output.append(vehicle)
+
+    # -------------------------------------------------
+    # Ограничение по диспетчеру
+    # -------------------------------------------------
+
     if dispatcher_id:
-        profile=get_dispatcher(dispatcher_id)
-        if profile is None:raise HTTPException(404,'Dispatcher not found')
-        assigned=set(profile['assigned_tr_ids'])
-        output=[item for item in output if int(item['tr_id']) in assigned]
-    return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points),'dispatcher_id':dispatcher_id}
+        profile = get_dispatcher(
+            dispatcher_id
+        )
+
+        if profile is None:
+            raise HTTPException(
+                404,
+                'Dispatcher not found'
+            )
+
+        assigned = set(
+            profile[
+                'assigned_tr_ids'
+            ]
+        )
+
+        output = [
+            item
+            for item in output
+            if int(item['tr_id'])
+            in assigned
+        ]
+
+    return {
+        'vehicles': output,
+        'state': state,
+        'counters': dict(counters),
+        'total_points': len(points),
+        'dispatcher_id': dispatcher_id,
+    }
 
 @app.get('/api/incidents',**operation('incidents'))
 async def get_incidents():
@@ -608,7 +1463,27 @@ async def what_if(body:WhatIf):
         adjusted=None if probability is None else probability*relief
         level='unknown' if adjusted is None else 'high' if adjusted>=.7 else 'medium' if adjusted>=.35 else 'low'
         projected.append({**item,'projected_late_probability':adjusted,'projected_level':level})
-    return {'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'risk_multiplier':relief},'baseline':baseline,'projected':projected}
+    response={'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'risk_multiplier':relief},'baseline':baseline,'projected':projected}
+    if body.tr_id is None:
+        return response
+    vehicle=vehicles.get(int(body.tr_id)) or archive_vehicles.get(int(body.tr_id))
+    if vehicle is None:
+        raise HTTPException(422,'Unknown vehicle/route for reserve scenario')
+    placement=reserve_placement(vehicle)
+    if placement is None:
+        raise HTTPException(422,'Selected vehicle has no planned geometry')
+    selected=next((item for item in projected if int(item['tr_id'])==int(body.tr_id)),None)
+    if selected is None:
+        selected={'tr_id':int(body.tr_id),'level':vehicle.get('level','unknown'),'max_late_probability':vehicle.get('late_probability'),'projected_late_probability':None,'projected_level':'unknown'}
+    response.update({
+        'selected_tr_id':int(body.tr_id),
+        'placement':placement,
+        'affected_vehicles':[
+            {'tr_id':int(body.tr_id),'role':'Основное ТС','before_prediction_s':placement['before_prediction_s'],'after_prediction_s':placement['after_prediction_s'],'before_current_deviation_s':placement['before_current_deviation_s'],'after_current_deviation_s':placement['after_current_deviation_s'],'before_late_probability':selected.get('max_late_probability'),'after_late_probability':selected.get('projected_late_probability')},
+            {'tr_id':-abs(int(body.tr_id)),'role':'Резервное ТС','placement':'На текущем плановом сегменте','target_stop_address':placement['target_stop_address'],'track':placement['track']},
+        ],
+    })
+    return response
 
 @app.post('/api/map-match',**operation('map_match'))
 async def map_match(body:MapMatch):
@@ -645,6 +1520,188 @@ async def queue_driver_command(body:DriverCommand):
 @app.get('/api/admin/simulation',**operation('simulation_status'))
 async def simulation_status():
     return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':stored_simulations(limit=10)}
+
+async def custom_emulator_call(path:str, method:str='GET'):
+    """Call the built-in emulator through the backend network, fail-soft for UI status."""
+    if client is None:
+        return {'status':'unavailable','detail':'backend client is not ready'}
+    try:
+        response=await client.request(method, f'{CUSTOM_EMULATOR_URL}{path}', timeout=1.5)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return {'status':'unavailable','detail':str(exc)}
+
+def _remember_official_config(config):
+    """Keep the last non-empty original-emulator config across a stop."""
+    global official_config_cache
+    if not config.get('units'):
+        return
+    official_config_cache=json.loads(json.dumps(config))
+    try:
+        OFFICIAL_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OFFICIAL_CONFIG_PATH.write_text(json.dumps(official_config_cache, ensure_ascii=False), encoding='utf-8')
+    except OSError:
+        # Runtime control must remain available even when the optional state
+        # volume is read-only.
+        pass
+
+
+def _cached_official_config():
+    if official_config_cache:
+        return json.loads(json.dumps(official_config_cache))
+    try:
+        payload=json.loads(OFFICIAL_CONFIG_PATH.read_text(encoding='utf-8'))
+        return payload if payload.get('units') else None
+    except (OSError, ValueError):
+        return None
+
+
+def _default_official_config():
+    """Return a small, valid config for a fresh prototype installation.
+
+    The upstream image starts with an empty in-memory ``units`` list.  That
+    made the admin "Запустить поток" action look broken until somebody knew
+    to post a private config to the image first.  Seed all mapped original
+    units on demand; operators can still replace them through the image API.
+    """
+    scheduled_ids = {
+        int(item) for item in schedule.tr_id.unique()
+        if schedule is not None and int(item) < CUSTOM_TR_ID_OFFSET
+    } if schedule is not None else set()
+    original_ids = sorted(
+        int(unit_id) for unit_id, tr_id in mapping.items()
+        if int(unit_id) < CUSTOM_UNIT_ID_OFFSET and int(tr_id) in scheduled_ids
+    )
+    if not original_ids:
+        original_ids = [985940]
+    official_host = urllib.parse.urlparse(OFFICIAL_EMULATOR_URL).hostname or ''
+    if official_host in {'emulator', 'official-emulator'}:
+        target_host = 'backend'
+    elif official_host in {'localhost', '127.0.0.1', '::1'}:
+        target_host = '127.0.0.1'
+    else:
+        target_host = os.getenv('OFFICIAL_TARGET_HOST', 'host.docker.internal')
+    return {
+        'targetHost': target_host,
+        'targetPort': int(os.getenv('NDTP_PORT', '9201')),
+        'units': [{
+            'unitId': unit_id,
+            'intervalMs': 3000,
+            'autoGenerate': True,
+            'cells': [],
+        } for unit_id in original_ids],
+    }
+
+
+def _normalized_official_config(current=None, running=True):
+    """Return the canonical 13-unit config required by the prototype.
+
+    The upstream image keeps its config in memory.  A manual one-unit config
+    therefore survives until the next restart and makes the remaining mapped
+    vehicles look like they are waiting forever.  The prototype has one
+    deterministic original fleet: rebuild the unit list from the mapping,
+    while retaining the current target host/port when the image supplied them.
+    """
+    default=_default_official_config()
+    current=current or {}
+    config={**default}
+    if current.get('targetHost'):
+        config['targetHost']=current['targetHost']
+    if current.get('targetPort'):
+        config['targetPort']=current['targetPort']
+    config['units']=[
+        {**unit,'autoGenerate':bool(running)}
+        for unit in default.get('units',[])
+    ]
+    return config
+
+
+async def official_emulator_config(enabled:bool|None=None):
+    """Read or toggle the original image generator through its config API.
+
+    The official image stops by replacing its in-memory ``units`` with an
+    empty list.  We retain the last valid config locally so a later resume
+    restores exactly the same devices instead of posting an empty config.
+    """
+    if client is None:
+        return {'status':'unavailable','detail':'backend client is not ready'}
+    try:
+        response=await client.get(f'{OFFICIAL_EMULATOR_URL}/api/config',timeout=1.5)
+        response.raise_for_status(); config=response.json()
+        if config.get('units'):
+            _remember_official_config(config)
+        cached=_cached_official_config()
+        if enabled is not None:
+            if enabled:
+                # A cached one-unit config is an old/partial setup.  Resume
+                # always restores the complete official fleet.
+                config=_normalized_official_config(config if config.get('units') else cached, running=True)
+            else:
+                _remember_official_config(config)
+                config={**config,'units':[]}
+            response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
+            response.raise_for_status(); config=response.json() if response.content else config
+        else:
+            units=config.get('units',[])
+            expected=_default_official_config().get('units',[])
+            expected_ids={int(unit['unitId']) for unit in expected}
+            current_ids={int(unit.get('unitId')) for unit in units if unit.get('unitId') is not None}
+            if not units and cached is None:
+                # Fresh image: seed and start the mandatory 13-unit source.
+                config=_normalized_official_config(None,running=True)
+                response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
+                response.raise_for_status(); config=response.json() if response.content else config
+            elif units and current_ids != expected_ids:
+                # Existing partial config: repair it without waiting for a
+                # manual admin action.  Preserve whether its stream was live.
+                running=any(item.get('autoGenerate') for item in units)
+                config=_normalized_official_config(config,running=running)
+                response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
+                response.raise_for_status(); config=response.json() if response.content else config
+        units=config.get('units',[])
+        if units:
+            _remember_official_config(config)
+        status='running' if any(item.get('autoGenerate') for item in units) else ('paused' if units else ('not_configured' if not _cached_official_config() else 'paused'))
+        return {'status':status,'units':len(units)}
+    except (httpx.HTTPError, ValueError) as exc:
+        return {'status':'unavailable','detail':str(exc)}
+
+@app.get('/api/admin/emulators',**operation('emulator_status'))
+async def emulator_status():
+    custom=await custom_emulator_call('/status')
+    official=await official_emulator_config()
+    active=[run for run in simulation_runs.values() if run.get('status') in {'queued','running'}]
+    return {'ingest_paused':bool(state.get('ingest_paused')),'sources':[{
+        'id':'custom-emulator','label':'custom-emulator','kind':'built_in_ndtp','control':'pause_resume',
+        'status':'paused' if custom.get('paused') else ('running' if custom.get('connected') else custom.get('status','unknown')),
+        'details':custom,
+    },{
+        'id':'official-emulator','label':'Оригинальный NDTP-эмулятор','kind':'external_image','control':'config_api',
+        'status':official.get('status','unavailable'),'details':official,
+    }],'active_simulations':len(active)}
+
+async def cancel_active_simulations(operator_id='admin-01'):
+    for run in simulation_runs.values():
+        if run.get('status') in {'queued','running'}:
+            run['cancel_requested']=True
+            run['cancelled_by']=operator_id
+            save_simulation(run)
+
+@app.post('/api/admin/emulators/{emulator_id}/{action}',**operation('emulator_control'))
+async def emulator_control(emulator_id:str,action:str,body:EmulatorControl):
+    operator=get_dispatcher(body.dispatcher_id)
+    if operator is None:
+        raise HTTPException(403,'Valid dispatcher profile required')
+    if emulator_id not in {'custom-emulator','official-emulator','all'} or action not in {'pause','resume','stop'}:
+        raise HTTPException(404,'Unknown emulator control')
+    paused=action in {'pause','stop'}
+    if emulator_id=='all':
+        state['ingest_paused']=paused
+        await cancel_active_simulations(operator['id']) if paused else None
+    custom=await custom_emulator_call('/pause' if paused else '/resume','POST') if emulator_id in {'custom-emulator','all'} else {'status':'unchanged'}
+    official=await official_emulator_config(not paused) if emulator_id in {'official-emulator','all'} else {'status':'unchanged'}
+    return {'accepted':True,'emulator_id':emulator_id,'action':action,'ingest_paused':bool(state.get('ingest_paused')),'custom':custom,'official':official}
 
 async def execute_simulation(run):
     run['status']='running';run['started_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
@@ -760,6 +1817,11 @@ async def metrics():
     return {**legacy,'v5':v5,'feature_importance':importance,'readable':{'mae':f"{v5['mae_s']:.1f} с" if v5['mae_s'] is not None else '—','baseline':f"{v5['baseline_mae_s']:.1f} с" if v5['baseline_mae_s'] is not None else '—','coverage':f"{100*v5['coverage']:.1f}%" if v5['coverage'] is not None else '—'}}
 
 app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
+
+@app.get('/code/',include_in_schema=False)
+async def code_documentation_index():
+    """Serve the generated Sphinx landing page before the static mount."""
+    return FileResponse(ROOT/'docs'/'_build'/'html'/'index.html')
 
 @app.get('/docs',include_in_schema=False)
 async def documentation():
