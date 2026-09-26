@@ -603,15 +603,37 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
     observed = route[route.tt_action_item_id == int(match['stop_id'])]
     if speed is not None and float(speed) < 5 and not observed.empty and float(match.get('distance_m', 9999)) <= 60:
         planned = float(observed.iloc[(observed.ts - ts).abs().argmin()].ts)
-        deviation = max(-1800.0, min(1800.0, float(ts) - planned))
-        offset = float(position_offsets.get(tr_id, 0.0))
+        # The schedule has already been moved to the live calendar day, but
+        # the vehicle may start a run at a different point of that plan.  Use
+        # the same first-packet calibration as the continuous projection
+        # branch; comparing ``ts`` with the raw stop timestamp here used to
+        # manufacture a multi-hour deviation which was then clipped to
+        # ``-1800``/``1800`` seconds.
+        period = max(3600.0, float(route.iloc[-1].ts) - float(route.iloc[0].ts))
+        offset = position_offsets.get(tr_id)
+        if offset is None:
+            raw_gap = float(ts) - planned
+            # A normally aligned live plan must retain a real delay (for
+            # example, 45 seconds after the scheduled stop).  Calibrate only
+            # when the timestamp is clearly from another calendar/pass.
+            offset = raw_gap if abs(raw_gap) > max(3600.0, period) else 0.0
+            position_offsets[tr_id] = offset
+        offset = float(offset)
+        expected = planned + offset
+        previous_expected = deviations.get(tr_id, {}).get('expected_ts')
+        if previous_expected is not None:
+            while expected - previous_expected > period / 2:
+                expected -= period
+            while previous_expected - expected > period / 2:
+                expected += period
+        deviation = max(-1800.0, min(1800.0, float(ts) - expected))
         position_states[tr_id] = {'segment_index': position, 'ts': float(ts)}
         return {
             **match,
             'match_kind': 'observed_slow_stop',
             'deviation_s': round(deviation, 1),
-            'expected_ts': planned,
-            'expected_position_time': pd.Timestamp(planned, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+            'expected_ts': expected,
+            'expected_position_time': pd.Timestamp(expected, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
             'previous_stop_time': pd.Timestamp(float(segment_start.ts) + offset, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
             'next_stop_time': pd.Timestamp(float(segment_end.ts) + offset, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
             'stop_times_estimated': False,

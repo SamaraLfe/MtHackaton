@@ -73,6 +73,35 @@ def test_live_schedule_can_be_anchored_to_event_day():
     assert aligned.iloc[0].ts == epoch('2026-09-25 10:12:00')
 
 
+def test_slow_stop_deviation_uses_live_calibration():
+    """A slow packet at a stop must not compare live time to the old plan day."""
+    from backend import app as backend
+
+    saved_schedule = backend.schedule
+    saved_offsets = dict(backend.position_offsets)
+    saved_states = dict(backend.position_states)
+    saved_deviations = dict(backend.deviations)
+    try:
+        backend.schedule = pd.DataFrame([
+            dict(tt_action_item_id=1, tr_id=99, ts=1000, time_begin='1970-01-01 00:16:40', lon=37.60, lat=55.70, building_address='A'),
+            dict(tt_action_item_id=2, tr_id=99, ts=1600, time_begin='1970-01-01 00:26:40', lon=37.61, lat=55.71, building_address='B'),
+            dict(tt_action_item_id=3, tr_id=99, ts=2200, time_begin='1970-01-01 00:36:40', lon=37.62, lat=55.72, building_address='C'),
+        ])
+        backend.position_offsets.clear()
+        backend.position_states.clear()
+        backend.deviations.clear()
+        match = backend.estimate_position(99, 37.60, 55.70, 10_000, speed=1)
+        assert match is not None
+        assert match['match_kind'] == 'observed_slow_stop'
+        assert abs(match['deviation_s']) < 1
+        assert match['expected_ts'] == 10_000
+    finally:
+        backend.schedule = saved_schedule
+        backend.position_offsets.clear(); backend.position_offsets.update(saved_offsets)
+        backend.position_states.clear(); backend.position_states.update(saved_states)
+        backend.deviations.clear(); backend.deviations.update(saved_deviations)
+
+
 def test_submission_complete_and_finite():
     from pathlib import Path
     p=Path('artifacts/submission.csv')
