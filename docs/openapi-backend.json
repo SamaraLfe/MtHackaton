@@ -222,7 +222,7 @@
           "Источники и прогноз"
         ],
         "summary": "Принять пакет телеметрии",
-        "description": "Тело — массив из 1…1000 событий. Передавайте события каждого ТС по event_time. Повторы и опоздавшие события пропускаются, но `accepted` всё равно означает размер валидного пакета. В live прогноз для ТС запускается не чаще раза в 30 секунд времени событий.",
+        "description": "Тело — массив из 1…1000 событий. Передавайте события каждого ТС по event_time. Повторы и опоздавшие события пропускаются, но `accepted` всё равно означает размер валидного пакета. В live прогноз для ТС запускается не чаще раза в 30 секунд времени событий. Для валидной координаты backend проецирует точку на плановую траекторию и обновляет `current_deviation_s`; при отсутствии геометрического соответствия ответ содержит `null`, а не нулевую оценку.",
         "operationId": "telemetry_api_telemetry_post",
         "requestBody": {
           "content": {
@@ -351,7 +351,7 @@
           "Состояние"
         ],
         "summary": "Получить картину рейсов",
-        "description": "Возвращает архивный снимок, поверх которого накладывается актуальная live-позиция, а также mode, counters и total_points. `telemetry_source` прозрачно указывает, как принята живая точка: `ndtp_nav00` — Nav00 после проверки CRC и разбора NDTP, `http_json` — событие из POST /api/telemetry. Для ТС с живыми координатами добавляется `live_track` — до 100 валидных точек за последний час (настраивается LIVE_TRACK_TTL_S), а `simulated: true` отличает тестовую симуляцию. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Прогнозы, не являющиеся архивными, старше 120 секунд становятся `stale`/`unknown` в ответе.",
+        "description": "Возвращает архивный снимок, поверх которого накладывается актуальная live-позиция, а также mode, counters и total_points. `telemetry_source` указывает путь точки: `custom_ndtp_nav00` — собственный custom-emulator, `ndtp_nav00` — оригинальный Nav00 после CRC, `http_json` — POST /api/telemetry. `current_deviation_s` — непрерывная оценка по проекции координаты на плановый сегмент; `position_match` отдельно описывает ближайшую плановую остановку на карте. Для ТС с живыми координатами добавляется `live_track` — до 100 валидных точек за последний час. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Прогнозы, не являющиеся архивными, старше 120 секунд становятся `stale`/`unknown` в ответе.",
         "operationId": "get_state_api_state_get",
         "parameters": [
           {
@@ -633,6 +633,92 @@
           },
           "422": {
             "description": "Неверные поля."
+          }
+        }
+      }
+    },
+    "/api/admin/emulators": {
+      "get": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Получить состояние источников",
+        "description": "Показывает custom-emulator и внешний оригинальный образ. Для custom-emulator статус читается по его локальному HTTP API, для оригинального образа — по его `/api/config`; контейнеры не удаляются.",
+        "operationId": "emulator_status_api_admin_emulators_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/emulators/{emulator_id}/{action}": {
+      "post": {
+        "tags": [
+          "Симуляции"
+        ],
+        "summary": "Поставить источник на паузу или возобновить",
+        "description": "Доступно администратору прототипа. `custom-emulator` получает pause/resume, оригинальный образ переключает `autoGenerate` через `/api/config`, а `all` дополнительно блокирует приём новых NDTP-событий backend. Те же действия доступны кнопками «Источники данных» в рабочем месте и в `/admin`.",
+        "operationId": "emulator_control_api_admin_emulators__emulator_id___action__post",
+        "parameters": [
+          {
+            "name": "emulator_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Emulator Id"
+            }
+          },
+          {
+            "name": "action",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Action"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmulatorControl"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Профиль не является администратором."
+          },
+          "404": {
+            "description": "Неизвестный источник или действие."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
@@ -1065,6 +1151,25 @@
         "title": "DriverCommand",
         "description": "Locally queued instruction; it is never delivered outside the MVP."
       },
+      "EmulatorControl": {
+        "properties": {
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^admin-\\d{2}$",
+            "title": "Dispatcher Id",
+            "description": "Администратор, управляющий источниками эмуляции.",
+            "examples": [
+              "admin-01"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id"
+        ],
+        "title": "EmulatorControl",
+        "description": "Local prototype operator allowed to pause a telemetry source."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1431,7 +1536,7 @@
     },
     {
       "name": "Симуляции",
-      "description": "Тестовые сценарии live-контура с сохранённым жизненным циклом."
+      "description": "Совместимые API тестовых сценариев; основной интерфейс использует реальные NDTP-источники."
     },
     {
       "name": "Качество модели",

@@ -1,8 +1,0 @@
-.card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
-.emulator-card{margin-bottom:16px}
-.emulator-sources{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
-.emulator-source{border:1px solid var(--line);border-radius:10px;padding:12px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
-.emulator-source small{display:block;color:var(--muted);margin-top:4px}
-.emulator-source .actions{grid-column:1/-1;margin-top:2px}
-.emulator-source button{padding:7px 10px;font-size:12px}
-@media(max-width:850px){.emulator-sources{grid-template-columns:1fr}}

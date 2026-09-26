@@ -1,17 +1,163 @@
-(()=>{'use strict';
-const $=id=>document.getElementById(id);let dispatchers=[],vehicles=[];
-const api=async(url,opts={})=>{const r=await fetch(url,opts),d=await r.json().catch(()=>({detail:'Ошибка ответа'}));if(!r.ok)throw Error(typeof d.detail==='string'?d.detail:`HTTP ${r.status}`);return d};
-const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const note=(id,value,error=false)=>{const el=$(id);el.textContent=value;el.classList.toggle('error',error)};
-function renderEmulators(data){const overall=$('emulator-overall'),sources=$('emulator-sources');if(!data){overall.textContent='Нет статуса';return}overall.textContent=data.ingest_paused?'Пауза всех потоков':'Поток разрешён';sources.innerHTML=(data.sources||[]).map(source=>`<article class="emulator-source"><div><b>${esc(source.label)}</b><small>${source.id==='custom-emulator'?'Собственная NDTP Nav00 эмуляция':'Внешний образ с /api/config'}</small></div><span class="tag">${esc(source.status)}</span><div class="actions"><button class="secondary emulator-pause" data-id="${esc(source.id)}" data-action="pause">Пауза</button><button class="secondary emulator-resume" data-id="${esc(source.id)}" data-action="resume">Пуск</button></div></article>`).join('');document.querySelectorAll('.emulator-pause,.emulator-resume').forEach(button=>button.onclick=()=>controlEmulator(button.dataset.id,button.dataset.action))}
-async function controlEmulator(id,action){try{const result=await api(`/api/admin/emulators/${id}/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dispatcher_id:'admin-01'})});note('emulator-notice',`${id}: ${action==='resume'?'поток возобновлён':'поток поставлен на паузу'}.`);renderEmulators(await api('/api/admin/emulators'));return result}catch(e){note('emulator-notice',e.message,true)}}
-function renderAccounts(){const nonAdmin=dispatchers.filter(d=>d.role!=='Администратор');$('dispatcher-count').textContent=nonAdmin.length;$('accounts').innerHTML=dispatchers.map(d=>`<article class="account"><div><b>${esc(d.name)}</b><small>${esc(d.role)} · ${esc(d.login)} · назначено: ${d.assigned_tr_ids.length}</small></div><span class="tag">${d.status==='active'?'Активен':'Отключён'}</span></article>`).join('');const select=$('assignment-dispatcher'),previous=select.value;select.innerHTML=nonAdmin.map(d=>`<option value="${d.id}">${esc(d.name)} · ${esc(d.role)}</option>`).join('');if([...select.options].some(o=>o.value===previous))select.value=previous;renderAssignments()}
-function renderAssignments(){const d=dispatchers.find(x=>x.id===$('assignment-dispatcher').value);if(!d)return;const assigned=new Set(d.assigned_tr_ids);$('route-list').innerHTML=vehicles.map(v=>`<label><input type="checkbox" value="${v.tr_id}" ${assigned.has(v.tr_id)?'checked':''}> ТС ${v.tr_id}</label>`).join('')||'<span class="muted">Нет доступных рейсов.</span>'}
-function renderRuns(items){$('runs').innerHTML=items.map(run=>{const done=run.progress?.completed||0,total=run.progress?.total||run.count||1,pct=Math.round(done/total*100),before=run.effect?.before?.prediction_s,after=run.effect?.after?.prediction_s;const label={queued:'В очереди',running:'Выполняется',completed:'Завершён',cancelled:'Отменён',failed:'Ошибка'}[run.status]||run.status;const cancel=['queued','running'].includes(run.status)?`<button class="secondary cancel-run" data-run-id="${esc(run.id)}">Отменить</button>`:'';return `<article class="run ${run.status}"><b>${esc(run.id)} · ${esc(run.scenario)} · ТС ${run.tr_id}</b><p>${label} · ${done}/${total} событий</p><div class="progress"><i style="width:${pct}%"></i></div><div class="effect">Эффект: ${before==null?'—':`${Math.round(before)} с`} → ${after==null?'—':`${Math.round(after)} с`}</div><div class="event-list">${(run.events||[]).map(e=>`#${e.sequence}: ${e.speed_kmh} км/ч · ${new Date(e.event_time).toLocaleTimeString('ru-RU')}`).join('<br>')||'События ещё не обработаны'}</div><div class="actions">${cancel}</div></article>`}).join('')||'<p class="muted">Тестовые сценарии ещё не запускались.</p>';document.querySelectorAll('.cancel-run').forEach(button=>button.onclick=()=>cancelRun(button.dataset.runId))}
-async function cancelRun(runId){try{const run=await api(`/api/admin/simulations/${encodeURIComponent(runId)}/cancel`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dispatcher_id:'admin-01'})});note('simulation-notice',`Для ${run.id} запрошена отмена.`);await refresh()}catch(e){note('simulation-notice',e.message,true)}}
-async function refresh(){try{const params=new URLSearchParams({limit:String(Number($('run-limit').value)||50)});if($('run-status').value)params.set('status',$('run-status').value);const [profiles,state,simulations,emulators]=await Promise.all([api('/api/dispatchers'),api('/api/state'),api(`/api/admin/simulations?${params}`),api('/api/admin/emulators')]);dispatchers=profiles.profiles;vehicles=state.vehicles;$('mode').textContent=simulations.mode==='live'?'Live-данные':'Архивный снимок';$('fleet-count').textContent=vehicles.length;const selected=$('simulation-tr').value;$('simulation-tr').innerHTML=vehicles.map(v=>`<option value="${v.tr_id}">ТС ${v.tr_id} · ${esc(v.stop_address)}</option>`).join('');if([...$('simulation-tr').options].some(o=>o.value===selected))$('simulation-tr').value=selected;renderAccounts();renderRuns(simulations.items);renderEmulators(emulators)}catch(e){note('simulation-notice',e.message,true)}}
-$('create-dispatcher').onclick=async()=>{try{const d=await api('/api/admin/dispatchers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('new-name').value.trim(),login:$('new-login').value.trim(),role:$('new-role').value})});note('account-notice',`Кабинет «${d.name}» создан.`);$('new-name').value='';$('new-login').value='';await refresh()}catch(e){note('account-notice',e.message,true)}};
-$('assignment-dispatcher').onchange=renderAssignments;$('run-status').onchange=refresh;$('run-limit').onchange=refresh;
-$('save-assignment').onclick=async()=>{try{const id=$('assignment-dispatcher').value,tr_ids=[...document.querySelectorAll('#route-list input:checked')].map(x=>Number(x.value));const d=await api(`/api/admin/dispatchers/${id}/assignments`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({tr_ids})});note('assignment-notice',`${d.name}: назначено ${d.assigned_tr_ids.length} рейсов.`);await refresh()}catch(e){note('assignment-notice',e.message,true)}};
-$('start-simulation').onclick=async()=>{const btn=$('start-simulation');btn.disabled=true;try{let status=await api('/api/admin/simulation');if(status.mode!=='live')await api('/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'live'})});const run=await api('/api/admin/simulations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dispatcher_id:'admin-01',tr_id:Number($('simulation-tr').value),scenario:$('scenario').value,count:Number($('simulation-count').value),interval_s:Number($('simulation-interval').value)})});note('simulation-notice',`Сценарий ${run.id} запущен.`);await refresh()}catch(e){note('simulation-notice',e.message,true)}finally{btn.disabled=false}};
-$('pause-all').onclick=()=>controlEmulator('all','pause');$('resume-all').onclick=()=>controlEmulator('all','resume');$('refresh').onclick=refresh;refresh();setInterval(refresh,1000)})();
+(() => {
+  'use strict';
+
+  const $ = id => document.getElementById(id);
+  const PROFILE_KEY = 'takt-dispatcher-profile';
+  let dispatchers = [];
+  let vehicles = [];
+  let assignmentsDirty = false;
+  let selectedDispatcher = '';
+
+  const api = async (url, options = {}) => {
+    const response = await fetch(url, options);
+    const data = await response.json().catch(() => ({detail: 'Ошибка ответа'}));
+    if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+    return data;
+  };
+
+  const esc = value => String(value ?? '—').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const note = (id, value, error = false) => {
+    const element = $(id);
+    if (!element) return;
+    element.textContent = value;
+    element.classList.toggle('error', error);
+  };
+
+  function operatorId() {
+    const profile = localStorage.getItem(PROFILE_KEY);
+    return dispatchers.find(item => item.id === profile && item.role === 'Администратор')?.id || 'admin-01';
+  }
+
+  function renderEmulators(data) {
+    const overall = $('emulator-overall');
+    const sources = $('emulator-sources');
+    if (!data) return;
+    overall.textContent = data.ingest_paused ? 'Пауза входящего контура' : 'Приём разрешён';
+    sources.innerHTML = (data.sources || []).map(source => `
+      <article class="emulator-source">
+        <div><b>${esc(source.label)}</b><small>${source.id === 'custom-emulator' ? 'Собственная NDTP Nav00 · CRC' : 'Внешний оригинальный образ · /api/config'}</small></div>
+        <span class="tag ${source.status === 'running' ? 'low' : source.status === 'paused' ? 'medium' : 'unknown'}">${esc(source.status)}</span>
+        <div class="actions"><button class="secondary" data-emulator-id="${esc(source.id)}" data-emulator-action="pause">Пауза</button><button class="secondary" data-emulator-id="${esc(source.id)}" data-emulator-action="resume">Пуск</button></div>
+      </article>`).join('') || '<p class="muted">Источники не отвечают.</p>';
+    document.querySelectorAll('[data-emulator-action]').forEach(button => {
+      button.onclick = () => controlEmulator(button.dataset.emulatorId, button.dataset.emulatorAction);
+    });
+  }
+
+  async function controlEmulator(id, action) {
+    try {
+      await api(`/api/admin/emulators/${id}/${action}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: operatorId()})
+      });
+      note('emulator-notice', `${id}: ${action === 'resume' ? 'поток возобновлён' : 'поток поставлен на паузу'}.`);
+      await refresh();
+    } catch (error) {
+      note('emulator-notice', error.message, true);
+    }
+  }
+
+  function renderAccounts() {
+    const dispatchersOnly = dispatchers.filter(item => item.role !== 'Администратор');
+    $('dispatcher-count').textContent = dispatchersOnly.length;
+    $('accounts').innerHTML = dispatchers.map(item => `
+      <article class="account">
+        <div><b>${esc(item.name)}</b><small>${esc(item.role)} · ${esc(item.login)} · назначено: ${item.assigned_tr_ids.length}</small></div>
+        <span class="tag">${item.status === 'active' ? 'Активен' : 'Отключён'}</span>
+      </article>`).join('') || '<p class="muted">Профилей пока нет.</p>';
+    const select = $('assignment-dispatcher');
+    const previous = selectedDispatcher || select.value;
+    select.innerHTML = dispatchersOnly.map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.role)}</option>`).join('');
+    if ([...select.options].some(option => option.value === previous)) selectedDispatcher = previous;
+    if (!selectedDispatcher && select.options.length) selectedDispatcher = select.options[0].value;
+    select.value = selectedDispatcher;
+    renderAssignments();
+  }
+
+  function renderAssignments(force = false) {
+    if (assignmentsDirty && !force) return;
+    const profile = dispatchers.find(item => item.id === $('assignment-dispatcher').value);
+    if (!profile) {
+      $('route-list').innerHTML = '<p class="muted">Нет доступных диспетчеров.</p>';
+      $('assignment-count').textContent = '';
+      return;
+    }
+    const assigned = new Set(profile.assigned_tr_ids || []);
+    $('route-list').innerHTML = vehicles.map(vehicle => `
+      <label title="${esc(vehicle.stop_address || '')}"><input type="checkbox" value="${vehicle.tr_id}" ${assigned.has(vehicle.tr_id) ? 'checked' : ''}> <span>ТС ${vehicle.tr_id}</span><small>${esc(vehicle.stop_address || 'Остановка не указана')}</small></label>`).join('') || '<p class="muted">Нет ТС в текущей картине.</p>';
+    $('assignment-count').textContent = `${assigned.size} назначено`;
+    document.querySelectorAll('#route-list input').forEach(input => {
+      input.onchange = () => {
+        assignmentsDirty = true;
+        $('assignment-count').textContent = `${document.querySelectorAll('#route-list input:checked').length} выбрано · не сохранено`;
+      };
+    });
+  }
+
+  async function refresh() {
+    try {
+      const [profiles, state, emulators] = await Promise.all([
+        api('/api/dispatchers'),
+        api('/api/state'),
+        api('/api/admin/emulators')
+      ]);
+      dispatchers = profiles.profiles || [];
+      vehicles = state.vehicles || [];
+      $('mode').textContent = state.state?.mode === 'live' ? 'Live-данные' : 'Архивный снимок';
+      $('fleet-count').textContent = vehicles.length;
+      renderAccounts();
+      renderEmulators(emulators);
+    } catch (error) {
+      note('emulator-notice', error.message, true);
+    }
+  }
+
+  $('create-dispatcher').onclick = async () => {
+    try {
+      const profile = await api('/api/admin/dispatchers', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: $('new-name').value.trim(), login: $('new-login').value.trim(), role: $('new-role').value})
+      });
+      $('new-name').value = '';
+      $('new-login').value = '';
+      note('account-notice', `Кабинет «${profile.name}» создан.`);
+      await refresh();
+    } catch (error) {
+      note('account-notice', error.message, true);
+    }
+  };
+
+  $('assignment-dispatcher').onchange = event => {
+    selectedDispatcher = event.target.value;
+    assignmentsDirty = false;
+    renderAssignments(true);
+  };
+
+  $('save-assignment').onclick = async () => {
+    const id = $('assignment-dispatcher').value;
+    const tr_ids = [...document.querySelectorAll('#route-list input:checked')].map(input => Number(input.value));
+    try {
+      const profile = await api(`/api/admin/dispatchers/${id}/assignments`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({tr_ids})
+      });
+      assignmentsDirty = false;
+      note('assignment-notice', `${profile.name}: сохранено ${profile.assigned_tr_ids.length} назначений.`);
+      await refresh();
+      renderAssignments(true);
+    } catch (error) {
+      note('assignment-notice', error.message, true);
+    }
+  };
+
+  $('pause-all').onclick = () => controlEmulator('all', 'pause');
+  $('resume-all').onclick = () => controlEmulator('all', 'resume');
+  $('refresh').onclick = refresh;
+
+  refresh();
+  // Do not redraw the assignment checkboxes while an operator is editing them.
+  setInterval(() => refresh(), 5000);
+})();

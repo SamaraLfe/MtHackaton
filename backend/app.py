@@ -47,7 +47,7 @@ LIVE_FALLBACK_S = int(
     )
 )
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
-deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
+deviations={};position_offsets={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
 simulation_runs={};simulation_tasks={}
@@ -270,7 +270,7 @@ def calibrated_uncertainty(prediction):
 
 def load_historical_snapshot():
     """Build a fallback view from frozen V5 validate predictions."""
-    vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+    vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();position_offsets.clear();last_forecast.clear()
     predictions={}
     prediction_path=ARTIFACT/'submission_v5.csv'
     if prediction_path.exists():
@@ -323,7 +323,7 @@ def match_stop(tr_id, lon, lat):
     if candidates.empty:return None
     if len(candidates)==1:
         row=candidates.iloc[0];distance=haversine(lon,lat,row.lon,row.lat)
-        return {'tr_id':int(tr_id),'match_kind':'planned_stop','road_graph_matched':False,'stop_id':int(row.tt_action_item_id),'stop_address':str(row.building_address),'distance_m':round(distance,2),'segment_index':0,'next_stop_id':int(row.tt_action_item_id),'confidence':round(max(0.,1-distance/250),3)}
+        return {'tr_id':int(tr_id),'match_kind':'planned_stop','road_graph_matched':False,'stop_id':int(row.tt_action_item_id),'stop_address':display_text(row.building_address),'distance_m':round(distance,2),'segment_index':0,'next_stop_id':int(row.tt_action_item_id),'next_stop_address':display_text(row.building_address),'confidence':round(max(0.,1-distance/250),3)}
     best=None
     rows=list(candidates.itertuples())
     for position,(start,end) in enumerate(zip(rows,rows[1:])):
@@ -335,12 +335,88 @@ def match_stop(tr_id, lon, lat):
     nearest=start if best['fraction']<.5 else end
     distance_to_next=haversine(best['lon'],best['lat'],end.lon,end.lat)
     return {'tr_id':int(tr_id),'match_kind':'planned_trajectory_segment','road_graph_matched':False,
-            'stop_id':int(nearest.tt_action_item_id),'stop_address':str(nearest.building_address),
+            'stop_id':int(nearest.tt_action_item_id),'stop_address':display_text(nearest.building_address),
             'distance_m':round(best['distance'],2),'segment_index':best['position'],
             'segment_start_stop_id':int(start.tt_action_item_id),'next_stop_id':int(end.tt_action_item_id),
+            'segment_start_stop_address':display_text(start.building_address),
+            'next_stop_address':display_text(end.building_address),
             'projected_lon':round(best['lon'],7),'projected_lat':round(best['lat'],7),
             'distance_to_next_stop_m':round(distance_to_next,2),'direction_degrees':round(best['heading'],1),
             'direction':'along_planned_trajectory','confidence':round(max(0.,1-best['distance']/250),3)}
+
+def estimate_position(tr_id, lon, lat, ts, speed=None):
+    """Estimate live schedule offset from the vehicle's position on the plan.
+
+    The emulator moves between planned stop coordinates, so a stop-arrival-only
+    detector leaves most packets at zero.  We instead project every valid GPS
+    point onto the planned segment and interpolate the segment's scheduled time.
+    The first valid point calibrates the historical plan to the live source's
+    wall clock; later points therefore measure movement against the same
+    planned sequence without pretending that an arrival was observed.
+    """
+    match = match_stop(tr_id, lon, lat)
+    # A nearest point many kilometres away is not an operational match.  The
+    # source may be live, but its coordinate is not evidence for this route.
+    if not match or float(match.get('distance_m', float('inf'))) > 250:
+        return None
+    route = schedule[schedule.tr_id == tr_id].dropna(subset=['lon', 'lat']).sort_values('ts').reset_index(drop=True)
+    if route.empty:
+        return None
+    position = int(match.get('segment_index', 0))
+    if len(route) == 1 or position >= len(route) - 1:
+        raw_expected = float(route.iloc[-1].ts)
+    else:
+        start = route.iloc[position]
+        end = route.iloc[position + 1]
+        fraction = 0.0
+        if match.get('segment_index') == position:
+            # Use the same projection as the geometry matcher rather than a
+            # nearest-stop snap so the expected time moves continuously.
+            fraction, _, _, _ = _segment_projection(lon, lat, start.lon, start.lat, end.lon, end.lat)
+        raw_expected = float(start.ts) + fraction * max(0.0, float(end.ts) - float(start.ts))
+    # A near-zero speed packet at a planned stop is the one case where the
+    # feed gives us an observed arrival signal rather than only a geometric
+    # estimate.  Keep this explicit so the UI/API can distinguish it.
+    observed = route[route.tt_action_item_id == int(match['stop_id'])]
+    if speed is not None and float(speed) < 5 and not observed.empty and float(match.get('distance_m', 9999)) <= 60:
+        planned = float(observed.iloc[(observed.ts - ts).abs().argmin()].ts)
+        deviation = max(-1800.0, min(1800.0, float(ts) - planned))
+        return {
+            **match,
+            'match_kind': 'observed_slow_stop',
+            'deviation_s': round(deviation, 1),
+            'expected_ts': planned,
+            'expected_position_time': pd.Timestamp(planned, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+            'estimated': False,
+        }
+
+    first_ts = float(route.iloc[0].ts)
+    last_ts = float(route.iloc[-1].ts)
+    period = max(3600.0, last_ts - first_ts)
+    # Calibrate the plan to the first valid point from this source.  The
+    # emulator intentionally starts at the first geometry point at wall-clock
+    # time, so comparing it to the historical 06:00 plan would otherwise
+    # produce a permanent multi-hour error.  Subsequent packets then change
+    # the value as the vehicle progresses through scheduled segments.
+    if tr_id not in position_offsets:
+        position_offsets[tr_id] = float(ts) - raw_expected
+    expected = raw_expected + position_offsets[tr_id]
+    # If a route wraps, keep the equivalent planned timestamp closest to the
+    # previous live estimate rather than jumping back to the source day.
+    previous_expected = deviations.get(tr_id, {}).get('expected_ts')
+    if previous_expected is not None:
+        while expected - previous_expected > period / 2:
+            expected -= period
+        while previous_expected - expected > period / 2:
+            expected += period
+    deviation = max(-1800.0, min(1800.0, float(ts) - expected))
+    return {
+        **match,
+        'deviation_s': round(deviation, 1),
+        'expected_ts': expected,
+        'expected_position_time': pd.Timestamp(expected, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
+        'estimated': True,
+    }
 
 async def forecast(point,records,source):
     t=epoch(point['T']);tr=int(point['tr_id'])
@@ -371,7 +447,10 @@ async def forecast(point,records,source):
       previous_stop=previous_stop,next_stop=next_stop,
       recommendation='Проверить ситуацию с водителем и доступность резерва' if level=='high' else 'Наблюдать за движением',
       source=source,degraded=degraded,stale=stale,features=features,lon=last['lon'] if last else None,lat=last['lat'] if last else None,
-      position_time=last['ts'] if last else None,horizon_s=epoch(point['target_time_begin'])-t)
+      position_time=last['ts'] if last else None,horizon_s=epoch(point['target_time_begin'])-t,
+      current_deviation_s=point.get('cur_dev_s'),
+      deviation_estimated=bool(point.get('deviation_estimated', False)),
+      position_match=point.get('position_match'))
     vehicles[tr]=clean(result);counters['predictions']+=1
     return clean(result)
 
@@ -403,33 +482,15 @@ async def ingest(event):
             }
         return
     state['clock']=timestamp(event['event_time']).isoformat()
-    # Conservative arrival match: only already observed stop proximity. No schedule actuals.
-    known = schedule[
-        (schedule.tr_id == tr)
-        & (schedule.ts >= ts - 1800)
-        & (schedule.ts <= ts + 300)
-    ]
-
-    if event['location_valid'] and event['speed'] < 5 and not known.empty:
-        dist = known.apply(
-            lambda s: haversine(
-                event['lon'],
-                event['lat'],
-                s.lon,
-                s.lat,
-            ),
-            axis=1,
-        )
-        nearest = known.loc[dist.idxmin()]
-
-        if (
-            dist.min() < 60
-            and deviations.get(tr, {}).get('stop')
-            != int(nearest.tt_action_item_id)
-        ):
+    position_match = None
+    if event['location_valid']:
+        position_match = estimate_position(tr, event['lon'], event['lat'], ts, event.get('speed'))
+        if position_match is not None:
             deviations[tr] = {
-                'stop': int(nearest.tt_action_item_id),
-                'value': ts - nearest.ts,
+                'stop': int(position_match['stop_id']),
+                'value': float(position_match['deviation_s']),
+                'expected_ts': float(position_match['expected_ts']),
+                'position_match': position_match,
             }
 
     # Position is refreshed for every valid NDTP packet.
@@ -447,6 +508,14 @@ async def ingest(event):
         current['live_position_time'] = timestamp(
             event['event_time']
         ).isoformat()
+        if position_match is not None:
+            current['current_deviation_s'] = position_match['deviation_s']
+            current['deviation_estimated'] = bool(position_match.get('estimated', False))
+            current['position_match'] = position_match
+        else:
+            current['current_deviation_s'] = None
+            current['deviation_estimated'] = False
+            current['position_match'] = None
 
     if ts - last_forecast.get(tr, 0) < 30:
         return
@@ -455,13 +524,18 @@ async def ingest(event):
     if stop is None:
         vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',reason_is_hypothesis=True,lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),prediction_s=None,late_probability=None,position_time=ts)
         return
-    point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],cur_dev_s=deviations.get(tr,{}).get('value',0))
+    current_deviation = deviations.get(tr, {}).get('value')
+    point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],
+               cur_dev_s=float(current_deviation if current_deviation is not None else 0),
+               deviation_estimated=bool(position_match and position_match.get('estimated', False)),
+               position_match=position_match)
     result=await forecast(point,list(records),'live')
     result['telemetry_source']=event.get('telemetry_source','unknown')
     vehicles[tr]=clean(result)
-    if tr not in deviations:
-        result.update(reason=f"{result['reason']}; текущее отклонение пока принято равным 0 с",deviation_estimated=True)
-        vehicles[tr]=result
+    if current_deviation is None:
+        result.update(current_deviation_s=None,deviation_estimated=False,
+                      reason=f"{result['reason']}; текущее отклонение не удалось оценить по положению")
+        vehicles[tr]=clean(result)
 
 async def on_ndtp(event):
     unit = event.pop('unit_id')
@@ -731,7 +805,7 @@ async def mode(body:Mode):
         schedule=schedule_template.copy();live_schedule_day=None
         if body.mode=='replay':load_historical_snapshot()
         else:
-            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();position_offsets.clear();last_forecast.clear()
     return state
 
 @app.post('/api/replay/step',**operation('replay'))
@@ -739,7 +813,7 @@ async def replay():
     async with lock:
         if state['mode']!='replay':raise HTTPException(409,'Switch to replay mode first')
         if state.get('snapshot'):
-            vehicles.clear();history.clear();deviations.clear();last_forecast.clear()
+            vehicles.clear();history.clear();deviations.clear();position_offsets.clear();last_forecast.clear()
             state.update(index=0,clock=None,snapshot=False)
         i=state['index']
         if i>=len(points):return {'done':True,**state}

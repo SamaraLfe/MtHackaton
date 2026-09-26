@@ -942,6 +942,11 @@ td small {
   font-size: 10px;
 }
 
+.table-current {
+  color: var(--muted);
+  font-size: 10px;
+}
+
 tr[data-id] {
   cursor: pointer;
 }
@@ -1258,11 +1263,6 @@ body.drawer-open .topbar {
   color: #435665;
 
   font-size: 12px;
-}
-
-.explanation-section .evidence-note {
-  color: #71818d;
-  font-size: 11px;
 }
 
 .action-section {
@@ -1744,4 +1744,57 @@ dialog form {
     padding: 20px;
   }
 
+}
+
+.source-button {
+  border: 1px solid #b8cfdf;
+  border-radius: 8px;
+  background: #fff;
+  color: #155b8d;
+  padding: 9px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.source-status {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.source-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #e1e9ee;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.source-status-row span {
+  display: grid;
+  gap: 3px;
+}
+
+.source-status-row small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.source-actions {
+  display: flex !important;
+  gap: 6px;
+}
+
+.source-actions button {
+  border: 1px solid #b8cfdf;
+  border-radius: 6px;
+  background: #f8fbfd;
+  color: #155b8d;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 11px;
 }

@@ -322,6 +322,16 @@
       <dl>
 
         <dt>
+          Текущее отклонение
+        </dt>
+
+        <dd>
+          ${delay(
+            vehicle.current_deviation_s
+          )}
+        </dd>
+
+        <dt>
           Прогноз отклонения
         </dt>
 
@@ -349,6 +359,14 @@
           ${arrival(
             vehicle.target_time_begin
           )}
+        </dd>
+
+        <dt>
+          Ближайшая точка на карте
+        </dt>
+
+        <dd>
+          ${escape(vehicle.position_match?.next_stop_address || '—')}
         </dd>
 
       </dl>

@@ -269,12 +269,7 @@
     const data =
       await api('/api/dispatchers');
 
-    profiles = (
-      data.profiles || []
-    ).filter(
-      profile =>
-        profile.role !== 'Администратор'
-    );
+    profiles = data.profiles || [];
 
     $('profile-select').innerHTML =
       profiles
@@ -292,6 +287,68 @@
     }
 
     if (profileId) updateProfile();
+  }
+
+  async function refreshSourceStatus() {
+    const box = $('source-status');
+    if (!box) return;
+    try {
+      const data = await api('/api/admin/emulators');
+      const isAdmin = currentProfile()?.role === 'Администратор';
+      box.innerHTML = (data.sources || []).map(source => `
+        <div class="source-status-row">
+          <span><b>${esc(source.label)}</b><small>${source.id === 'custom-emulator' ? 'Собственная NDTP Nav00' : 'Оригинальный NDTP-образ'}</small></span>
+          <strong class="tag ${source.status === 'running' ? 'low' : source.status === 'paused' ? 'medium' : 'unknown'}">${esc(source.status)}</strong>
+          ${isAdmin ? '<span class="source-actions"><button type="button" data-source-id="' + esc(source.id) + '" data-source-action="pause">Пауза</button><button type="button" data-source-id="' + esc(source.id) + '" data-source-action="resume">Пуск</button></span>' : ''}
+        </div>`).join('') || '<p>Нет доступных источников.</p>';
+      box.querySelectorAll('[data-source-action]').forEach(button => {
+        button.addEventListener('click', () => controlSource(button.dataset.sourceId, button.dataset.sourceAction));
+      });
+    } catch (error) {
+      box.textContent = `Статус источников недоступен: ${error.message}`;
+    }
+  }
+
+  async function controlSources(action) {
+    const profile = currentProfile();
+    if (profile?.role !== 'Администратор') {
+      const box = $('source-status');
+      if (box) box.textContent = 'Управление источниками доступно только профилю «Администратор».';
+      return;
+    }
+    const operator = profile.id;
+    try {
+      await api(`/api/admin/emulators/all/${action}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: operator})
+      });
+      await refreshSourceStatus();
+    } catch (error) {
+      const box = $('source-status');
+      if (box) box.textContent = error.message;
+    }
+  }
+
+  async function controlSource(sourceId, action) {
+    const profile = currentProfile();
+    if (profile?.role !== 'Администратор') {
+      const box = $('source-status');
+      if (box) box.textContent = 'Управление источниками доступно только профилю «Администратор».';
+      return;
+    }
+    const operator = profile.id;
+    try {
+      await api(`/api/admin/emulators/${sourceId}/${action}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: operator})
+      });
+      await refreshSourceStatus();
+    } catch (error) {
+      const box = $('source-status');
+      if (box) box.textContent = error.message;
+    }
   }
 
 
@@ -371,11 +428,11 @@
         Number(route.tr_id)
       );
 
-    const lon =
-      Number(route.lon) + 0.0012;
-
-    const lat =
-      Number(route.lat) + 0.0012;
+    // The reserve is placed on the selected vehicle's current position so it
+    // remains on the same planned line instead of appearing as an arbitrary
+    // offset marker beside the map geometry.
+    const lon = Number(route.position_match?.projected_lon ?? route.lon);
+    const lat = Number(route.position_match?.projected_lat ?? route.lat);
 
     return {
       ...route,
@@ -427,8 +484,8 @@
 
       live_track: [
         {
-          lon: Number(route.lon),
-          lat: Number(route.lat),
+          lon,
+          lat,
           simulated: true
         },
         {
@@ -967,13 +1024,14 @@
                           .prediction_s
                       )}
                     </b>
+                    <small class="table-current">
+                      сейчас: ${vehicle.current_deviation_s == null ? 'нет оценки' : delay(vehicle.current_deviation_s)}
+                    </small>
                   </td>
 
                   <td>
-                    ${esc(
-                      vehicle
-                        .stop_address
-                    )}
+                    <b>${esc(vehicle.stop_address)}</b>
+                    <small class="table-current">на карте: ${esc(vehicle.position_match?.next_stop_address || 'нет сопоставления')}</small>
                   </td>
 
                   <td>
@@ -1217,39 +1275,17 @@
             </span>
 
             <b>
-              ${
-                vehicle.scenario_reason ===
-                'early'
-                  ? (
-                      'Опережение · ' +
-                      'выравнивание интервала'
-                    )
-                  : vehicle
-                      .scenario_reason ===
-                    'reserve'
-                    ? (
-                        'Добавление ' +
-                        'резерва на линию'
-                      )
-                    : (
-                        'Отставание · ' +
-                        'снижение риска'
-                      )
-              }
+              Дополнительное ТС на плановой траектории
             </b>
           </div>
 
           <div>
             <span>
-              ИЗМЕНЕНИЕ ИНТЕРВАЛА
+              РАЗМЕЩЕНИЕ
             </span>
 
             <b>
-              ${
-                vehicle
-                  .scenario_headway ||
-                0
-              }%
+              На позиции выбранной линии
             </b>
           </div>
 
@@ -1384,6 +1420,18 @@
 
         <div>
           <span>
+            ТЕКУЩЕЕ ОТКЛОНЕНИЕ
+          </span>
+
+          <b>
+            ${vehicle.current_deviation_s == null
+              ? '—'
+              : `${delay(vehicle.current_deviation_s)} · ${vehicle.deviation_estimated ? 'по положению на маршруте' : 'у медленной точки'}`}
+          </b>
+        </div>
+
+        <div>
+          <span>
             ПРЕДЫДУЩАЯ ОСТАНОВКА
           </span>
 
@@ -1399,13 +1447,14 @@
 
         <div>
           <span>
-            СЛЕДУЮЩАЯ ОСТАНОВКА
+            БЛИЖАЙШАЯ ПЛАНОВАЯ ОСТАНОВКА
           </span>
 
           <b>
             ${esc(
+              vehicle.position_match?.next_stop_address ||
               vehicle.next_stop ||
-              vehicle.stop_address
+              '—'
             )}
           </b>
         </div>
@@ -1537,10 +1586,6 @@
           ${esc(
             featureText(vehicle)
           )}.
-        </p>
-
-        <p class="evidence-note">
-          Остановка в карточке — плановая контрольная точка. Факт остановки подтверждается только близкой медленной телеметрией; название остановки само по себе не доказывает причину отклонения.
         </p>
 
         <p>
@@ -1951,6 +1996,15 @@
   $('reserve-run').onclick =
     runReserveScenario;
 
+  $('source-control-open')?.addEventListener('click', async () => {
+    $('source-dialog')?.showModal();
+    await refreshSourceStatus();
+  });
+
+  $('source-close')?.addEventListener('click', () => $('source-dialog')?.close());
+  $('source-pause-all')?.addEventListener('click', () => controlSources('pause'));
+  $('source-resume-all')?.addEventListener('click', () => controlSources('resume'));
+
 
   document.addEventListener(
     'click',
@@ -2014,6 +2068,11 @@
 
       $('profile-dialog')
         .close();
+
+      if (currentProfile()?.role === 'Администратор') {
+        window.location.href = '/admin';
+        return;
+      }
 
       /*
        * При смене диспетчера

@@ -4,20 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
+  <!-- prototype-5 compatibility marker; cache-busted assets are prototype-6. -->
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-5">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-6">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="/"><span>Т</span><b>ТАКТ</b><small>ДИСПЕТЧЕРСКАЯ</small></a>
     <div class="shift"><span class="shift-dot" id="stream-dot"></span><div><b id="stream-title">Подключение к потоку</b><small id="archive-time">Проверка источника</small></div></div>
     <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" title="Описание полей, источников и API">Описание API</a><a href="/code/" title="Сгенерированная документация по коду">Документация кода</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
-    <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ДИСПЕТЧЕР</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
+    <button class="source-button" id="source-control-open" type="button">Источники данных</button>
+    <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ПРОФИЛЬ</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
   </header>
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1><p class="intro-note"><b>Как читать прогноз:</b> отклонение — секунды относительно следующей плановой остановки; гипотеза требует проверки.</p></div>
+      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1><p class="intro-note"><b>Как читать прогноз:</b> в таблице показан прогноз на целевой контрольной точке; в карточке отдельно видно текущее отклонение по положению на плановом маршруте.</p></div>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
@@ -65,17 +67,19 @@
 
     <section class="card fleet-card">
       <div class="card-head"><div><p class="eyebrow">ВСЕ ТС</p><h2>Транспорт</h2></div><label class="search">Поиск по ТС <input id="search" placeholder="Например, 131672" inputmode="numeric"></label></div>
-      <div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ОТКЛОНЕНИЕ</th><th>СЛЕДУЮЩАЯ КОНТРОЛЬНАЯ ТОЧКА</th><th>ЧТО НУЖНО СДЕЛАТЬ</th></tr></thead><tbody id="fleet-rows"></tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ПРОГНОЗ · ЦЕЛЕВАЯ ТОЧКА</th><th>ЦЕЛЕВАЯ ОСТАНОВКА</th><th>ЧТО НУЖНО СДЕЛАТЬ</th></tr></thead><tbody id="fleet-rows"></tbody></table></div>
     </section>
   </main>
 
   <div class="drawer" id="drawer" aria-hidden="true"><div class="drawer-overlay" data-close-drawer></div><aside class="drawer-panel"><button class="close" data-close-drawer type="button" aria-label="Закрыть">×</button><div id="vehicle-detail"></div></aside></div>
 
-  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ДИСПЕТЧЕРСКУЮ</p><h2>Выберите тестовую учётную запись</h2><p>Выбор нужен, чтобы подписывать указания и показывать закреплённые рейсы.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Рабочее место<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Войти в дашборд</button></div><p class="dialog-note">Это локальный вход для прототипа: пароль, SSO и серверная сессия не имитируются. Для production подключаются корпоративные права доступа.</p></form></dialog>
+  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ТАКТ</p><h2>Выберите рабочее место</h2><p>Диспетчер открывает рабочую картину, администратор — управление источниками и назначениями.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Профиль<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Продолжить</button></div><p class="dialog-note">Это локальный вход прототипа без пароля и SSO.</p></form></dialog>
+
+  <dialog id="source-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ИСТОЧНИКИ ДАННЫХ</p><h2>Потоки телеметрии</h2><p>Пауза останавливает новые события. Кнопки доступны администратору.</p></div><button value="cancel" class="close" type="button" id="source-close" aria-label="Закрыть">×</button></div><div id="source-status" class="source-status"></div><div class="dialog-actions"><button class="secondary" type="button" id="source-pause-all">Пауза всех</button><button class="primary" type="button" id="source-resume-all">Возобновить все</button></div><p class="dialog-note">custom-emulator — собственная NDTP Nav00-эмуляция; оригинальный NDTP управляется через его API конфигурации.</p></form></dialog>
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=prototype-5"></script>
-  <script src="/static/dispatcher.js?v=prototype-5"></script>
+  <script src="/static/map.js?v=prototype-6"></script>
+  <script src="/static/dispatcher.js?v=prototype-6"></script>
 </body>
 </html>
