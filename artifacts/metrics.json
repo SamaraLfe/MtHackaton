@@ -1,5 +1,5 @@
 {
-  "model": "v5.3",
+  "model": "v5.4",
   "target_mode": "residual_to_current_deviation",
   "rows_train": 1141,
   "fit": 937,
@@ -12,18 +12,19 @@
     "target_stop_id",
     "tr_id"
   ],
-  "test_mae_s": 72.86176372208526,
+  "test_mae_s": 72.18892992461404,
   "persistence_mae_s": 93.35977337110482,
   "zero_mae_s": 103.33711048158641,
-  "interval_coverage": 0.9631728045325779,
-  "interval_radius_s": 226.1217720492791,
-  "brier_score": 0.13418769976626832,
-  "alert_precision": 0.7837837837837838,
-  "alert_recall": 0.3372093023255814,
-  "batch_inference_ms": 3.1971999997040257,
+  "interval_coverage": 0.9660056657223796,
+  "interval_radius_s": 219.958532803026,
+  "brier_score": 0.13025468613762206,
+  "alert_precision": 0.75,
+  "alert_recall": 0.3488372093023256,
+  "batch_inference_ms": 5.702800001017749,
   "batch_size": 353,
   "tuning_mae": {
     "catboost": 68.5051780088977,
+    "ensemble": 67.961417739844,
     "torch_lad": 90.82457302555893,
     "persistence": 87.13131313131314
   },
