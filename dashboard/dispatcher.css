@@ -1228,8 +1228,12 @@ body.drawer-open .topbar {
 .prediction-panel h3 {
   margin: 0 0 5px;
 
-  font-size: 16px;
+  font-size: 22px;
 }
+
+.prediction-facts { margin: 16px 0 0; display: grid; gap: 5px; }
+.prediction-facts dt { color: var(--muted); font-size: 11px; }
+.prediction-facts dd { margin: 0 0 10px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 
 .prediction-panel p {
   margin: 4px 0;

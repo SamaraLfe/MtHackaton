@@ -254,38 +254,7 @@ def target_for(tr,t,stop_id=None,time_offset=0.0):
     if route.empty:return None
     candidates=route[(route.ts+offset>t+600)&(route.ts+offset<=t+900)]
     effective_offset=offset
-    horizon_fallback=False
-    if candidates.empty:
-        # A source can start just after the last planned point of a short
-        # route (the original emulator is especially prone to this). Treat
-        # the plan as a repeated service pattern and expose the applied cycle.
-        period=max(3600.0,float(route.ts.max())-float(route.ts.min()))
-        midpoint=t+750
-        options=[]
-        for cycle in range(-3,4):
-            candidate_offset=offset+cycle*period
-            shifted=route.ts+candidate_offset
-            window=route[(shifted>t+600)&(shifted<=t+900)]
-            if not window.empty:
-                first_time=float((window.ts+candidate_offset).min())
-                options.append((abs(first_time-midpoint),candidate_offset,window))
-        if options:
-            _,effective_offset,candidates=min(options,key=lambda item:item[0])
-        else:
-            # Sparse routes may have no stop exactly in the 10–15 minute
-            # interval. Use the nearest available stop after T+10 instead of
-            # dropping the vehicle from the operational picture.
-            floor_options=[]
-            for cycle in range(-3,4):
-                candidate_offset=offset+cycle*period
-                shifted=route.ts+candidate_offset
-                future=route[shifted>t+600]
-                if not future.empty:
-                    first_time=float((future.ts+candidate_offset).min())
-                    floor_options.append((first_time,candidate_offset,future))
-            if not floor_options:return None
-            _,effective_offset,candidates=min(floor_options,key=lambda item:item[0])
-            horizon_fallback=True
+    if candidates.empty:return None
     first_time=(candidates.ts+effective_offset).min()
     candidates=candidates[(candidates.ts+effective_offset)==first_time]
     if stop_id is not None:candidates=candidates[candidates.tt_action_item_id==stop_id]
@@ -296,8 +265,6 @@ def target_for(tr,t,stop_id=None,time_offset=0.0):
         result['ts']=float(result['ts'])+effective_offset
         result['time_begin']=(pd.Timestamp(result['time_begin'])+pd.to_timedelta(effective_offset,unit='s')).isoformat(sep=' ')
         result['schedule_offset']=effective_offset
-    if horizon_fallback:
-        result['horizon_fallback']=True
     return result
 
 def planned_position_at(tr, ts):
@@ -419,49 +386,6 @@ def calibrated_uncertainty(prediction):
     level='unknown' if probability is None else 'high' if probability>=.7 else 'medium' if probability>=.35 else 'low'
     return {'lower_s':prediction-radius,'upper_s':prediction+radius,'late_probability':probability,'level':level}
 
-
-def stabilize_forecast(result, current_deviation_s, horizon_s):
-    """Prevent an implausibly large recovery between current and target ETA.
-
-    ``current_deviation_s`` is a present position estimate while
-    ``prediction_s`` is the expected deviation at the target stop.  They may
-    differ, but a multi-thousand-second correction in a 10–15 minute horizon
-    is not operationally credible.  Limit only that extreme correction and
-    mark it explicitly so the UI/API never hides the adjustment.
-    """
-    result=dict(result)
-    result.setdefault('prediction_adjusted',False)
-    result.setdefault('prediction_adjustment_s',0.0)
-    if current_deviation_s is None or result.get('prediction_s') is None:
-        return result
-    try:
-        current=float(current_deviation_s)
-        predicted=float(result['prediction_s'])
-        horizon=max(600.0,float(horizon_s))
-    except (TypeError,ValueError):
-        return result
-    if not all(math.isfinite(value) for value in (current,predicted,horizon)) or abs(current)<600:
-        return result
-    # At most 600 seconds of recovery is allowed in this local prototype;
-    # shorter horizons receive the proportionally smaller limit.
-    max_recovery=max(300.0,min(600.0,horizon*0.5))
-    bounded=max(current-max_recovery,min(current+max_recovery,predicted))
-    if abs(bounded-predicted)<0.1:
-        return result
-    radius=None
-    if result.get('lower_s') is not None and result.get('upper_s') is not None:
-        radius=max(0.0,(float(result['upper_s'])-float(result['lower_s']))/2.0)
-    result['prediction_s']=round(bounded,1)
-    if radius is not None:
-        result['lower_s']=round(bounded-radius,1)
-        result['upper_s']=round(bounded+radius,1)
-    calibrated=calibrated_uncertainty(bounded)
-    if calibrated['late_probability'] is not None:
-        result['late_probability']=calibrated['late_probability']
-    result['prediction_adjusted']=True
-    result['prediction_adjustment_s']=round(bounded-predicted,1)
-    result['prediction_adjustment_reason']='Ограничено физически допустимое изменение отклонения на горизонте прогноза'
-    return result
 
 def load_historical_snapshot():
     """Build a fallback view from frozen V5 validate predictions."""
@@ -601,7 +525,8 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
     # feed gives us an observed arrival signal rather than only a geometric
     # estimate.  Keep this explicit so the UI/API can distinguish it.
     observed = route[route.tt_action_item_id == int(match['stop_id'])]
-    if speed is not None and float(speed) < 5 and not observed.empty and float(match.get('distance_m', 9999)) <= 60:
+    nearest_stop_distance = min((haversine(lon, lat, row.lon, row.lat) for row in observed.itertuples()), default=float('inf'))
+    if speed is not None and float(speed) < 5 and nearest_stop_distance <= 60:
         planned = float(observed.iloc[(observed.ts - ts).abs().argmin()].ts)
         # The schedule has already been moved to the live calendar day, but
         # the vehicle may start a run at a different point of that plan.  Use
@@ -626,7 +551,7 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
                 expected -= period
             while previous_expected - expected > period / 2:
                 expected += period
-        deviation = max(-1800.0, min(1800.0, float(ts) - expected))
+        deviation = float(ts) - expected
         position_states[tr_id] = {'segment_index': position, 'ts': float(ts)}
         return {
             **match,
@@ -636,8 +561,8 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
             'expected_position_time': pd.Timestamp(expected, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
             'previous_stop_time': pd.Timestamp(float(segment_start.ts) + offset, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
             'next_stop_time': pd.Timestamp(float(segment_end.ts) + offset, unit='s', tz='UTC').tz_convert('Europe/Moscow').isoformat(),
-            'stop_times_estimated': False,
-            'estimated': False,
+            'stop_times_estimated': True,
+            'estimated': True,
         }
 
     first_ts = float(route.iloc[0].ts)
@@ -659,7 +584,7 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
             expected -= period
         while previous_expected - expected > period / 2:
             expected += period
-    deviation = max(-1800.0, min(1800.0, float(ts) - expected))
+    deviation = float(ts) - expected
     position_states[tr_id] = {'segment_index': position, 'ts': float(ts)}
     return {
         **match,
@@ -690,15 +615,10 @@ async def forecast(point,records,source):
     except (httpx.HTTPError,KeyError,ValueError):
         counters['ml_failures']+=1;degraded=True
         result=dict(prediction_s=point['cur_dev_s'],lower_s=None,upper_s=None,late_probability=None,model='persistence_fallback')
-    result=stabilize_forecast(
-        result,
-        point.get('cur_dev_s'),
-        epoch(point['target_time_begin'])-t,
-    )
     counters['last_inference_ms']=round((time.perf_counter()-start)*1000,2)
     stale=features['age_s']>120 or bool(features['missing_gps'])
     risk=result['late_probability']
-    level='unknown' if degraded or stale else ('high' if risk>=.7 else 'medium' if risk>=.35 else 'low')
+    level='unknown' if degraded or stale else ('unknown' if risk is None else 'high' if risk>=.7 else 'medium' if risk>=.35 else 'low')
     reason='Устойчивое отклонение от графика'
     reason_explanation='Положение на плановом сегменте устойчиво отличается от ожидаемого времени; это сигнал для проверки, а не установленная причина.'
     if features['idle_s']>=90:
@@ -849,7 +769,7 @@ async def ingest(event):
         vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',reason_is_hypothesis=True,lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),position_adjusted=bool(event.get('position_adjusted',False)),position_origin='planned_route_projection' if event.get('position_adjusted') else None,prediction_s=None,late_probability=None,position_time=ts)
         return
     schedule_offset=float(stop.get('schedule_offset',schedule_offset) or 0)
-    current_deviation = deviations.get(tr, {}).get('value')
+    current_deviation = position_match['deviation_s'] if position_match is not None else None
     point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],
                cur_dev_s=float(current_deviation if current_deviation is not None else 0),
                deviation_estimated=bool(position_match and position_match.get('estimated', False)),
@@ -1247,222 +1167,89 @@ async def replay():
         state['clock']=timestamp(p['T']).isoformat();state['index']+=1
         return {'done':False,'prediction':result,**state}
 
+def operational_vehicle(tr, now):
+    """Describe trip progress independently of forecast availability.
+
+    An empty prediction window is not evidence that a trip ended. Completion
+    requires the last observed position at the end of the final plan segment.
+    A never-seen vehicle has an unconfirmed departure, not a lost connection.
+    """
+    records=list(history.get(tr, ()))
+    live=vehicles.get(tr, {})
+    seen=bool(records) or live.get('source') in {'live', 'last_known_live'}
+    item=dict(live if seen else {})
+    item.update(tr_id=tr)
+    route=schedule[schedule.tr_id==tr].dropna(subset=['lon','lat']).sort_values('ts').reset_index(drop=True)
+    if route.empty:return item
+    first,last=route.iloc[0],route.iloc[-1]
+    item.update(route_start_stop=display_text(first.building_address),route_end_stop=display_text(last.building_address))
+    match=deviations.get(tr,{}).get('position_match') or item.get('position_match') or {}
+    if records:
+        valid=next((r for r in reversed(records) if r.get('location_valid')),None)
+        if valid:item.update(lon=valid['lon'],lat=valid['lat'],position_time=valid['ts'])
+    packet_ts=records[-1]['ts'] if records else item.get('position_time')
+    age=max(0,now-float(packet_ts)) if packet_ts is not None else None
+    item['telemetry_age_s']=round(age,1) if age is not None else None
+    item['telemetry_source']=item.get('telemetry_source') or (records[-1].get('telemetry_source') if records else None)
+    ended=(seen and len(route)>1 and match.get('segment_index')==len(route)-2
+           and float(match.get('fraction',0))>=.995 and item.get('lon') is not None
+           and haversine(item['lon'],item['lat'],last.lon,last.lat)<=30)
+    if match:
+        index=min(len(route)-1,max(0,int(match.get('segment_index',0))))
+        offset=float(position_offsets.get(tr,0))
+        deviation=float(match.get('deviation_s',0))
+        item.update(previous_stop=display_text(route.iloc[index].building_address),
+                    next_stop=None if ended else display_text(route.iloc[min(index+1,len(route)-1)].building_address),
+                    previous_stop_time=pd.Timestamp(float(route.iloc[index].ts)+offset+deviation,unit='s',tz='UTC').isoformat(),
+                    next_stop_time=None if ended else pd.Timestamp(float(route.iloc[min(index+1,len(route)-1)].ts)+offset+deviation,unit='s',tz='UTC').isoformat(),
+                    stop_times_estimated=True,position_match=match,
+                    current_deviation_s=match.get('deviation_s'),deviation_estimated=True)
+    item.update(trip_status='active' if seen else 'not_started',on_route=seen,attention_level='normal')
+    if ended:
+        item.update(trip_status='completed',on_route=False,status_label='Рейс завершён',level='unknown',
+                    reason='Достигнута конечная остановка; рейс снят с активной карты',connection_state='completed')
+    elif not seen:
+        item.update(source='waiting_for_live',connection_state='waiting',status_label='Выход не подтверждён',level='unknown',
+                    reason='ТС ещё не передавало телеметрию: выход на маршрут не подтверждён',lon=float(first.lon),lat=float(first.lat),position_time=None)
+    elif state.get('ingest_paused'):
+        item.update(status_label='Поток приостановлен',level='unknown',reason='Приём телеметрии приостановлен оператором',connection_state='paused')
+    elif age is None or age>LIVE_STALE_S:
+        item.update(source='last_known_live',connection_state='offline',attention_level='critical',level='high',
+                    status_label='Нет связи · критично',reason='Потеря телеметрии на активном рейсе',
+                    recommendation='Срочно связаться с водителем и проверить связь')
+    else:
+        item['connection_state']='live'
+        if item.get('prediction_s') is None:
+            item.update(status_label='Нет контрольной точки',reason='Нет плановой остановки в окне 10–15 минут; рейс продолжается')
+        elif item.get('degraded'):
+            item.update(status_label='Модель недоступна',reason='Прогноз модели временно недоступен')
+        else:
+            item['status_label']={'high':'Риск опоздания','medium':'Нужно проверить','low':'В графике'}.get(item.get('level'),'Нет оценки')
+    if ended or not seen or item['connection_state'] in {'offline','paused'}:
+        item.update(prediction_s=None,late_probability=None,lower_s=None,upper_s=None,stale=True)
+    track=live_track(tr)
+    if track:item['live_track']=track
+    return clean(item)
+
+
 @app.get('/api/state', **operation('state'))
 async def get_state(
     dispatcher_id: str | None = None
 ):
 
-    merged = {}
+    if state['mode']=='live':
+        ids={int(tr) for tr in schedule.tr_id.unique()}|set(vehicles)
+        if dispatcher_id:
+            profile=get_dispatcher(dispatcher_id)
+            if profile is None:raise HTTPException(404,'Dispatcher not found')
+            ids &= set(profile['assigned_tr_ids'])
+        now=time.time()
+        return {'vehicles':[operational_vehicle(tr,now) for tr in sorted(ids)],'state':state,
+                'counters':dict(counters),'total_points':len(points),'dispatcher_id':dispatcher_id}
 
-    # -------------------------------------------------
-    # REPLAY
-    # -------------------------------------------------
-
-    if state['mode'] == 'replay':
-        merged = {
-            tr: dict(vehicle)
-            for tr, vehicle
-            in archive_vehicles.items()
-        }
-
-    # -------------------------------------------------
-    # LIVE:
-    # сначала готовим historical fallback
-    # -------------------------------------------------
-
-    else:
-        for tr, archived in archive_vehicles.items():
-            fallback = dict(archived)
-
-            # Сохраняем архивный прогноз отдельно.
-            # Его нельзя выдавать за текущий live-прогноз.
-            fallback['historical_prediction_s'] = (
-                fallback.get(
-                    'prediction_s'
-                )
-            )
-
-            fallback['historical_level'] = (
-                fallback.get(
-                    'level'
-                )
-            )
-
-            fallback['historical_source'] = (
-                fallback.get(
-                    'source'
-                )
-            )
-
-            fallback['source'] = (
-                'historical_fallback'
-            )
-
-            fallback['connection_state'] = (
-                'historical'
-            )
-
-            fallback['prediction_s'] = None
-            fallback['late_probability'] = None
-
-            fallback['level'] = 'unknown'
-            fallback['stale'] = True
-            fallback['degraded'] = True
-
-            fallback['reason'] = (
-                'Нет свежей NDTP-телеметрии; '
-                'показано историческое состояние'
-            )
-
-            merged[tr] = fallback
-
-        # Keep every configured vehicle visible while a source is coming up.
-        # This makes the configured 13+13 fleet count honest: a unit that has
-        # not emitted its first packet is shown at the first planned point as
-        # explicitly waiting, never as an invented forecast.  The source is
-        # kept in the row so an operator can tell whether the missing packet
-        # belongs to the original or custom stream.
-        planned_ids=sorted({int(item) for item in schedule.tr_id.unique()})
-        for tr in planned_ids:
-            if tr in merged or tr in vehicles:
-                continue
-            route=schedule[schedule.tr_id==tr].dropna(subset=['lon','lat']).sort_values('ts')
-            first=route.iloc[0] if not route.empty else None
-            custom=tr>=CUSTOM_TR_ID_OFFSET
-            merged[tr]={
-                'tr_id':tr,'source':'waiting_for_live','connection_state':'waiting',
-                'telemetry_source':'custom_ndtp_nav00' if custom else 'ndtp_nav00',
-                'level':'unknown','stale':True,'degraded':True,
-                'prediction_s':None,'late_probability':None,
-                'reason':('Ожидание первого пакета custom-emulator' if custom else 'Ожидание первого NDTP-пакета оригинального эмулятора'),
-                'reason_is_hypothesis':True,
-                'lon':float(first.lon) if first is not None else None,
-                'lat':float(first.lat) if first is not None else None,
-                'position_time':None,
-            }
-
-    # -------------------------------------------------
-    # Накладываем LIVE
-    # -------------------------------------------------
-
-    for tr, live in vehicles.items():
-        item = dict(live)
-
-        position_time = float(
-            item.get(
-                'position_time',
-                0
-            )
-            or 0
-        )
-
-        age = (
-            time.time() -
-            position_time
-            if position_time
-            else float('inf')
-        )
-
-        item['telemetry_age_s'] = (
-            round(
-                max(
-                    0,
-                    age
-                ),
-                1
-            )
-            if math.isfinite(age)
-            else None
-        )
-
-        # В replay просто используем
-        # состояние replay.
-        if state['mode'] != 'live':
-            merged[tr] = item
-            continue
-
-        # ---------------------------------------------
-        # 1. Свежий LIVE
-        # ---------------------------------------------
-
-        if age <= LIVE_STALE_S:
-            item['connection_state'] = (
-                'live'
-            )
-
-            merged[tr] = item
-            continue
-
-        # ---------------------------------------------
-        # 2. Связь недавно пропала:
-        #    последнее известное состояние
-        # ---------------------------------------------
-
-        if age <= LIVE_FALLBACK_S:
-            item['source'] = (
-                'last_known_live'
-            )
-
-            item['connection_state'] = (
-                'stale'
-            )
-
-            item['stale'] = True
-            item['degraded'] = True
-
-            item['prediction_s'] = None
-            item['late_probability'] = None
-
-            item['level'] = 'unknown'
-
-            item['reason'] = (
-                'Связь с ТС временно потеряна; '
-                'показано последнее известное '
-                'положение'
-            )
-
-            merged[tr] = item
-            continue
-
-        # ---------------------------------------------
-        # 3. LIVE давно нет.
-        #
-        # Если есть исторический fallback —
-        # оставляем его.
-        #
-        # Если архивного состояния нет вообще —
-        # оставляем последнее live-состояние,
-        # но явно как устаревшее.
-        # ---------------------------------------------
-
-        if tr not in merged:
-            item['source'] = (
-                'last_known_live'
-            )
-
-            item['connection_state'] = (
-                'offline'
-            )
-
-            item['stale'] = True
-            item['degraded'] = True
-
-            item['prediction_s'] = None
-            item['late_probability'] = None
-
-            item['level'] = 'unknown'
-
-            item['reason'] = (
-                'Нет связи с ТС; '
-                'показано последнее известное '
-                'состояние'
-            )
-
-            merged[tr] = item
-
-    # -------------------------------------------------
-    # Добавляем трек и формируем ответ
-    # -------------------------------------------------
+    # Replay retains its historical clock and never raises live connection alarms.
+    merged={tr:dict(v) for tr,v in archive_vehicles.items()}
+    merged.update({tr:dict(v) for tr,v in vehicles.items()})
 
     output = []
 
@@ -1473,6 +1260,11 @@ async def get_state(
         )
     ):
         vehicle = dict(original)
+
+        route=schedule[schedule.tr_id==int(vehicle['tr_id'])].sort_values('ts')
+        if not route.empty:
+            vehicle['route_start_stop']=display_text(route.iloc[0].building_address)
+            vehicle['route_end_stop']=display_text(route.iloc[-1].building_address)
 
         track = live_track(
             int(
@@ -1523,7 +1315,9 @@ async def get_state(
 
 @app.get('/api/incidents',**operation('incidents'))
 async def get_incidents():
-    return {'items':incidents(list(vehicles.values())),'total':len(incidents(list(vehicles.values()))),'as_of':state['clock']}
+    snapshot=await get_state()
+    items=incidents(snapshot['vehicles'])
+    return {'items':items,'total':len(items),'as_of':state['clock']}
 
 @app.get('/api/risk',**operation('risk'))
 async def get_risk():

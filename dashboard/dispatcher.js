@@ -81,98 +81,29 @@
       : '—';
 
 
-  const delay = value =>
-    value == null
-      ? '—'
-      : `${value >= 0 ? '+' : '−'}${Math.round(
-          Math.abs(value)
-        )} с`;
-
-
+  const duration = value => {
+    const seconds = Math.round(Math.abs(value));
+    return seconds < 60 ? `${seconds} с` : `${Math.floor(seconds / 60)} мин${seconds % 60 ? ` ${seconds % 60} с` : ''}`;
+  };
+  const delay = value => !Number.isFinite(value) ? '—' : `${value < 0 ? '−' : '+'}${duration(value)}`;
   const predictionText = vehicle => {
-    if (vehicle.prediction_s == null) {
-      return 'Прогноз пока недоступен';
-    }
-
-    if (vehicle.prediction_s >= 0) {
-      return `Ожидается опоздание на ${Math.round(
-        vehicle.prediction_s
-      )} с`;
-    }
-
-    return `Ожидается прибытие раньше плана на ${Math.abs(
-      Math.round(vehicle.prediction_s)
-    )} с`;
+    if (vehicle.trip_status === 'completed') return 'Рейс завершён';
+    if (!Number.isFinite(vehicle.prediction_s) || vehicle.stale) return vehicle.status_label || 'Нет актуального прогноза';
+    if (Math.round(vehicle.prediction_s) === 0) return 'По расписанию';
+    return `${vehicle.prediction_s > 0 ? 'Опоздание' : 'Раньше плана'} на ${duration(vehicle.prediction_s)}`;
   };
-
-
-  const riskText = vehicle => {
-    if (vehicle.late_probability == null) {
-      return (
-        'Уровень внимания не рассчитан: ' +
-        'не хватает подтверждённых свежих данных.'
-      );
-    }
-
-    return (
-      `${Math.round(
-        vehicle.late_probability * 100
-      )}% — расчётная вероятность опоздать ` +
-      'более чем на 120 с. ' +
-      'Это индикатор для проверки, а не подтверждённая причина.'
-    );
-  };
-
-
   const sourceText = vehicle => {
-    if (vehicle.scenario) {
-      return (
-        'Виртуальное резервное ТС: ' +
-        'позиция добавлена только для оценки сценария ' +
-        'и не отправляется в live-контур.'
-      );
-    }
-
-    if (vehicle.source === 'waiting_for_live') {
-      const label = vehicle.telemetry_source === 'custom_ndtp_nav00'
-        ? 'custom-emulator'
-        : 'Оригинальный NDTP';
-      return `${label} настроен, но первый пакет ещё не пришёл; точка на карте — начало плановой траектории, прогноз не рассчитывается.`;
-    }
-
-    const source =
-      vehicle.telemetry_source === 'custom_ndtp_nav00'
-        ? 'custom-emulator → NDTP Nav00 → CRC → backend'
-        : vehicle.telemetry_source === 'ndtp_nav00'
-          ? 'Оригинальный NDTP → Nav00 → CRC → backend'
-        : vehicle.telemetry_source === 'http_json'
-          ? 'HTTP JSON → backend'
-          : 'живая телеметрия → backend';
-    const positionNote = vehicle.position_adjusted
-      ? ' Позиция оригинального NDTP приведена к плановой траектории: внешний образ генерирует синтетический GPS без маршрута, исходная точка сохраняется как raw для аудита и не используется для карты.'
-      : '';
-
-    if (vehicle.live_position) {
-      return (
-        `Свежая позиция: ${source}${positionNote} ` +
-        `(${time(vehicle.live_position_time)}). ` +
-        'Прогноз отдельно взят из архивного V5 fallback.'
-      );
-    }
-
-    if (vehicle.source === 'live') {
-      return (
-        `${source}${positionNote} → расписание → ` +
-        '102 causal-признака → V5.'
-      );
-    }
-
-    return (
-      'Архивная телеметрия (Архивный fallback): validate-телеметрия → ' +
-      'расписание → сохранённый V5.'
-    );
+    if (vehicle.scenario) return 'Сценарий резерва';
+    if (vehicle.source === 'waiting_for_live') return 'Ожидание телеметрии';
+    const source = vehicle.telemetry_source === 'custom_ndtp_nav00'
+      ? 'Собственный эмулятор · синтетическая телеметрия'
+      : vehicle.telemetry_source === 'ndtp_nav00'
+        ? 'Оригинальный эмулятор · синтетическая телеметрия'
+        : 'HTTP · телеметрия';
+    if (vehicle.live_position) return `${source}. Прогноз: архивный V5`;
+    if (vehicle.source !== 'live') return 'Архивная телеметрия · V5';
+    return source + (vehicle.position_adjusted ? '. Позиция рассчитана по плану' : '');
   };
-
 
   const featureText = vehicle => {
     const features = vehicle.features || {};
@@ -397,6 +328,7 @@
       ...baseVehicles
     ].sort(
       (a, b) =>
+        Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical') ||
         (
           a.level === 'high'
             ? -1
@@ -738,6 +670,7 @@
 
     vehicles.sort(
       (a, b) =>
+        Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical') ||
         (
           priority[a.level] ?? 9
         ) -
@@ -782,7 +715,7 @@
     /* KPI */
 
     $('kpi-total').textContent =
-      vehicles.length;
+      vehicles.filter(v => v.on_route !== false).length;
 
     $('kpi-attention').textContent =
       baseVehicles.filter(
@@ -791,27 +724,7 @@
           vehicle.level === 'medium'
       ).length;
 
-    $('kpi-predictions').textContent =
-      liveForecasts ||
-      counters.predictions ||
-      0;
-
-    $('kpi-latency').textContent =
-      counters.last_inference_ms ==
-      null
-        ? (
-            live
-              ? 'ожидание свежих данных'
-              : 'архивный снимок'
-          )
-        : (
-            'последний расчёт ' +
-            `${Math.round(
-              counters
-                .last_inference_ms
-            )} мс`
-          );
-
+    $('kpi-predictions').textContent = baseVehicles.filter(v => v.source === 'live' && !v.stale && !v.degraded && Number.isFinite(v.prediction_s)).length;
 
     /* stream status */
 
@@ -863,7 +776,7 @@
     renderTable();
 
     window.TransitMap.render(
-      vehicles,
+      vehicles.filter(v => v.on_route !== false),
       paths,
       selectedId
     );
@@ -889,7 +802,7 @@
 
   function renderAttention() {
     const attention =
-      baseVehicles
+      [...baseVehicles].sort((a,b) => Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical'))
         .filter(
           vehicle =>
             vehicle.level === 'high' ||
@@ -942,9 +855,7 @@
 
                     <span>
                       ${
-                        labels[
-                          vehicle.level
-                        ]
+                        esc(vehicle.status_label || labels[vehicle.level])
                       }
                     </span>
                   </span>
@@ -1034,9 +945,7 @@
                       ${
                         vehicle.scenario
                           ? 'Сценарий'
-                          : labels[
-                              vehicle.level
-                            ]
+                          : esc(vehicle.status_label || labels[vehicle.level])
                       }
                     </span>
                   </td>
@@ -1048,14 +957,12 @@
                           .prediction_s
                       )}
                     </b>
-                    <small class="table-current">
-                      сейчас: ${vehicle.current_deviation_s == null ? 'нет оценки' : delay(vehicle.current_deviation_s)}
-                    </small>
+
                   </td>
 
                   <td>
                     <b>${esc(vehicle.stop_address)}</b>
-                    <small class="table-current">на карте: ${esc(vehicle.position_match?.next_stop_address || 'нет сопоставления')}</small>
+
                   </td>
 
                   <td>
@@ -1143,7 +1050,7 @@
     }
 
     window.TransitMap.render(
-      vehicles,
+      vehicles.filter(v => v.on_route !== false),
       paths,
       selectedId
     );
@@ -1356,285 +1263,36 @@
        NORMAL VEHICLE
        ----------------------------------------------------- */
 
-    const risk =
-      vehicle.late_probability ==
-      null
-        ? 'Не рассчитан'
-        : `${Math.round(
-            vehicle
-              .late_probability *
-            100
-          )}%`;
-
-
+    const expectedArrival = Number.isFinite(vehicle.prediction_s) && vehicle.target_time_begin && !vehicle.stale
+      ? new Date(new Date(vehicle.target_time_begin).getTime() + vehicle.prediction_s * 1000).toISOString() : null;
+    const risk = Number.isFinite(vehicle.late_probability) && !vehicle.stale
+      ? `${Math.round(vehicle.late_probability * 100)}%` : '—';
     $('vehicle-detail').innerHTML =
-      `<div class="vehicle-title">
-
-        <p class="eyebrow">
-          КАРТОЧКА РЕЙСА
-        </p>
-
-        <h2>
-          ТС ${vehicle.tr_id}
-        </h2>
-
-        <p>
-          ${esc(
-            vehicle.stop_address
-          )}
-        </p>
-
-      </div>
-
-
-      <div class="detail-status">
-
-        <span
-          class="tag ${vehicle.level}"
-        >
-          ${
-            labels[
-              vehicle.level
-            ]
-          }
-        </span>
-
-        <b>
-          ${delay(
-            vehicle.prediction_s
-          )}
-        </b>
-
-      </div>
-
-
+      `<div class="vehicle-title"><p class="eyebrow">РЕЙС</p><h2>ТС ${vehicle.tr_id}</h2><p>${esc(vehicle.route_start_stop || '—')} → ${esc(vehicle.route_end_stop || '—')}</p></div>
+      <div class="detail-status"><span class="tag ${vehicle.level}">${esc(vehicle.status_label || labels[vehicle.level])}</span></div>
       <section class="prediction-panel">
-
-        <p class="eyebrow">
-          ПРОГНОЗ НА КОНТРОЛЬНОЙ ТОЧКЕ
-        </p>
-
-        <h3>
-          ${esc(
-            predictionText(
-              vehicle
-            )
-          )}
-        </h3>
-
-        <p>
-          Плановая точка:
-          <b>
-            ${esc(
-              vehicle.stop_address ||
-              'не определена'
-            )}
-          </b>
-          ·
-          ${time(
-            vehicle
-              .target_time_begin
-          )}
-        </p>
-
-        <p class="interpretation-note">
-          «Сейчас» и прогноз относятся к разным моментам: текущее отклонение
-          считается по позиции на сегменте, прогноз — к этой точке через
-          10–15 минут.
-        </p>
-
-        ${vehicle.prediction_adjusted ? `
-          <p class="interpretation-note warning-note">
-            Прогноз ограничен по допустимой скорости восстановления: исходная
-            модель обещала слишком резкую коррекцию за этот горизонт.
-          </p>
-        ` : ''}
-
+        <p class="eyebrow">ПРОГНОЗ НА КОНТРОЛЬНОЙ ТОЧКЕ</p>
+        <h3>${esc(predictionText(vehicle))}</h3>
+        <p>${esc(Number.isFinite(vehicle.prediction_s) ? vehicle.stop_address : vehicle.reason)}</p>
       </section>
-
-
       <div class="detail-grid">
-
-        <div>
-          <span>
-            ТЕКУЩЕЕ ОТКЛОНЕНИЕ
-          </span>
-
-          <b>
-            ${vehicle.current_deviation_s == null
-              ? '—'
-              : `${delay(vehicle.current_deviation_s)} · ${vehicle.deviation_estimated ? 'по положению на маршруте' : 'у медленной точки'}`}
-          </b>
-        </div>
-
-        <div>
-          <span>
-            ПРЕДЫДУЩАЯ ОСТАНОВКА
-          </span>
-
-          <b>
-            ${esc(
-              vehicle
-                .previous_stop ||
-              '—'
-            )}
-          </b>
-          <small class="stop-time">
-            расчётное прохождение: ${time(vehicle.previous_stop_time)}
-          </small>
-        </div>
-
-
-        <div>
-          <span>
-            БЛИЖАЙШАЯ ПЛАНОВАЯ ОСТАНОВКА
-          </span>
-
-          <b>
-            ${esc(
-              vehicle.position_match?.next_stop_address ||
-              vehicle.next_stop ||
-              '—'
-            )}
-          </b>
-          <small class="stop-time">
-            расчётное прибытие: ${time(vehicle.next_stop_time)}
-          </small>
-        </div>
-
-
-        <div>
-          <span>
-            ТЕКУЩИЙ УЧАСТОК
-          </span>
-
-          <b>
-            ${esc(
-              vehicle.position_match?.segment_start_stop_address ||
-              vehicle.previous_stop ||
-              '—'
-            )}
-            →
-            ${esc(
-              vehicle.position_match?.next_stop_address ||
-              vehicle.next_stop ||
-              vehicle.stop_address ||
-              '—'
-            )}
-          </b>
-        </div>
-
-
-        <div>
-          <span>
-            ПОЗИЦИЯ
-          </span>
-
-          <b>
-            ${
-              time(
-                vehicle.position_time
-                  ? new Date(
-                      vehicle
-                        .position_time *
-                      1000
-                    ).toISOString()
-                  : vehicle.T
-              )
-            }
-
-            ${
-              vehicle.live_position
-                ? (
-                    ' · LIVE ' +
-                    time(
-                      vehicle
-                        .live_position_time
-                    )
-                  )
-                : ''
-            }
-          </b>
-        </div>
-
-        <div>
-          <span>
-            ИСТОЧНИК ПОЗИЦИИ
-          </span>
-
-          <b>
-            ${esc(
-              vehicle.telemetry_source === 'custom_ndtp_nav00'
-                ? 'custom-emulator'
-                : vehicle.telemetry_source === 'ndtp_nav00'
-                  ? 'Оригинальный NDTP (Live NDTP)'
-                  : vehicle.live_position
-                    ? 'HTTP / live-телеметрия'
-                    : 'Архивная телеметрия'
-            )}
-          </b>
-        </div>
-
+        <div><span>ПО ПЛАНУ · МСК</span><b>${time(vehicle.target_time_begin)}</b></div>
+        <div><span>ОЖИДАЕТСЯ · МСК</span><b>${time(expectedArrival)}</b></div>
+        <div><span>ПРЕДЫДУЩАЯ ОСТАНОВКА</span><b>${esc(vehicle.previous_stop || '—')}</b><small class="stop-time">Расчётное время · ${time(vehicle.previous_stop_time)}</small></div>
+        <div><span>СЛЕДУЮЩАЯ ОСТАНОВКА</span><b>${esc(vehicle.trip_status === 'completed' ? 'Рейс завершён' : vehicle.next_stop || '—')}</b><small class="stop-time">Расчётное время · ${time(vehicle.next_stop_time)}</small></div>
+        <div><span>ПОЗИЦИЯ ОБНОВЛЕНА · МСК</span><b>${time(vehicle.position_time ? new Date(vehicle.position_time * 1000).toISOString() : vehicle.T)}</b></div>
       </div>
-
-
-      <details
-        class="explanation-section"
-        ${
-          explanationOpen
-            ? 'open'
-            : ''
-        }
-      >
-
-        <summary>
-          Почему так и откуда данные
-        </summary>
-
-        <p>
-          <b>
-            ${risk}
-          </b>.
-          ${esc(
-            riskText(vehicle)
-          )}
-        </p>
-
-        <p>
-          <b>
-            Сигнал для проверки:
-          </b>
-
-          ${esc(
-            vehicle.reason ||
-            'Нет дополнительного сигнала'
-          )}
-
-          <span class="hypothesis">${esc(vehicle.reason_explanation || (vehicle.reason_is_hypothesis ? 'Это не установленная причина: V5 видит устойчивый паттерн в телеметрии, но подтверждающих событий (например, причина простоя или команда водителя) в прототипе нет.' : 'Сигнал подтверждён потоком данных.'))}</span>
-        </p>
-
-        <p>
-          <b>
-            Признаки:
-          </b>
-
-          ${esc(
-            featureText(vehicle)
-          )}.
-        </p>
-
-        <p>
-          <b>
-            Источник:
-          </b>
-
-          ${esc(
-            sourceText(vehicle)
-          )}
-        </p>
-
+      <details class="explanation-section" ${explanationOpen ? 'open' : ''}>
+        <summary>Почему так и откуда данные</summary>
+        <dl class="prediction-facts">
+          <dt>Сигнал${vehicle.reason_is_hypothesis ? ' · гипотеза' : ''}</dt><dd>${esc(vehicle.reason || 'Недостаточно данных')}</dd>
+          <dt>Телеметрия на момент расчёта</dt><dd>${esc(featureText(vehicle))}</dd>
+          <dt>Отклонение по позиции</dt><dd>${delay(vehicle.current_deviation_s)} · оценка по плану</dd>
+          <dt>Риск задержки &gt; 2 мин</dt><dd>${risk} · оценка по архивным ошибкам модели</dd>
+          <dt>ИСТОЧНИК ПОЗИЦИИ</dt><dd>${esc(sourceText(vehicle))}</dd>
+          <dt>Прогноз рассчитан · МСК</dt><dd>${time(vehicle.T)}${Number.isFinite(vehicle.horizon_s) ? ` · горизонт ${duration(vehicle.horizon_s)}` : ''}</dd>
+        </dl>
       </details>
-
 
       <section class="action-section">
 

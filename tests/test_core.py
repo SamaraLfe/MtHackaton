@@ -109,3 +109,55 @@ def test_submission_complete_and_finite():
     result=pd.read_csv(p,sep=';')
     assert list(result)==['sample_id','prediction']
     assert result.sample_id.is_unique and np.isfinite(result.prediction).all()
+
+
+def test_slow_motion_mid_segment_is_not_stop_arrival(monkeypatch):
+    from backend import app as backend
+    monkeypatch.setattr(backend, 'schedule', pd.DataFrame([
+        dict(tt_action_item_id=1, tr_id=99, ts=1000, lon=37.60, lat=55.70, building_address='A'),
+        dict(tt_action_item_id=2, tr_id=99, ts=1600, lon=37.62, lat=55.72, building_address='B'),
+    ]))
+    for name in ('position_offsets', 'position_states', 'deviations'):
+        monkeypatch.setattr(backend, name, {})
+    result = backend.estimate_position(99, 37.61, 55.71, 10000, speed=1)
+    assert result['match_kind'] == 'planned_trajectory_segment'
+    assert result['estimated'] is True
+    assert result['deviation_s'] == pytest.approx(0, abs=.1)
+    # Stationary for 30 seconds on a segment accumulates 30 seconds of delay.
+    result = backend.estimate_position(99, 37.61, 55.71, 10030, speed=1)
+    assert result['deviation_s'] == pytest.approx(30, abs=.1)
+
+
+def test_sparse_plan_does_not_expand_forecast_horizon(monkeypatch):
+    from backend import app as backend
+    monkeypatch.setattr(backend, 'schedule', pd.DataFrame([
+        dict(tr_id=99, ts=0), dict(tr_id=99, ts=2000),
+    ]))
+    assert backend.target_for(99, 0) is None
+    invalid = {**point(16), 'horizon_fallback': True}
+    with pytest.raises(ValueError):
+        build_one(invalid, [])
+
+
+def test_forecast_preserves_model_output_at_large_current_deviation(monkeypatch):
+    import asyncio
+    import httpx
+    from backend import app as backend
+    forecast_point = {**point(), 'cur_dev_s': 1800}
+    target = epoch(forecast_point['target_time_begin'])
+    monkeypatch.setattr(backend, 'schedule', pd.DataFrame([
+        dict(tr_id=1, tt_action_item_id=7, ts=target, time_begin=forecast_point['target_time_begin'],
+             lon=37.6, lat=55.7, building_address='Target'),
+    ]))
+    monkeypatch.setattr(backend, 'vehicles', {})
+    model_result = dict(prediction_s=200, lower_s=-50, upper_s=450, late_probability=.6, model='v5')
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={'predictions': [model_result]})
+        )) as client:
+            monkeypatch.setattr(backend, 'client', client)
+            return await backend.forecast(forecast_point, [row(0)], 'live')
+    result = asyncio.run(run())
+    for key, value in model_result.items():
+        assert result[key] == value
+    assert result['current_deviation_s'] == 1800

@@ -4,9 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
-  <!-- prototype-5 compatibility marker; cache-busted assets are prototype-6. -->
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-6">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=trip-status-8">
 </head>
 <body>
   <header class="topbar">
@@ -19,13 +18,13 @@
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1><p class="intro-note"><b>Как читать прогноз:</b> «сейчас» — отклонение позиции от планового сегмента, а «прогноз» — ожидаемое отклонение на контрольной точке через 10–15 минут. Это разные моменты одной линии, поэтому числа могут отличаться.</p></div>
+      <div><p class="eyebrow">ДИСПЕТЧЕРСКАЯ</p><h1>Контроль рейсов</h1></div>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
-      <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя позиция по каждому ТС</small></article>
-      <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск</small></article>
-      <article><span>LIVE-ПРОГНОЗЫ</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание свежих данных</small></article>
+      <article><span>ТС на маршруте</span><b id="kpi-total">—</b></article>
+      <article><span>Требуют внимания</span><b id="kpi-attention">—</b></article>
+      <article><span>Актуальные прогнозы</span><b id="kpi-predictions">—</b></article>
     </section>
 
     <section class="main-grid">
@@ -79,7 +78,7 @@
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=prototype-6"></script>
-  <script src="/static/dispatcher.js?v=prototype-6"></script>
+  <script src="/static/map.js?v=trip-status-8"></script>
+  <script src="/static/dispatcher.js?v=trip-status-8"></script>
 </body>
 </html>

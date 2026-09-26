@@ -109,7 +109,7 @@ def test_dispatcher_uses_a_keyless_basemap_and_vehicle_terms():
     page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
     assert 'tile.openstreetmap.org' in config
     assert 'cartocdn.com' not in config
-    assert 'ТС В КАРТИНЕ' in page
+    assert '<span>ТС на маршруте</span>' in page
     assert 'КАРТА ТС' in page
     assert 'ВСЕ ТС' in page
 
@@ -135,20 +135,20 @@ def test_vehicle_detail_identifies_the_position_source():
     source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
     assert 'ИСТОЧНИК ПОЗИЦИИ' in source
     assert 'Архивная телеметрия' in source
-    assert 'Live NDTP' in source
+    assert 'Оригинальный эмулятор' in source
 
 
 def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
     source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
-    assert 'ПРОГНОЗ T+10–15' in page
-    assert 'Как читать прогноз' in page
-    assert 'Архивный fallback' in source
+    assert 'Контроль рейсов' in page
+    assert 'Как читать прогноз' not in page
+    assert 'Прогноз: архивный V5' in source
     assert '/docs' in page
     assert 'github.com/SamaraLfe/MtHackaton' in page
     assert 'late_probability' in source
     assert 'reason_is_hypothesis' in source
-    assert 'prototype-5' in page
+    assert 'trip-status-8' in page
     assert '/code' in page
 
 
