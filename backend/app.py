@@ -18,6 +18,19 @@ ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
 LIVE_TRACK_TTL_S=int(os.getenv('LIVE_TRACK_TTL_S','3600'))
+LIVE_STALE_S = int(
+    os.getenv(
+        'LIVE_STALE_S',
+        '15'
+    )
+)
+
+LIVE_FALLBACK_S = int(
+    os.getenv(
+        'LIVE_FALLBACK_S',
+        '60'
+    )
+)
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
 deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
@@ -594,42 +607,254 @@ async def replay():
         state['clock']=timestamp(p['T']).isoformat();state['index']+=1
         return {'done':False,'prediction':result,**state}
 
-@app.get('/api/state',**operation('state'))
-async def get_state(dispatcher_id:str|None=None):
-    now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
-    merged = {} if state['mode'] == 'live' else {
-        tr: dict(vehicle)
-        for tr, vehicle in archive_vehicles.items()
-    }
-    for tr,live in vehicles.items():
-        if tr in merged and live.get('source')=='live' and time.time()-float(live.get('position_time',0))>LIVE_TRACK_TTL_S:
+@app.get('/api/state', **operation('state'))
+async def get_state(
+    dispatcher_id: str | None = None
+):
+
+    merged = {}
+
+    # -------------------------------------------------
+    # REPLAY
+    # -------------------------------------------------
+
+    if state['mode'] == 'replay':
+        merged = {
+            tr: dict(vehicle)
+            for tr, vehicle
+            in archive_vehicles.items()
+        }
+
+    # -------------------------------------------------
+    # LIVE:
+    # сначала готовим historical fallback
+    # -------------------------------------------------
+
+    else:
+        for tr, archived in archive_vehicles.items():
+            fallback = dict(archived)
+
+            # Сохраняем архивный прогноз отдельно.
+            # Его нельзя выдавать за текущий live-прогноз.
+            fallback['historical_prediction_s'] = (
+                fallback.get(
+                    'prediction_s'
+                )
+            )
+
+            fallback['historical_level'] = (
+                fallback.get(
+                    'level'
+                )
+            )
+
+            fallback['historical_source'] = (
+                fallback.get(
+                    'source'
+                )
+            )
+
+            fallback['source'] = (
+                'historical_fallback'
+            )
+
+            fallback['connection_state'] = (
+                'historical'
+            )
+
+            fallback['prediction_s'] = None
+            fallback['late_probability'] = None
+
+            fallback['level'] = 'unknown'
+            fallback['stale'] = True
+            fallback['degraded'] = True
+
+            fallback['reason'] = (
+                'Нет свежей NDTP-телеметрии; '
+                'показано историческое состояние'
+            )
+
+            merged[tr] = fallback
+
+    # -------------------------------------------------
+    # Накладываем LIVE
+    # -------------------------------------------------
+
+    for tr, live in vehicles.items():
+        item = dict(live)
+
+        position_time = float(
+            item.get(
+                'position_time',
+                0
+            )
+            or 0
+        )
+
+        age = (
+            time.time() -
+            position_time
+            if position_time
+            else float('inf')
+        )
+
+        item['telemetry_age_s'] = (
+            round(
+                max(
+                    0,
+                    age
+                ),
+                1
+            )
+            if math.isfinite(age)
+            else None
+        )
+
+        # В replay просто используем
+        # состояние replay.
+        if state['mode'] != 'live':
+            merged[tr] = item
             continue
-        if tr in merged and live.get('source')=='live' and live.get('prediction_s') is None:
-            # Keep an archived forecast internally coherent when live telemetry
-            # has no valid current 10–15 minute target. Live coordinates are an
-            # overlay, not permission to pair today's timestamp with January's
-            # archived target stop and prediction.
-            position={key:live[key] for key in ('lon','lat','position_time') if key in live}
-            merged[tr].update(position)
-            merged[tr]['live_position']=True
-            merged[tr]['live_position_time']=live.get('T')
-            merged[tr]['live_status']=live.get('reason')
-            merged[tr]['telemetry_source']=live.get('telemetry_source','unknown')
-        else:merged[tr]=dict(live)
-    output=[]
-    for original in sorted(merged.values(),key=lambda item:(not item.get('live_position',False),int(item['tr_id']))):
-        v=dict(original)
-        track=live_track(int(v['tr_id']))
-        if track:v['live_track']=track
-        if v.get('source') not in {'historical_archive','historical_v5'} and now-epoch(v['T'])>120:
-            v.update(stale=True,level='unknown',reason='Прогноз устарел; ожидается новая телеметрия')
-        output.append(v)
+
+        # ---------------------------------------------
+        # 1. Свежий LIVE
+        # ---------------------------------------------
+
+        if age <= LIVE_STALE_S:
+            item['connection_state'] = (
+                'live'
+            )
+
+            merged[tr] = item
+            continue
+
+        # ---------------------------------------------
+        # 2. Связь недавно пропала:
+        #    последнее известное состояние
+        # ---------------------------------------------
+
+        if age <= LIVE_FALLBACK_S:
+            item['source'] = (
+                'last_known_live'
+            )
+
+            item['connection_state'] = (
+                'stale'
+            )
+
+            item['stale'] = True
+            item['degraded'] = True
+
+            item['prediction_s'] = None
+            item['late_probability'] = None
+
+            item['level'] = 'unknown'
+
+            item['reason'] = (
+                'Связь с ТС временно потеряна; '
+                'показано последнее известное '
+                'положение'
+            )
+
+            merged[tr] = item
+            continue
+
+        # ---------------------------------------------
+        # 3. LIVE давно нет.
+        #
+        # Если есть исторический fallback —
+        # оставляем его.
+        #
+        # Если архивного состояния нет вообще —
+        # оставляем последнее live-состояние,
+        # но явно как устаревшее.
+        # ---------------------------------------------
+
+        if tr not in merged:
+            item['source'] = (
+                'last_known_live'
+            )
+
+            item['connection_state'] = (
+                'offline'
+            )
+
+            item['stale'] = True
+            item['degraded'] = True
+
+            item['prediction_s'] = None
+            item['late_probability'] = None
+
+            item['level'] = 'unknown'
+
+            item['reason'] = (
+                'Нет связи с ТС; '
+                'показано последнее известное '
+                'состояние'
+            )
+
+            merged[tr] = item
+
+    # -------------------------------------------------
+    # Добавляем трек и формируем ответ
+    # -------------------------------------------------
+
+    output = []
+
+    for original in sorted(
+        merged.values(),
+        key=lambda item: int(
+            item['tr_id']
+        )
+    ):
+        vehicle = dict(original)
+
+        track = live_track(
+            int(
+                vehicle['tr_id']
+            )
+        )
+
+        if track:
+            vehicle['live_track'] = track
+
+        output.append(vehicle)
+
+    # -------------------------------------------------
+    # Ограничение по диспетчеру
+    # -------------------------------------------------
+
     if dispatcher_id:
-        profile=get_dispatcher(dispatcher_id)
-        if profile is None:raise HTTPException(404,'Dispatcher not found')
-        assigned=set(profile['assigned_tr_ids'])
-        output=[item for item in output if int(item['tr_id']) in assigned]
-    return {'vehicles':output,'state':state,'counters':dict(counters),'total_points':len(points),'dispatcher_id':dispatcher_id}
+        profile = get_dispatcher(
+            dispatcher_id
+        )
+
+        if profile is None:
+            raise HTTPException(
+                404,
+                'Dispatcher not found'
+            )
+
+        assigned = set(
+            profile[
+                'assigned_tr_ids'
+            ]
+        )
+
+        output = [
+            item
+            for item in output
+            if int(item['tr_id'])
+            in assigned
+        ]
+
+    return {
+        'vehicles': output,
+        'state': state,
+        'counters': dict(counters),
+        'total_points': len(points),
+        'dispatcher_id': dispatcher_id,
+    }
 
 @app.get('/api/incidents',**operation('incidents'))
 async def get_incidents():
