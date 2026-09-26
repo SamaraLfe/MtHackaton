@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ТАКТ · Рабочее место диспетчера</title>
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-6">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span>Т</span><b>ТАКТ</b><small>ДИСПЕТЧЕРСКАЯ</small></a>
+    <div class="shift"><span class="shift-dot" id="stream-dot"></span><div><b id="stream-title">Подключение к потоку</b><small id="archive-time">Проверка источника</small></div></div>
+    <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" title="Описание полей, источников и API">Описание API</a><a href="/code/" title="Сгенерированная документация по коду">Документация кода</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
+    <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ДИСПЕТЧЕР</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
+  </header>
+
+  <main class="page">
+    <section class="intro">
+      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1></div>
+    </section>
+
+    <section class="kpis" aria-label="Ключевые показатели">
+      <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя позиция по каждому ТС</small></article>
+      <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск</small></article>
+      <article><span>LIVE-ПРОГНОЗЫ</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание свежих данных</small></article>
+    </section>
+
+    <section class="main-grid">
+      <article class="card map-card">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">КАРТА ТС</p>
+            <h2>Транспорт</h2>
+          </div>
+
+          <div class="map-actions">
+            <button class="fit-map is-hidden" id="map-follow" type="button">
+              Следить за ТС
+            </button>
+
+            <button class="fit-map" id="map-fit" type="button">
+              Показать все
+            </button>
+          </div>
+        </div>
+        <div class="map-wrap"><div id="map" aria-label="Карта рейсов"></div><div class="map-legend"><span><i class="low"></i>В графике</span><span><i class="medium"></i>Нужно проверить</span><span><i class="high"></i>Риск опоздания</span></div></div>
+      </article>
+      <article class="card attention-card">
+        <div class="card-head">
+          <div>
+            <p class="eyebrow">ОЧЕРЕДЬ ВНИМАНИЯ</p>
+            <h2>Требуют проверки</h2>
+          </div>
+        </div>
+        <div id="attention-list" class="attention-list"></div>
+      </article>
+    </section>
+
+    <section class="reserve-card card is-hidden" id="reserve-card" aria-labelledby="reserve-title">
+      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Резерв получает выбранную линию и ставится в хвост текущего интервала. Он едет по плановой траектории в сценарии; live-расписание не меняется.</p></div>
+      <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><span class="reserve-mode">Сценарий: +1 ТС на выбранной плановой траектории</span><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
+      <div class="reserve-result" id="reserve-result" aria-live="polite"><span>Выберите линию: резерв будет показан на её маршруте и в таблице.</span></div>
+    </section>
+
+    <section class="card fleet-card">
+      <div class="card-head"><div><p class="eyebrow">ВСЕ ТС</p><h2>Транспорт</h2></div><label class="search">Поиск по ТС <input id="search" placeholder="Например, 131672" inputmode="numeric"></label></div>
+      <div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ОТКЛОНЕНИЕ</th><th>СЛЕДУЮЩАЯ КОНТРОЛЬНАЯ ТОЧКА</th><th>ЧТО НУЖНО СДЕЛАТЬ</th></tr></thead><tbody id="fleet-rows"></tbody></table></div>
+    </section>
+  </main>
+
+  <div class="drawer" id="drawer" aria-hidden="true"><div class="drawer-overlay" data-close-drawer></div><aside class="drawer-panel"><button class="close" data-close-drawer type="button" aria-label="Закрыть">×</button><div id="vehicle-detail"></div></aside></div>
+
+  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ЛИЧНЫЙ ПРОФИЛЬ</p><h2>Рабочее место диспетчера</h2><p>Профиль подписывает указания в журнале текущей смены.</p></div><button value="cancel" class="close" type="button" id="profile-close">×</button></div><label class="profile-select">Диспетчер<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" value="cancel">Отмена</button><button class="primary" id="profile-save" value="default">Открыть рабочее место</button></div><p class="dialog-note">Локальный MVP использует профиль смены, а не защищённую учётную запись. Для промышленного доступа необходимы SSO/JWT и права из серверной сессии.</p></form></dialog>
+
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/map-config.js"></script>
+  <script src="/static/map.js?v=prototype-6"></script>
+  <script src="/static/dispatcher.js?v=prototype-6"></script>
+</body>
+</html>
