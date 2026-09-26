@@ -15,7 +15,6 @@ Compose-конфигурацию, локальные скрипты, integration
 | `scripts/run_local.py` | запуск ML на 8001 и backend на 8000 |
 | `scripts/verify_running.py` | smoke-проверка работающего контура |
 | `scripts/extract_data.py` | безопасное извлечение только CSV/Markdown из архива |
-| `start-local.ps1` | Windows-обёртка локального запуска |
 | `tests/test_api.py` | проверки API, what-if, профилей и UI-контрактов |
 | `tests/test_core.py` | причинность признаков, NDTP, CRC и временная логика |
 | `tests/test_trip_status.py` | жизненный цикл рейса и критическая потеря live-связи |
