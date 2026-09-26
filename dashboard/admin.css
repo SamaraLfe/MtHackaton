@@ -53,6 +53,9 @@ button:disabled { cursor: wait; opacity: .55; }
 .account { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; }
 .account b, .account small { display: block; }
 .account small { margin-top: 3px; color: var(--muted); font-size: 11px; }
+.account-actions { display: flex; align-items: center; gap: 10px; }
+.danger-link { border: 0; background: transparent; color: var(--red); padding: 4px 0; font-size: 11px; }
+.danger-link:hover { background: transparent; text-decoration: underline; filter: none; }
 .assignment-toolbar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .assignment-toolbar h3 { margin-bottom: 4px; }
 .routes { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; max-height: 330px; overflow: auto; border: 1px solid var(--line); border-radius: 9px; padding: 9px; }

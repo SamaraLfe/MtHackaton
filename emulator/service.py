@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import csv
 import logging
 import math
@@ -254,6 +255,14 @@ def load_vehicles(
                     stops
                 )
             ],
+            # Relative plan timestamps let the custom source follow the same
+            # ordered stop sequence that the backend uses for matching.  The
+            # old constant-speed walk crossed a full day's stops in minutes,
+            # which made a live position look tens of minutes early.
+            "timings": [
+                seconds
+                for seconds, _ in _relative_route_timing(stops)
+            ],
         }
         for tr_id, stops
         in sorted(
@@ -264,6 +273,32 @@ def load_vehicles(
             and len(stops) >= 2
         )
     ]
+
+
+def _relative_route_timing(
+    stops: list[tuple[str, tuple[float, float]]],
+) -> list[tuple[float, tuple[float, float]]]:
+    """Return monotonic seconds from the first scheduled stop."""
+    if not stops:
+        return []
+    parsed = []
+    for value, point in sorted(stops):
+        try:
+            parsed.append((datetime.fromisoformat(value).replace(tzinfo=None), point))
+        except ValueError:
+            # The dataset is controlled, but retaining a monotonic fallback
+            # keeps the emulator useful with a reduced fixture.
+            parsed.append((None, point))
+    first = next((value for value, _ in parsed if value is not None), None)
+    if first is None:
+        return [(float(index * 60), point) for index, (_, point) in enumerate(parsed)]
+    result = []
+    previous = 0.0
+    for value, point in parsed:
+        seconds = previous if value is None else max(0.0, (value - first).total_seconds())
+        previous = max(previous, seconds)
+        result.append((previous, point))
+    return result
 
 
 def haversine_m(
@@ -321,16 +356,27 @@ def initial_vehicle_state(
         vehicle["path"][0]
     )
 
+    timings = vehicle.get("timings") or []
+    if len(timings) >= 2:
+        first_gap = max(1.0, timings[1] - timings[0])
+        first_distance = haversine_m(*vehicle["path"][0], *vehicle["path"][1])
+        planned_speed = first_distance / first_gap * 3.6
+        # A small deterministic pace difference creates a meaningful signed
+        # deviation without detaching the vehicle from its planned trajectory.
+        pace_factor = 0.94 + (vehicle["base_tr_id"] % 9) * 0.015
+        initial_speed = min(130.0, max(1.0, planned_speed * pace_factor))
+    else:
+        pace_factor = 1.0
+        initial_speed = float(22 + vehicle["tr_id"] % 13)
+
     return {
         "segment_index": 0,
         "segment_progress_m": 0.0,
         "lon": lon,
         "lat": lat,
-        "speed_kmh": float(
-            22
-            + vehicle["tr_id"]
-            % 13
-        ),
+        "speed_kmh": initial_speed,
+        "elapsed_route_s": 0.0,
+        "pace_factor": pace_factor,
     }
 
 
@@ -345,6 +391,35 @@ def advance_vehicle(
     int,
 ]:
     path = vehicle["path"]
+
+    timings = vehicle.get("timings") or []
+    if len(timings) == len(path) and len(path) >= 2:
+        # Follow the planned stop clock instead of traversing the entire day
+        # at a fixed road speed.  This is still a synthetic source, but its
+        # points now stay on the same segment the backend forecasts.
+        state["elapsed_route_s"] += elapsed_s * state.get("pace_factor", 1.0)
+        route_duration = max(1.0, timings[-1])
+        if state["elapsed_route_s"] > route_duration:
+            state["elapsed_route_s"] %= route_duration
+        elapsed = state["elapsed_route_s"]
+        index = max(0, min(len(path) - 2, bisect.bisect_right(timings, elapsed) - 1))
+        while index < len(path) - 2 and timings[index + 1] <= timings[index]:
+            index += 1
+        start_time = timings[index]
+        end_time = max(start_time + 1.0, timings[index + 1])
+        fraction = min(1.0, max(0.0, (elapsed - start_time) / (end_time - start_time)))
+        start, end = path[index], path[index + 1]
+        state["segment_index"] = index
+        state["segment_progress_m"] = haversine_m(*start, *end) * fraction
+        state["lon"] = start[0] + (end[0] - start[0]) * fraction
+        state["lat"] = start[1] + (end[1] - start[1]) * fraction
+        planned_speed = haversine_m(*start, *end) / (end_time - start_time) * 3.6
+        # Nav00 speed is decoded into the backend's 0..130 km/h telemetry
+        # contract. A few plan rows contain unrealistically short gaps; keep
+        # those synthetic packets valid while preserving the route geometry.
+        target_speed = min(130.0, max(1.0, planned_speed * state.get("pace_factor", 1.0)))
+        state["speed_kmh"] += max(-1.5, min(1.5, target_speed - state["speed_kmh"]))
+        return state["lon"], state["lat"], round(state["speed_kmh"])
 
     target_speed = (
         24

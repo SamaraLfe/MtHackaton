@@ -1197,6 +1197,13 @@ body.drawer-open .topbar {
   font-size: 12px;
 }
 
+.detail-grid .stop-time {
+  margin-top: 5px;
+  font-size: 11px;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
 
 /* ---------------------------------------------------------
    PREDICTION PANEL
@@ -1263,6 +1270,13 @@ body.drawer-open .topbar {
   color: #435665;
 
   font-size: 12px;
+}
+
+.interpretation-note {
+  margin: 10px 0 0;
+  color: #536875;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .action-section {

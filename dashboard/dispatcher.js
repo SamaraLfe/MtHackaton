@@ -4,6 +4,7 @@
   const $ = id => document.getElementById(id);
 
   const PROFILE_KEY = 'takt-dispatcher-profile';
+  const PREVIOUS_PROFILE_KEY = 'takt-dispatcher-previous-profile';
   const AUTH_KEY = 'takt-dispatcher-auth';
 
   const labels = {
@@ -26,6 +27,7 @@
 
   let vehicles = [];
   let baseVehicles = [];
+  let archivedVehicles = [];
   let paths = [];
 
   let selectedId = null;
@@ -131,6 +133,13 @@
       );
     }
 
+    if (vehicle.source === 'waiting_for_live') {
+      const label = vehicle.telemetry_source === 'custom_ndtp_nav00'
+        ? 'custom-emulator'
+        : 'Оригинальный NDTP';
+      return `${label} настроен, но первый пакет ещё не пришёл; точка на карте — начало плановой траектории, прогноз не рассчитывается.`;
+    }
+
     const source =
       vehicle.telemetry_source === 'custom_ndtp_nav00'
         ? 'custom-emulator → NDTP Nav00 → CRC → backend'
@@ -139,10 +148,13 @@
         : vehicle.telemetry_source === 'http_json'
           ? 'HTTP JSON → backend'
           : 'живая телеметрия → backend';
+    const positionNote = vehicle.position_adjusted
+      ? ' Позиция оригинального NDTP приведена к плановой траектории: внешний образ генерирует синтетический GPS без маршрута, исходная точка сохраняется как raw для аудита и не используется для карты.'
+      : '';
 
     if (vehicle.live_position) {
       return (
-        `Свежая позиция: ${source} ` +
+        `Свежая позиция: ${source}${positionNote} ` +
         `(${time(vehicle.live_position_time)}). ` +
         'Прогноз отдельно взят из архивного V5 fallback.'
       );
@@ -150,7 +162,7 @@
 
     if (vehicle.source === 'live') {
       return (
-        `${source} → расписание → ` +
+        `${source}${positionNote} → расписание → ` +
         '102 causal-признака → V5.'
       );
     }
@@ -286,6 +298,19 @@
       profileId = '';
     }
 
+    // Администратор не остаётся в рабочем диспетчерском контуре. После
+    // возврата со страницы админки восстанавливаем последнее рабочее место.
+    const storedProfile = profiles.find(profile => profile.id === profileId);
+    if (storedProfile?.role === 'Администратор') {
+      const previous = localStorage.getItem(PREVIOUS_PROFILE_KEY);
+      if (profiles.some(profile => profile.id === previous && profile.role !== 'Администратор')) {
+        profileId = previous;
+        localStorage.setItem(PROFILE_KEY, profileId);
+      } else {
+        profileId = '';
+      }
+    }
+
     if (profileId) updateProfile();
   }
 
@@ -293,13 +318,15 @@
     const box = $('source-status');
     if (!box) return;
     try {
-      const data = await api('/api/admin/emulators');
-      const isAdmin = currentProfile()?.role === 'Администратор';
+      const [data, runtime] = await Promise.all([api('/api/admin/emulators'), api('/api/state')]);
+      const archiveView = runtime.state?.mode !== 'live';
+      const canControl = Boolean(currentProfile()?.id);
+      const sourceStatus = status => ({running: 'Работает', paused: 'Пауза', unavailable: 'Недоступен', not_configured: 'Не настроен'}[status] || status || 'Неизвестно');
       box.innerHTML = (data.sources || []).map(source => `
         <div class="source-status-row">
-          <span><b>${esc(source.label)}</b><small>${source.id === 'custom-emulator' ? 'Собственная NDTP Nav00' : 'Оригинальный NDTP-образ'}</small></span>
-          <strong class="tag ${source.status === 'running' ? 'low' : source.status === 'paused' ? 'medium' : 'unknown'}">${esc(source.status)}</strong>
-          ${isAdmin ? '<span class="source-actions"><button type="button" data-source-id="' + esc(source.id) + '" data-source-action="pause">Пауза</button><button type="button" data-source-id="' + esc(source.id) + '" data-source-action="resume">Пуск</button></span>' : ''}
+          <span><b>${esc(source.label)}${archiveView ? ' (архив)' : ''}</b><small>${archiveView ? 'Источник не участвует в архивном отображении' : source.id === 'custom-emulator' ? 'Собственная NDTP Nav00' : 'Оригинальный NDTP-образ'}</small></span>
+          <strong class="tag ${source.status === 'running' ? 'low' : source.status === 'paused' ? 'medium' : 'unknown'}">${esc(sourceStatus(source.status))}</strong>
+          ${canControl ? '<span class="source-actions"><button type="button" data-source-id="' + esc(source.id) + '" data-source-action="pause">Остановить поток</button><button type="button" data-source-id="' + esc(source.id) + '" data-source-action="resume">Запустить поток</button></span>' : ''}
         </div>`).join('') || '<p>Нет доступных источников.</p>';
       box.querySelectorAll('[data-source-action]').forEach(button => {
         button.addEventListener('click', () => controlSource(button.dataset.sourceId, button.dataset.sourceAction));
@@ -311,9 +338,9 @@
 
   async function controlSources(action) {
     const profile = currentProfile();
-    if (profile?.role !== 'Администратор') {
+    if (!profile?.id) {
       const box = $('source-status');
-      if (box) box.textContent = 'Управление источниками доступно только профилю «Администратор».';
+      if (box) box.textContent = 'Сначала выберите рабочий профиль.';
       return;
     }
     const operator = profile.id;
@@ -332,9 +359,9 @@
 
   async function controlSource(sourceId, action) {
     const profile = currentProfile();
-    if (profile?.role !== 'Администратор') {
+    if (!profile?.id) {
       const box = $('source-status');
-      if (box) box.textContent = 'Управление источниками доступно только профилю «Администратор».';
+      if (box) box.textContent = 'Сначала выберите рабочий профиль.';
       return;
     }
     const operator = profile.id;
@@ -395,6 +422,7 @@
             `<option value="${vehicle.tr_id}">
               ТС ${vehicle.tr_id} ·
               ${esc(
+                vehicle.position_match?.next_stop_address ||
                 vehicle.stop_address ||
                 'линия'
               )}
@@ -420,6 +448,7 @@
   function scenarioVehicle(
     route,
     projected,
+    placement,
     reason,
     headway
   ) {
@@ -431,8 +460,8 @@
     // The reserve is placed on the selected vehicle's current position so it
     // remains on the same planned line instead of appearing as an arbitrary
     // offset marker beside the map geometry.
-    const lon = Number(route.position_match?.projected_lon ?? route.lon);
-    const lat = Number(route.position_match?.projected_lat ?? route.lat);
+    const lon = Number(placement?.lon ?? route.position_match?.projected_lon ?? route.lon);
+    const lat = Number(placement?.lat ?? route.position_match?.projected_lat ?? route.lat);
 
     return {
       ...route,
@@ -454,21 +483,19 @@
           ?.projected_late_probability ??
         null,
 
+      // What-if uses the backend's bounded placement estimate; a risk
+      // probability delta must not be presented as seconds of delay.
       prediction_s:
-        projected
-          ?.max_late_probability != null &&
-        projected
-          ?.projected_late_probability != null
-          ? Math.round(
-              (
-                projected
-                  .projected_late_probability -
-                projected
-                  .max_late_probability
-              ) *
-              180
-            )
-          : 0,
+        placement?.after_prediction_s ??
+        route.prediction_s ??
+        null,
+
+      current_deviation_s:
+        placement?.after_current_deviation_s ??
+        route.current_deviation_s ??
+        null,
+
+      deviation_estimated: true,
 
       recommendation:
         'Резервное ТС · what-if',
@@ -482,20 +509,12 @@
       lon,
       lat,
 
-      live_track: [
-        {
-          lon,
-          lat,
-          simulated: true
-        },
-        {
-          lon,
-          lat,
-          simulated: true
-        }
-      ],
+      live_track: placement?.track || [{lon, lat, simulated: true}],
+
+      scenario_placement: placement,
 
       stop_address:
+        placement?.target_stop_address ||
         route.stop_address ||
         'Линия'
     };
@@ -549,6 +568,7 @@
             },
 
             body: JSON.stringify({
+              tr_id: routeId,
               extra_vehicles: 1,
               headway_reduction_pct:
                 headway
@@ -617,6 +637,7 @@
           scenarioVehicle(
             route,
             projected,
+            data.placement,
             reason,
             headway
           )
@@ -644,12 +665,13 @@
             )}%`
           : 'риск не рассчитан';
 
+      const placement = data.placement || {};
       result.innerHTML =
-        `<b>Резерв добавлен на карту</b>
+        `<b>Резерв размещён на плановом сегменте</b>
          <span>
-           Линия ТС ${routeId}:
-           риск ${change}.
-           Пунктир — его плановый участок.
+           Основное ТС ${routeId}: риск ${change}; прогноз ${delay(placement.before_prediction_s)} → ${delay(placement.after_prediction_s)}.
+           Следующая точка: ${esc(placement.next_stop_address || 'не определена')}.
+           Пунктир показывает путь резерва до цели.
          </span>
          <button
            type="button"
@@ -800,13 +822,15 @@
               ? 'NDTP-поток активен'
               : 'Ожидание NDTP-потока'
           )
-        : 'Исторический replay';
+        : 'Исторический replay (архив)';
+    $('source-control-open').textContent = live ? 'Источники данных · live' : 'Источники данных · архив';
 
     $('archive-time').textContent =
       live
         ? (
             `${counters.ndtp_packets || 0} пакетов · ` +
-            `${liveForecasts} live-прогнозов`
+            `${liveForecasts} live-прогнозов` +
+            (archivedVehicles.length ? ` · ${archivedVehicles.length} архивных без live скрыто` : '')
           )
         : (
             baseVehicles[0]?.T
@@ -902,8 +926,8 @@
 
                     <small>
                       ${esc(
-                        vehicle
-                          .stop_address
+                        vehicle.position_match?.next_stop_address ||
+                        vehicle.stop_address
                       )}
                     </small>
                   </span>
@@ -1413,6 +1437,12 @@
           )}
         </p>
 
+        <p class="interpretation-note">
+          «Сейчас» и прогноз относятся к разным моментам: текущее отклонение
+          считается по позиции на сегменте, прогноз — к этой точке через
+          10–15 минут.
+        </p>
+
       </section>
 
 
@@ -1442,6 +1472,9 @@
               '—'
             )}
           </b>
+          <small class="stop-time">
+            расчётное прохождение: ${time(vehicle.previous_stop_time)}
+          </small>
         </div>
 
 
@@ -1457,6 +1490,9 @@
               '—'
             )}
           </b>
+          <small class="stop-time">
+            расчётное прибытие: ${time(vehicle.next_stop_time)}
+          </small>
         </div>
 
 
@@ -1467,12 +1503,13 @@
 
           <b>
             ${esc(
-              vehicle
-                .previous_stop ||
+              vehicle.position_match?.segment_start_stop_address ||
+              vehicle.previous_stop ||
               '—'
             )}
             →
             ${esc(
+              vehicle.position_match?.next_stop_address ||
               vehicle.next_stop ||
               vehicle.stop_address ||
               '—'
@@ -1558,7 +1595,7 @@
 
         <p>
           <b>
-            Наблюдаемый сигнал:
+            Сигнал для проверки:
           </b>
 
           ${esc(
@@ -1566,16 +1603,7 @@
             'Нет дополнительного сигнала'
           )}
 
-          ${
-            vehicle.reason_is_hypothesis !== false
-              ? (
-                  '<span class="hypothesis">' +
-                  'Рабочая гипотеза, ' +
-                  'не подтверждённая причина.' +
-                  '</span>'
-                )
-              : ''
-          }
+          <span class="hypothesis">${esc(vehicle.reason_explanation || (vehicle.reason_is_hypothesis ? 'Это не установленная причина: V5 видит устойчивый паттерн в телеметрии, но подтверждающих событий (например, причина простоя или команда водителя) в прототипе нет.' : 'Сигнал подтверждён потоком данных.'))}</span>
         </p>
 
         <p>
@@ -1944,8 +1972,14 @@
           api('/api/network')
         ]);
 
-      baseVehicles =
-        state.vehicles || [];
+      const allVehicles = state.vehicles || [];
+      const liveMode = state.state?.mode === 'live';
+      archivedVehicles = liveMode
+        ? allVehicles.filter(vehicle => vehicle.source === 'historical_fallback' || vehicle.connection_state === 'historical')
+        : [];
+      baseVehicles = liveMode
+        ? allVehicles.filter(vehicle => !archivedVehicles.includes(vehicle))
+        : allVehicles;
 
       vehicles =
         reserveScenario
@@ -2060,8 +2094,12 @@
     event => {
       event.preventDefault();
 
-      profileId =
-        $('profile-select').value;
+      const selectedProfile = profiles.find(profile => profile.id === $('profile-select').value);
+      if (selectedProfile?.role === 'Администратор') {
+        const previous = profiles.find(profile => profile.id === profileId && profile.role !== 'Администратор');
+        if (previous) localStorage.setItem(PREVIOUS_PROFILE_KEY, previous.id);
+      }
+      profileId = $('profile-select').value;
 
       updateProfile();
       sessionStorage.setItem(AUTH_KEY, '1');

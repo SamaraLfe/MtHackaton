@@ -29,7 +29,7 @@
         <span class="tag" id="emulator-overall">Проверка…</span>
       </div>
       <p class="muted">Пауза останавливает новые события, но не удаляет историю. Каждый поток можно остановить отдельно или одновременно.</p>
-      <div class="actions"><button id="pause-all">Пауза всех потоков</button><button class="secondary" id="resume-all">Возобновить все</button><button class="secondary" id="refresh">Обновить статус</button></div>
+      <div class="actions"><button type="button" id="pause-all">Пауза всех потоков</button><button type="button" class="secondary" id="resume-all">Возобновить все</button><button type="button" class="secondary" id="refresh">Обновить статус</button></div>
       <div id="emulator-sources" class="emulator-sources"></div>
       <p class="notice" id="emulator-notice" aria-live="polite"></p>
     </section>
@@ -43,7 +43,7 @@
           <label>Логин<input id="new-login" placeholder="anna-petrova"></label>
         </div>
         <label>Роль<select id="new-role"><option>Маршрутный диспетчер</option><option>Старший диспетчер</option></select></label>
-        <div class="actions"><button id="create-dispatcher">Создать кабинет</button></div>
+        <div class="actions"><button type="button" id="create-dispatcher">Создать кабинет</button></div>
         <p class="notice" id="account-notice" aria-live="polite"></p>
         <div id="accounts" class="accounts"></div>
       </section>
@@ -51,11 +51,13 @@
       <section class="card">
         <div class="card-head"><div><p class="eyebrow">ДОСТУП К ТС</p><h2>Закрепление рейсов</h2></div></div>
         <p class="muted">Изменения применяются после сохранения. Выбранный диспетчер видит только свои ТС.</p>
-        <label>Диспетчер<select id="assignment-dispatcher"></select></label>
-        <div class="assignment-toolbar"><h3>Транспорт линии</h3><span id="assignment-count" class="muted"></span></div>
-        <div id="route-list" class="routes"></div>
-        <div class="actions"><button id="save-assignment">Сохранить назначения</button></div>
-        <p class="notice" id="assignment-notice" aria-live="polite"></p>
+        <form id="assignment-form">
+          <label>Диспетчер<select id="assignment-dispatcher"></select></label>
+          <div class="assignment-toolbar"><h3>Транспорт линии</h3><span id="assignment-count" class="muted"></span></div>
+          <div id="route-list" class="routes"></div>
+          <div class="actions"><button type="submit" id="save-assignment">Сохранить назначения</button></div>
+          <p class="notice" id="assignment-notice" aria-live="polite"></p>
+        </form>
       </section>
     </div>
 

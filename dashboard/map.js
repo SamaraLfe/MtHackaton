@@ -284,6 +284,16 @@
               'Сценарий'
             )}
           </dd>
+
+          <dt>
+            Путь резерва
+          </dt>
+
+          <dd>
+            ${escape(vehicle.scenario_placement?.start_stop_address || 'Текущая позиция')}
+            →
+            ${escape(vehicle.scenario_placement?.target_stop_address || vehicle.stop_address || 'целевая остановка')}
+          </dd>
         </dl>
 
         <p class="popup-caution">
@@ -1403,6 +1413,10 @@
           )
           .addTo(map);
 
+        marker.options.hasLivePosition =
+          vehicle.source === 'live' ||
+          vehicle.live_position;
+
 
         marker.bindPopup(
           content(vehicle),
@@ -1475,10 +1489,18 @@
           position.lat !== lat ||
           position.lng !== lon
         ) {
+          const isLivePosition =
+            vehicle.source === 'live' ||
+            vehicle.live_position;
+          // A waiting_for_live row is deliberately drawn at the first
+          // planned stop so the fleet count stays honest.  The first real
+          // packet can be anywhere further along that route; animating from
+          // the placeholder would look like a teleport across the map.
+          // Start the marker at the first live coordinate, then animate only
+          // between two consecutive live observations.
           if (
-            vehicle.source ===
-              'live' ||
-            vehicle.live_position
+            isLivePosition &&
+            marker.options.hasLivePosition
           ) {
             animateMarker(
               marker,
@@ -1494,6 +1516,11 @@
               ]
             );
           }
+          marker.options.hasLivePosition = isLivePosition;
+        }
+
+        if (vehicle.source === 'live' || vehicle.live_position) {
+          marker.options.hasLivePosition = true;
         }
 
 
