@@ -1629,6 +1629,9 @@ def build_v5_row(point, history, schedule):
     points["target_time_begin"] = pd.to_datetime(points["target_time_begin"], utc=True)
     points["tr_id"] = points["tr_id"].astype(str)
     points["target_stop_id"] = points["target_stop_id"].astype(str)
+    horizon=(points["target_time_begin"]-points["T"]).dt.total_seconds().iloc[0]
+    if not 600 < float(horizon) <= 900:
+        raise ValueError("Целевая остановка должна находиться в окне (T+10, T+15] минут")
     traffic = pd.DataFrame(history).copy()
     if traffic.empty:
         traffic = pd.DataFrame(columns=["tr_id","event_time","location_valid","lat","lon","alt","speed","heading"])

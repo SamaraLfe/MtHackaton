@@ -1,5 +1,6 @@
 {
-  "model": "v5.1",
+  "model": "v5.2",
+  "target_mode": "residual_to_current_deviation",
   "rows_train": 1141,
   "fit": 937,
   "tune": 198,
@@ -11,19 +12,19 @@
     "target_stop_id",
     "tr_id"
   ],
-  "test_mae_s": 78.24647742773581,
+  "test_mae_s": 73.63733282671122,
   "persistence_mae_s": 93.35977337110482,
   "zero_mae_s": 103.33711048158641,
-  "interval_coverage": 0.9773371104815864,
-  "interval_radius_s": 292.72971741472077,
-  "brier_score": 0.14161459519345693,
-  "alert_precision": 0.85,
-  "alert_recall": 0.19767441860465115,
-  "batch_inference_ms": 2.9974000062793493,
+  "interval_coverage": 0.9688385269121813,
+  "interval_radius_s": 230.33887105583744,
+  "brier_score": 0.13669875217243052,
+  "alert_precision": 0.7567567567567568,
+  "alert_recall": 0.32558139534883723,
+  "batch_inference_ms": 10.505099999136291,
   "batch_size": 353,
   "tuning_mae": {
-    "catboost": 68.96716036971482,
-    "torch_lad": 85.14700748342456,
+    "catboost": 69.1615003960088,
+    "torch_lad": 90.82457302555893,
     "persistence": 87.13131313131314
   },
   "limitations": [

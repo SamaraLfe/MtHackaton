@@ -20,6 +20,7 @@ from ml.v5_features import (
 EXCLUDED_IDENTIFIERS={"tr_id","target_stop_id"}
 LATE_THRESHOLD_S=120.0
 NOMINAL_COVERAGE=.90
+TARGET_MODE="residual_to_current_deviation"
 
 
 def mae(actual,prediction):
@@ -105,6 +106,11 @@ def main():
     point_time=train["T"].map(lambda value:value.timestamp())
     target_time=train.target_time_begin.map(lambda value:value.timestamp())
     target=train.target_delay_s.to_numpy(dtype=float)
+    current_deviation=train.cur_dev_s.to_numpy(dtype=float)
+    # cur_dev_s is known at T.  Learning the future correction instead of
+    # relearning the whole level makes the model preserve large, real delays
+    # and focus capacity on how the situation changes over the horizon.
+    training_target=target-current_deviation
     available=target_time+np.maximum(target,0)
     cut1=float(point_time.quantile(.65));cut2=float(point_time.quantile(.83))
     fit=available<cut1
@@ -112,39 +118,41 @@ def main():
     calibration=point_time>=cut2
     if min(fit.sum(),tune.sum(),calibration.sum())<20:raise RuntimeError("Chronological split is too small")
 
-    selector=CatBoostRegressor(iterations=args.iterations,depth=6,learning_rate=.03,l2_leaf_reg=8,
+    selector=CatBoostRegressor(iterations=args.iterations,depth=4,learning_rate=.03,l2_leaf_reg=8,
         loss_function="MAE",random_seed=42,verbose=False,allow_writing_files=False,thread_count=4)
-    selector.fit(train_x[fit],target[fit],eval_set=(train_x[tune],target[tune]),early_stopping_rounds=100)
+    selector.fit(train_x[fit],training_target[fit],eval_set=(train_x[tune],training_target[tune]),early_stopping_rounds=100)
     best_iterations=max(50,selector.get_best_iteration()+1)
-    torch_tune=torch_baseline(train_x[fit].to_numpy(dtype=float),target[fit],train_x[tune].to_numpy(dtype=float))
+    torch_tune=torch_baseline(train_x[fit].to_numpy(dtype=float),training_target[fit],train_x[tune].to_numpy(dtype=float))
+    torch_tune+=train.loc[tune,"cur_dev_s"].to_numpy(dtype=float)
 
     development=available<cut2
-    model=CatBoostRegressor(iterations=best_iterations,depth=6,learning_rate=.03,l2_leaf_reg=8,
+    model=CatBoostRegressor(iterations=best_iterations,depth=4,learning_rate=.03,l2_leaf_reg=8,
         loss_function="MAE",random_seed=42,verbose=False,allow_writing_files=False,thread_count=4)
-    model.fit(train_x[development],target[development])
-    calibration_prediction=model.predict(train_x[calibration])
+    model.fit(train_x[development],training_target[development])
+    calibration_prediction=model.predict(train_x[calibration])+train.loc[calibration,"cur_dev_s"].to_numpy(dtype=float)
     residuals=target[calibration]-calibration_prediction
     radius=conformal_radius(residuals)
 
-    started=time.perf_counter();test_prediction=model.predict(test_x);batch_ms=(time.perf_counter()-started)*1000
-    validate_prediction=model.predict(validate_x)
+    started=time.perf_counter();test_prediction=model.predict(test_x)+test.cur_dev_s.to_numpy(dtype=float);batch_ms=(time.perf_counter()-started)*1000
+    validate_prediction=model.predict(validate_x)+validate.cur_dev_s.to_numpy(dtype=float)
     truth=test.target_delay_s.to_numpy(dtype=float)
     probability=late_probability(test_prediction,residuals)
     actual_late=truth>LATE_THRESHOLD_S
     coverage=float(np.mean((truth>=test_prediction-radius)&(truth<=test_prediction+radius)))
 
     feature_names=train_x.columns.tolist()
-    metadata={"selected":"v5","version":"v5.1","features":feature_names,
+    metadata={"selected":"v5","version":"v5.2","target_mode":TARGET_MODE,"features":feature_names,
         "calibration_residuals":residuals.tolist(),"interval_radius_s":radius,
         "late_threshold_s":LATE_THRESHOLD_S,"nominal_coverage":NOMINAL_COVERAGE,
         "training":{"split":"purged_chronological","fit_rows":int(development.sum()),
                     "calibration_rows":int(calibration.sum()),"iterations":best_iterations,
                     "identifiers_excluded":sorted(EXCLUDED_IDENTIFIERS)}}
     model.save_model(str(out/"model_v5.cbm"))
-    for filename in ("model.json","model_v5.json","v5_feature_schema.json"):
-        (out/filename).write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
+    (out/"model.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
+    schema={"version":"v5.2","target_mode":TARGET_MODE,"features":feature_names}
+    (out/"v5_feature_schema.json").write_text(json.dumps(schema,ensure_ascii=False,indent=2),encoding="utf-8")
 
-    report={"model":"v5.1","rows_train":len(train),"fit":int(development.sum()),
+    report={"model":"v5.2","target_mode":TARGET_MODE,"rows_train":len(train),"fit":int(development.sum()),
         "tune":int(tune.sum()),"calibration":int(calibration.sum()),"official_test":len(test),
         "validate":len(validate),"features":len(feature_names),"identifiers_excluded":sorted(EXCLUDED_IDENTIFIERS),
         "test_mae_s":mae(truth,test_prediction),"persistence_mae_s":mae(truth,test.cur_dev_s),
@@ -153,7 +161,7 @@ def main():
         "alert_precision":float(np.sum((probability>=.7)&actual_late)/max(1,np.sum(probability>=.7))),
         "alert_recall":float(np.sum((probability>=.7)&actual_late)/max(1,np.sum(actual_late))),
         "batch_inference_ms":float(batch_ms),"batch_size":len(test),
-        "tuning_mae":{"catboost":mae(target[tune],selector.predict(train_x[tune])),
+        "tuning_mae":{"catboost":mae(target[tune],selector.predict(train_x[tune])+train.loc[tune,"cur_dev_s"].to_numpy(dtype=float)),
                       "torch_lad":mae(target[tune],torch_tune),"persistence":mae(target[tune],train.loc[tune,"cur_dev_s"])},
         "limitations":["Only one historical day is available.","Test overlaps train in vehicles and calendar day.",
                        "Door state, official route IDs and labelled incident causes are absent."]}
@@ -169,10 +177,9 @@ def main():
     template=pd.read_csv(root/"sample_submission.csv",sep=";")
     submission=pd.DataFrame({"sample_id":validate.sample_id.astype(str),"prediction":validate_prediction})
     submission=submission.set_index("sample_id").loc[template.sample_id.astype(str)].reset_index()
-    for filename in ("submission_v5.csv","submission.csv"):
-        submission.to_csv(out/filename,sep=";",index=False)
+    submission.to_csv(out/"submission.csv",sep=";",index=False)
     pd.DataFrame({"feature":feature_names,"importance":model.get_feature_importance()}).sort_values("importance",ascending=False).to_csv(out/"feature_importance_v5.csv",index=False)
-    train_x.assign(target_delay_s=target).to_csv(out/"train_features.csv",index=False)
+    train_x.assign(target_delay_s=target,target_residual_s=training_target).to_csv(out/"train_features.csv",index=False)
     (out/"environment.json").write_text(json.dumps({"numpy":np.__version__,"pandas":pd.__version__,
         "catboost":catboost.__version__,"torch":torch.__version__},indent=2),encoding="utf-8")
     print(json.dumps(report,ensure_ascii=False,indent=2))
