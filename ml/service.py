@@ -36,7 +36,9 @@ app=FastAPI(title='Такт — ML API',version='1.1.0',description='''
 секундах: положительное значение означает опоздание. Основной контракт —
 **POST /predict_v5**. Backend выбирает цель и хранит историю, а ML-сервис
 возвращает прогноз, split-conformal интервал и риск задержки по отдельной
-калибровочной части. Внешняя интеграция обычно обращается именно к backend.
+калибровочной части. V5.2 обучается на residual к известному в момент T
+`cur_dev_s`, но внешний контракт возвращает уже восстановленный `prediction_s`.
+Внешняя интеграция обычно обращается именно к backend.
 ''',openapi_tags=[
     {'name':'Состояние','description':'Доступность процесса и имя загруженной модели.'},
     {'name':'V5','description':'Прогноз по исходной точке, телеметрии и плану остановок.'},
@@ -85,9 +87,12 @@ def predict(batch:Batch):
     return {'predictions':model.forecast(pd.DataFrame([r.model_dump() for r in batch.rows]))}
 
 @app.post('/predict_v5',response_model=ForecastResponse,tags=['V5'],summary='Пакетный прогноз V5 по исходным данным',
-    description='points, histories и schedules имеют одинаковую длину от 1 до 512; элементы с одним индексом относятся к одному прогнозу. Результат сохраняет порядок входа и содержит prediction_s, интервал и late_probability. Прямой ML API не проверяет выбор целевой остановки.',
+    description='points, histories и schedules имеют одинаковую длину от 1 до 512; элементы с одним индексом относятся к одному прогнозу. Горизонт target_time_begin − T должен быть строго в (600, 900] секунд. Результат сохраняет порядок входа и содержит восстановленный prediction_s, интервал и late_probability. Прямой ML API проверяет числовой горизонт, но не выбирает целевую остановку.',
     responses={422:{'description':'Массивы пусты, слишком велики или имеют разную длину.'}})
 def predict_v5(batch:V5Batch):
     if not (len(batch.points)==len(batch.histories)==len(batch.schedules)):
         raise HTTPException(422,'points, histories and schedules must have equal length')
-    return {'predictions':model.forecast_v5(batch.points,batch.histories,batch.schedules)}
+    try:
+        return {'predictions':model.forecast_v5(batch.points,batch.histories,batch.schedules)}
+    except (TypeError,ValueError,KeyError) as exc:
+        raise HTTPException(422,str(exc)) from exc

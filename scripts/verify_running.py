@@ -39,7 +39,7 @@ def main():
         start=time.perf_counter();r=post('/api/replay/step',{})
         times.append((time.perf_counter()-start)*1000);rows.append(r['prediction'])
     assert post('/api/replay/step',{})['done']
-    sub=pd.read_csv('artifacts/submission_v5.csv',sep=';')
+    sub=pd.read_csv('artifacts/submission.csv',sep=';')
     assert list(sub.columns)==['sample_id','prediction']
     assert len(sub)==len(points)
     assert set(sub.sample_id)==set(points.sample_id)

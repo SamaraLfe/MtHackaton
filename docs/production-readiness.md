@@ -107,6 +107,6 @@
 4. Перед сдачей поднять локальный стек, дождаться `GET /health/ready`, затем
    выполнить `python scripts/verify_running.py`. Скрипт меняет режим replay,
    поэтому запускать его только на стенде проверки.
-5. Проверить `artifacts/submission_v5.csv`, сохранить
+5. Проверить `artifacts/submission.csv`, сохранить
    `artifacts/verification.json` и зафиксировать commit, timestamp, статус
    readiness и результат проверки в релизной записи.

@@ -252,7 +252,7 @@ def display_text(value,fallback='Не указано'):
     """Convert nullable CSV display fields without leaking the string ``nan``."""
     return fallback if value is None or pd.isna(value) or not str(value).strip() else str(value)
 
-def target_for(tr,t,stop_id=None,time_offset=0.0):
+def target_for(tr,t,stop_id=None,time_offset=0.0,same_day=False):
     """Find the first stop in the 10–15 minute window.
 
     ``time_offset`` is used only for a live source whose synthetic run starts
@@ -262,6 +262,17 @@ def target_for(tr,t,stop_id=None,time_offset=0.0):
     offset=float(time_offset or 0)
     route=schedule[schedule.tr_id==tr].sort_values('ts')
     if route.empty:return None
+    # Full line plans are shifted to the telemetry day. Tiny two-stop
+    # fixtures/scenarios may intentionally cross midnight and should retain
+    # their explicit horizon.
+    if same_day and len(route) >= 3:
+        # A live forecast belongs to the telemetry calendar day.  Without
+        # this guard a request close to midnight could select the first stop
+        # after midnight from the shifted plan.
+        event_day=pd.Timestamp(t,unit='s',tz='UTC').tz_convert('Europe/Moscow').date()
+        local_days=pd.to_datetime(route['ts']+offset,unit='s',utc=True).dt.tz_convert('Europe/Moscow').dt.date
+        route=route.loc[local_days==event_day]
+        if route.empty:return None
     candidates=route[(route.ts+offset>t+600)&(route.ts+offset<=t+900)]
     effective_offset=offset
     if candidates.empty:return None
@@ -401,7 +412,7 @@ def load_historical_snapshot():
     """Build a fallback view from frozen V5 validate predictions."""
     vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear()
     predictions={}
-    prediction_path=ARTIFACT/'submission_v5.csv'
+    prediction_path=ARTIFACT/'submission.csv'
     if prediction_path.exists():
         prediction_frame=pd.read_csv(prediction_path,sep=';')
         predictions=dict(zip(prediction_frame.sample_id.astype(str),prediction_frame.prediction.astype(float)))
@@ -610,7 +621,7 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
 async def forecast(point,records,source):
     t=epoch(point['T']);tr=int(point['tr_id'])
     schedule_offset=float(point.get('schedule_offset',0) or 0)
-    stop=target_for(tr,t,int(point['target_stop_id']),schedule_offset)
+    stop=target_for(tr,t,int(point['target_stop_id']),schedule_offset,same_day=source=='live')
     if stop is None or int(stop['tt_action_item_id'])!=int(point['target_stop_id']) or abs(stop['ts']-epoch(point['target_time_begin']))>1:
         raise ValueError('Точка не соответствует первой остановке в окне (T+10, T+15]')
     features=build_one(point,records,stop)
@@ -774,7 +785,7 @@ async def ingest(event):
         return
     last_forecast[tr]=ts
     schedule_offset=float(position_offsets.get(tr,0) or 0) if position_match is not None else 0.0
-    stop=target_for(tr,ts,time_offset=schedule_offset)
+    stop=target_for(tr,ts,time_offset=schedule_offset,same_day=True)
     if stop is None:
         vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',reason_is_hypothesis=True,lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),position_adjusted=bool(event.get('position_adjusted',False)),position_origin='planned_route_projection' if event.get('position_adjusted') else None,prediction_s=None,late_probability=None,position_time=ts)
         return
@@ -951,7 +962,7 @@ async def lifespan(app):
         ] = custom_tr_id
     mapping.update({int(k):int(v) for k,v in json.loads(os.getenv('UNIT_MAP','{}')).items()})
     client=httpx.AsyncClient(timeout=2)
-    model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8'))
+    model_meta=json.loads((ARTIFACT/'model.json').read_text(encoding='utf-8'))
     load_historical_snapshot()
     if os.getenv('START_MODE','live')=='live':
         state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear()
@@ -1070,7 +1081,7 @@ async def readiness():
     """Check dependencies required to serve forecasts, including the ML API."""
     checks={'schedule':schedule is not None and not schedule.empty,'traffic':traffic is not None and not traffic.empty,
             'points':points is not None and not points.empty,'sqlite':db is not None,
-            'artifacts':(ARTIFACT/'metrics.json').exists() and (ARTIFACT/'model_v5.json').exists()}
+            'artifacts':(ARTIFACT/'metrics.json').exists() and (ARTIFACT/'model.json').exists()}
     try:
         response=await client.get(ML_URL+'/health')
         checks['ml_api']=response.is_success
@@ -1704,9 +1715,9 @@ async def network():
 @app.get('/api/metrics',**operation('metrics'))
 async def metrics():
     legacy=json.loads((ARTIFACT/'metrics.json').read_text(encoding='utf-8'))
-    model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8')) if (ARTIFACT/'model_v5.json').exists() else {}
+    model_meta=json.loads((ARTIFACT/'model.json').read_text(encoding='utf-8')) if (ARTIFACT/'model.json').exists() else {}
     predictions=pd.read_csv(ARTIFACT/'test_predictions_v5.csv') if (ARTIFACT/'test_predictions_v5.csv').exists() else pd.DataFrame()
-    v5=dict(model='v5',features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=legacy.get('test_mae_s'),baseline_mae_s=legacy.get('persistence_mae_s'),interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
+    v5=dict(model='v5',version=model_meta.get('version'),target_mode=model_meta.get('target_mode'),features=len(model_meta.get('features',[])),test_points=len(predictions),mae_s=legacy.get('test_mae_s'),baseline_mae_s=legacy.get('persistence_mae_s'),interval_radius_s=model_meta.get('interval_radius_s'),coverage=legacy.get('interval_coverage'),late_threshold_s=model_meta.get('late_threshold_s',120),batch_inference_ms=legacy.get('batch_inference_ms'))
     if v5['mae_s'] is not None and v5['baseline_mae_s']:
         v5['improvement_pct']=100*(1-v5['mae_s']/v5['baseline_mae_s'])
     importance=[]

@@ -29,6 +29,10 @@ class Predictor:
             for name in ('tr_id','target_stop_id'):
                 if name in values.columns: values[name]=values[name].astype(str)
             pred=self.model.predict(values)
+            if self.meta.get('target_mode')=='residual_to_current_deviation':
+                if 'cur_dev_s' not in frame.columns:
+                    raise ValueError('Residual V5 inference requires cur_dev_s')
+                pred=pred+frame['cur_dev_s'].to_numpy(dtype=float)
             return np.asarray(pred,dtype=float)
         x=frame[FEATURES].to_numpy(dtype=float)
         if self.kind=='catboost': pred=self.model.predict(x)
@@ -45,7 +49,10 @@ class Predictor:
             raise ValueError('Loaded artifact is not a V5 model; retrain with python -m ml.train')
         rows=[build_v5_row(point, history, schedule) for point,history,schedule in zip(points,histories,schedules)]
         values=pd.concat([row[self.v5_features] for row in rows],ignore_index=True)
-        return np.asarray(self.model.predict(values),dtype=float)
+        prediction=np.asarray(self.model.predict(values),dtype=float)
+        if self.meta.get('target_mode')=='residual_to_current_deviation':
+            prediction+=np.asarray([float(point['cur_dev_s']) for point in points],dtype=float)
+        return prediction
 
     def forecast_v5(self, points, histories, schedules):
         """Return calibrated V5 point forecasts, intervals and late-risk estimates."""
