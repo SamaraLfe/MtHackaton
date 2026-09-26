@@ -766,16 +766,15 @@ async def documentation():
     """Serve the human-readable API guide without modifying the dashboard UI."""
     return FileResponse(ROOT/'dashboard/docs.html')
 
-@app.get('/code',include_in_schema=False)
-@app.get('/code/',include_in_schema=False)
-async def code_documentation():
-    """Serve the Sphinx developer reference built during container startup."""
-    page=ROOT/'docs'/'_build'/'html'/'index.html'
-    if not page.exists():
-        raise HTTPException(503,'Sphinx documentation is not built yet')
-    return FileResponse(page)
-
-app.mount('/code',StaticFiles(directory=ROOT/'docs'/'_build'/'html',html=True,check_dir=False),name='code_docs')
+app.mount(
+    "/code",
+    StaticFiles(
+        directory=ROOT / "docs" / "_build" / "html",
+        html=True,
+        check_dir=False,
+    ),
+    name="code_docs",
+)
 
 @app.get('/',include_in_schema=False)
 async def index():return FileResponse(ROOT/'dashboard/dispatcher.html')
