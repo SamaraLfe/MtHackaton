@@ -17,7 +17,7 @@
 
 | Показатель | Текущее значение |
 |---|---:|
-| Модель | CatBoost V5.3 residual V5 |
+| Модель | CatBoost V5.3 (residual) |
 | Число признаков | 102 |
 | MAE на выданной test-части | 72,86 с |
 | Persistence baseline | 93,36 с |
