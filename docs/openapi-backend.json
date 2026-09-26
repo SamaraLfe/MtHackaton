@@ -2,9 +2,29 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Такт — Backend API",
-    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили и\nназначения и локальная очередь указаний хранятся в SQLite, а история\nтелеметрии — в памяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n",
-    "version": "1.0.0"
+    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили и\nназначения и локальная очередь указаний хранятся в SQLite, а история\nтелеметрии — в памяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n\nКонтракт версионируется вместе с репозиторием. Для интерактивной проверки\nиспользуйте `/docs/swagger`, для генерации клиента — `/openapi.json`, а для\nобъяснения полей и сценариев — `/docs`. В ответах, где нет надёжного прогноза,\nbackend возвращает `null`/`unknown`, а не подменяет отсутствие данных нулевой\nзадержкой.\n",
+    "contact": {
+      "name": "Команда прототипа «Такт»",
+      "url": "https://github.com/SamaraLfe/MtHackaton"
+    },
+    "license": {
+      "name": "Prototype / internal use",
+      "url": "https://github.com/SamaraLfe/MtHackaton"
+    },
+    "version": "1.1.0",
+    "x-contract-status": "prototype-local",
+    "x-generated-by": "scripts/export_openapi.py"
   },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Текущий локальный backend или reverse proxy"
+    },
+    {
+      "url": "http://127.0.0.1:8000",
+      "description": "Backend напрямую при запуске без Docker"
+    }
+  ],
   "paths": {
     "/health": {
       "get": {
@@ -19,7 +39,16 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "status": "ok",
+                      "mode": "live"
+                    }
+                  }
+                }
               }
             }
           }
@@ -39,7 +68,23 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "status": "ready",
+                      "checks": {
+                        "schedule": true,
+                        "traffic": true,
+                        "points": true,
+                        "sqlite": true,
+                        "artifacts": true,
+                        "ml_api": true
+                      }
+                    }
+                  }
+                }
               }
             }
           },
@@ -283,6 +328,21 @@
                 },
                 "type": "array",
                 "title": "Events"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Минимальный рабочий пример",
+                  "value": [
+                    {
+                      "tr_id": 131672,
+                      "event_time": "2026-01-06T03:34:50Z",
+                      "lon": 37.6,
+                      "lat": 55.75,
+                      "speed": 25,
+                      "location_valid": true
+                    }
+                  ]
+                }
               }
             }
           },
@@ -293,7 +353,16 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "accepted": 1,
+                      "mode": "live"
+                    }
+                  }
+                }
               }
             }
           },
@@ -316,6 +385,18 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/Point"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Минимальный рабочий пример",
+                  "value": {
+                    "tr_id": 131672,
+                    "T": "2026-01-06T03:35:00Z",
+                    "target_stop_id": 53700172828,
+                    "target_time_begin": "2026-01-06T03:50:00Z",
+                    "cur_dev_s": 74
+                  }
+                }
               }
             }
           },
@@ -326,7 +407,19 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "tr_id": 131672,
+                      "prediction_s": 61.2,
+                      "level": "medium",
+                      "source": "api",
+                      "degraded": false
+                    }
+                  }
+                }
               }
             }
           },
@@ -349,6 +442,14 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/Mode"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Минимальный рабочий пример",
+                  "value": {
+                    "mode": "live"
+                  }
+                }
               }
             }
           },
@@ -359,7 +460,17 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "mode": "live",
+                      "clock": null,
+                      "index": 0
+                    }
+                  }
+                }
               }
             }
           },
@@ -426,7 +537,36 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "vehicles": [
+                        {
+                          "tr_id": 131672,
+                          "source": "live",
+                          "telemetry_source": "custom_ndtp_nav00",
+                          "current_deviation_s": 42.0,
+                          "prediction_s": 61.2,
+                          "level": "medium",
+                          "previous_stop_time": "2026-01-06T03:31:30+03:00",
+                          "next_stop_time": "2026-01-06T03:36:10+03:00"
+                        }
+                      ],
+                      "state": {
+                        "mode": "live",
+                        "clock": "2026-01-06T03:35:00+03:00",
+                        "index": 0
+                      },
+                      "counters": {
+                        "telemetry_rows": 1,
+                        "predictions": 1
+                      },
+                      "total_points": 151
+                    }
+                  }
+                }
               }
             }
           },
@@ -499,6 +639,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/WhatIf"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Минимальный рабочий пример",
+                  "value": {
+                    "tr_id": 131672,
+                    "extra_vehicles": 1,
+                    "headway_reduction_pct": 0
+                  }
+                }
               }
             }
           },
@@ -509,7 +659,27 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "scenario": "what_if",
+                      "baseline": {
+                        "vehicle_count": 1
+                      },
+                      "projected": {
+                        "vehicle_count": 2
+                      },
+                      "placement": {
+                        "tr_id": 131672,
+                        "next_stop_id": 53700172828,
+                        "track": []
+                      },
+                      "affected_vehicles": []
+                    }
+                  }
+                }
               }
             }
           },
@@ -532,6 +702,16 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/MapMatch"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Минимальный рабочий пример",
+                  "value": {
+                    "tr_id": 131672,
+                    "lon": 37.6,
+                    "lat": 55.75
+                  }
+                }
               }
             }
           },
@@ -542,7 +722,18 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "tr_id": 131672,
+                      "road_graph_matched": false,
+                      "next_stop_id": 53700172828,
+                      "distance_to_next_stop_m": 382.0
+                    }
+                  }
+                }
               }
             }
           },
@@ -693,7 +884,7 @@
           "Источники данных"
         ],
         "summary": "Получить состояние источников",
-        "description": "Показывает custom-emulator и внешний оригинальный образ. Для custom-emulator статус читается по локальному HTTP API, для оригинального образа — по `/api/config`; штатный конфиг оригинального образа содержит 13 расписанных устройств.",
+        "description": "Показывает custom-emulator и внешний оригинальный образ. Для custom-emulator статус читается по локальному HTTP API, для оригинального образа — по `/api/config`. Backend автоматически исправляет частичный конфиг оригинального образа до штатных 13 расписанных устройств; поэтому `units` — это число настроенных, а не уже приславших пакет ТС.",
         "operationId": "emulator_status_api_admin_emulators_get",
         "responses": {
           "200": {
@@ -713,7 +904,7 @@
           "Источники данных"
         ],
         "summary": "Поставить источник на паузу или запустить",
-        "description": "Доступно любому существующему профилю диспетчера или администратора. `custom-emulator` получает pause/resume, оригинальный образ сохраняет последний непустой конфиг и восстанавливает его после остановки; на чистой установке resume создаёт конфиг всех 13 расписанных устройств. `all` дополнительно блокирует приём новых NDTP-событий backend.",
+        "description": "Доступно любому существующему профилю диспетчера или администратора. `custom-emulator` получает pause/resume, оригинальный образ сохраняет последний непустой конфиг и восстанавливает полный набор из 13 устройств после остановки; на чистой установке resume создаёт этот конфиг автоматически. `all` дополнительно блокирует приём новых NDTP-событий backend.",
         "operationId": "emulator_control_api_admin_emulators__emulator_id___action__post",
         "parameters": [
           {
@@ -741,6 +932,14 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/EmulatorControl"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Минимальный рабочий пример",
+                  "value": {
+                    "dispatcher_id": "dispatcher-01"
+                  }
+                }
               }
             }
           }
@@ -750,7 +949,17 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {},
+                "examples": {
+                  "basic": {
+                    "summary": "Форма успешного ответа",
+                    "value": {
+                      "source": "custom-emulator",
+                      "action": "pause",
+                      "paused": true
+                    }
+                  }
+                }
               }
             }
           },
@@ -1630,6 +1839,36 @@
     {
       "name": "Качество модели",
       "description": "Офлайн-метрики и важность признаков, не оценка текущего live-потока."
+    }
+  ],
+  "externalDocs": {
+    "description": "Руководство API и примеры сценариев",
+    "url": "/docs"
+  },
+  "x-tagGroups": [
+    {
+      "name": "Рабочий контур",
+      "tags": [
+        "Состояние",
+        "Источники и прогноз",
+        "Карта",
+        "Риски и what-if"
+      ]
+    },
+    {
+      "name": "Операционная работа",
+      "tags": [
+        "Диспетчеры",
+        "Указания водителю",
+        "Источники данных"
+      ]
+    },
+    {
+      "name": "Диагностика и совместимость",
+      "tags": [
+        "Качество модели",
+        "Совместимость API"
+      ]
     }
   ]
 }

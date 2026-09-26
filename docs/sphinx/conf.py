@@ -8,7 +8,7 @@ sys.path.insert(0, str(ROOT))
 project = "Такт — документация кода"
 copyright = "2026, Такт"
 author = "Команда проекта"
-release = "1.0.0"
+release = "1.1.0"
 
 extensions = [
     "sphinx.ext.autodoc",

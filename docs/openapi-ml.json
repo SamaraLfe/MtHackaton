@@ -3,8 +3,26 @@
   "info": {
     "title": "Такт — ML API",
     "description": "\nВнутренний сервис инференса V5. Он возвращает отклонение от расписания в\nсекундах: положительное значение означает опоздание. Основной контракт —\n**POST /predict_v5**. Backend выбирает цель и хранит историю, а ML-сервис\nвозвращает прогноз, split-conformal интервал и риск задержки по отдельной\nкалибровочной части. Внешняя интеграция обычно обращается именно к backend.\n",
-    "version": "1.0.0"
+    "contact": {
+      "name": "Команда прототипа «Такт»",
+      "url": "https://github.com/SamaraLfe/MtHackaton"
+    },
+    "license": {
+      "name": "Prototype / internal use",
+      "url": "https://github.com/SamaraLfe/MtHackaton"
+    },
+    "version": "1.1.0"
   },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8001",
+      "description": "ML API при локальном запуске"
+    },
+    {
+      "url": "/",
+      "description": "ML API внутри Docker-сети"
+    }
+  ],
   "paths": {
     "/health": {
       "get": {
@@ -49,7 +67,9 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ForecastResponse"
+                }
               }
             }
           },
@@ -76,6 +96,43 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/V5Batch"
+              },
+              "examples": {
+                "basic": {
+                  "summary": "Одна точка V5",
+                  "value": {
+                    "points": [
+                      {
+                        "tr_id": 131672,
+                        "T": "2026-01-06T03:35:00Z",
+                        "target_stop_id": 53700172828,
+                        "target_time_begin": "2026-01-06T03:50:00Z",
+                        "cur_dev_s": 74
+                      }
+                    ],
+                    "histories": [
+                      [
+                        {
+                          "event_time": "2026-01-06T03:34:50Z",
+                          "lon": 37.6,
+                          "lat": 55.75,
+                          "speed": 25,
+                          "location_valid": true
+                        }
+                      ]
+                    ],
+                    "schedules": [
+                      [
+                        {
+                          "tr_id": 131672,
+                          "tt_action_item_id": 53700172828,
+                          "time_begin": "2026-01-06T03:50:00Z",
+                          "geom": "POINT (37.60 55.75)"
+                        }
+                      ]
+                    ]
+                  }
+                }
               }
             }
           },
@@ -86,7 +143,26 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/ForecastResponse"
+                },
+                "examples": {
+                  "basic": {
+                    "summary": "Форма ответа",
+                    "value": {
+                      "predictions": [
+                        {
+                          "prediction_s": 61.2,
+                          "lower_s": -231.5,
+                          "upper_s": 353.9,
+                          "late_probability": 0.42,
+                          "model": "v5",
+                          "uncertainty": "split_conformal"
+                        }
+                      ]
+                    }
+                  }
+                }
               }
             }
           },
@@ -202,6 +278,100 @@
         ],
         "title": "FeatureRow"
       },
+      "Forecast": {
+        "properties": {
+          "prediction_s": {
+            "type": "number",
+            "title": "Prediction S",
+            "description": "Прогноз отклонения в секундах; плюс означает опоздание.",
+            "examples": [
+              61.2
+            ]
+          },
+          "lower_s": {
+            "type": "number",
+            "title": "Lower S",
+            "description": "Нижняя граница split-conformal интервала, секунды.",
+            "examples": [
+              -231.5
+            ]
+          },
+          "upper_s": {
+            "type": "number",
+            "title": "Upper S",
+            "description": "Верхняя граница split-conformal интервала, секунды.",
+            "examples": [
+              353.9
+            ]
+          },
+          "late_probability": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Late Probability",
+            "description": "Эмпирическая вероятность отклонения больше 120 с.",
+            "examples": [
+              0.42
+            ]
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "Выбранный артефакт модели.",
+            "examples": [
+              "v5"
+            ]
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertainty",
+            "description": "Метод оценки неопределённости.",
+            "examples": [
+              "split_conformal"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "prediction_s",
+          "lower_s",
+          "upper_s",
+          "late_probability",
+          "model"
+        ],
+        "title": "Forecast",
+        "description": "One calibrated prediction returned by the ML service."
+      },
+      "ForecastResponse": {
+        "properties": {
+          "predictions": {
+            "items": {
+              "$ref": "#/components/schemas/Forecast"
+            },
+            "type": "array",
+            "title": "Predictions",
+            "description": "Прогнозы в том же порядке, что и входные строки."
+          }
+        },
+        "type": "object",
+        "required": [
+          "predictions"
+        ],
+        "title": "ForecastResponse",
+        "description": "Ordered batch of forecasts; item i corresponds to input item i."
+      },
       "V5Batch": {
         "properties": {
           "points": {
@@ -250,7 +420,41 @@
           "histories",
           "schedules"
         ],
-        "title": "V5Batch"
+        "title": "V5Batch",
+        "examples": [
+          {
+            "histories": [
+              [
+                {
+                  "event_time": "2026-01-06T03:34:50Z",
+                  "lat": 55.75,
+                  "location_valid": true,
+                  "lon": 37.6,
+                  "speed": 25
+                }
+              ]
+            ],
+            "points": [
+              {
+                "T": "2026-01-06T03:35:00Z",
+                "cur_dev_s": 74,
+                "target_stop_id": 53700172828,
+                "target_time_begin": "2026-01-06T03:50:00Z",
+                "tr_id": 131672
+              }
+            ],
+            "schedules": [
+              [
+                {
+                  "geom": "POINT (37.60 55.75)",
+                  "time_begin": "2026-01-06T03:50:00Z",
+                  "tr_id": 131672,
+                  "tt_action_item_id": 53700172828
+                }
+              ]
+            ]
+          }
+        ]
       }
     }
   },
@@ -267,5 +471,9 @@
       "name": "Legacy",
       "description": "Старый контракт 15 готовых признаков; не подходит для V5."
     }
-  ]
+  ],
+  "externalDocs": {
+    "description": "Backend contract и руководство",
+    "url": "http://127.0.0.1:8000/docs"
+  }
 }

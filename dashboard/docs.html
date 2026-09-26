@@ -28,11 +28,11 @@
 </aside>
 <main class="docs-main" id="main">
   <section class="hero" id="overview">
-    <div class="eyebrow">Руководство разработчика · API 1.0.0</div>
+    <div class="eyebrow">Руководство разработчика · API 1.1.0</div>
     <h1>От телеметрии<br>к понятному прогнозу</h1>
     <p class="lead">Такт помогает диспетчеру заранее увидеть отклонение транспорта от расписания. API принимает координаты и скорость, рассчитывает прогноз на ближайшие 10–15 минут и отдаёт данные для карты и очереди внимания.</p>
     <div class="meta-row"><span class="pill">HTTP + JSON</span><span class="pill">Модель V5</span><span class="pill">Локальный прототип</span><span class="pill">Live / Replay</span></div>
-    <p>Это руководство объясняет, что делает каждый блок API, какие данные ему нужны и как трактовать результат. Начните с готового исторического прогона, затем переходите к приёму своего потока. Для проверки отдельных запросов есть <a href="/docs/swagger">интерактивный Swagger</a>, а для генерации клиента — <a href="/openapi.json">OpenAPI JSON</a>.</p>
+    <p>Это руководство объясняет, что делает каждый блок API, какие данные ему нужны и как трактовать результат. Начните с готового исторического прогона, затем переходите к приёму своего потока. Для проверки отдельных запросов есть <a href="/docs/swagger">интерактивный Swagger</a>, для альтернативного просмотра схемы — <a href="/redoc">ReDoc</a>, а для генерации клиента — <a href="/openapi.json">OpenAPI JSON</a>. Снимок контракта обновляется командой <code>python scripts/export_openapi.py</code>.</p>
     <div class="start-links"><a href="#quickstart"><strong>Получить первый прогноз →</strong><span>Три запроса на готовых данных, без настройки эмулятора.</span></a><a href="#telemetry"><strong>Подключить телеметрию →</strong><span>Формат событий, порядок отправки и поведение live.</span></a></div>
     <ol class="flow" aria-label="Путь данных"><li><strong>Телеметрия</strong><span>NDTP по TCP или события через HTTP.</span></li><li><strong>Backend</strong><span>История ТС, расписание и выбор целевой остановки.</span></li><li><strong>ML V5</strong><span>Расчёт отклонения от планового времени прибытия.</span></li><li><strong>Диспетчер</strong><span>Прогноз, оценка риска и локальная очередь указаний.</span></li></ol>
   </section>
@@ -413,7 +413,7 @@ projected_late_probability = max_late_probability × risk_multiplier</code></pre
 
   <section id="emulator-control">
     <div class="endpoint"><span class="method get">GET</span><code>/api/admin/emulators</code><span class="service">Backend · источники</span></div><h2>Источники и пауза потока</h2>
-    <p>Ответ различает собственный <code>custom-emulator</code> и внешний оригинальный NDTP-образ. В рабочем месте кнопка «Источники данных» и в админке доступны отдельные «Пауза»/«Пуск» для обоих источников. <code>POST /api/admin/emulators/custom-emulator/pause</code> и <code>resume</code> управляют встроенной эмуляцией; для оригинального образа backend меняет его <code>/api/config</code>. На чистом запуске resume создаёт 13 расписанных оригинальных ТС; вместе с 13 custom это максимум 26. Для всей картины используйте <code>/api/admin/emulators/all/pause</code>: backend перестаёт принимать новые события.</p>
+    <p>Ответ различает собственный <code>custom-emulator</code> и внешний оригинальный NDTP-образ. В рабочем месте кнопка «Источники данных» и в админке доступны отдельные «Пауза»/«Пуск» для обоих источников. <code>POST /api/admin/emulators/custom-emulator/pause</code> и <code>resume</code> управляют встроенной эмуляцией; для оригинального образа backend меняет его <code>/api/config</code>. Если в образе остался частичный конфиг, backend автоматически восстанавливает штатные 13 расписанных оригинальных ТС; вместе с 13 custom это максимум 26. <code>units</code> означает настроенные устройства, а <code>waiting_for_live</code> — только отсутствие первого пакета. Для всей картины используйте <code>/api/admin/emulators/all/pause</code>: backend перестаёт принимать новые события.</p>
     <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/admin/emulators"
 curl -sS -X POST "$TAKT_URL/api/admin/emulators/all/pause" \
   -H 'Content-Type: application/json' -d '{"dispatcher_id":"dispatcher-01"}'</code></pre>
@@ -596,7 +596,7 @@ try {
     <p>Подробности в репозитории: <code>README.md</code> — установка и запуск; <code>docs/ANALYSIS.md</code> — модель, оценка и ограничения; <code>dataset/docs/Emulator-and-Telematic-Packets-Specification.md</code> — NDTP и эмулятор; <code>dashboard/MAP.md</code> — устройство карты. Снимки спецификаций: <code>docs/openapi-backend.json</code> и <code>docs/openapi-ml.json</code>. Актуальная схема работающего backend всегда доступна по <a href="/openapi.json">/openapi.json</a>.</p>
     <p>Структура руководства опирается на практики <a href="https://docs.github.com/en/rest/quickstart" target="_blank" rel="noopener noreferrer">GitHub REST API Quickstart</a> (первый рабочий запрос), <a href="https://docs.stripe.com/api" target="_blank" rel="noopener noreferrer">Stripe API Reference</a> (соглашения и справочник) и <a href="https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api" target="_blank" rel="noopener noreferrer">GitHub Troubleshooting</a> (объяснение ошибок). Контракты и примеры Такт сверены с кодом этого проекта.</p>
   </section>
-  <footer class="docs-footer">ТАКТ · Документация API 1.0.0 · <a href="#quickstart">Быстрый старт</a> · <a href="/docs/swagger">Swagger</a> · <a href="/openapi.json">OpenAPI</a></footer>
+  <footer class="docs-footer">ТАКТ · Документация API 1.1.0 · <a href="#quickstart">Быстрый старт</a> · <a href="/docs/swagger">Swagger</a> · <a href="/redoc">ReDoc</a> · <a href="/openapi.json">OpenAPI</a></footer>
 </main>
 <div id="copy-status" role="status" aria-live="polite"></div>
 </body>

@@ -7,12 +7,13 @@ import httpx
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from ml.features import build_one, epoch, timestamp, load_traffic, load_schedule, haversine
 from backend.ndtp import handle
-from backend.api_docs import DESCRIPTION, TAGS, operation
+from backend.api_docs import CONTACT, DESCRIPTION, LICENSE, OPENAPI_EXAMPLES, SERVERS, TAGS, operation
 
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
@@ -953,18 +954,80 @@ async def lifespan(app):
     server.close();await server.wait_closed();await client.aclose()
     if db is not None:db.close()
 
-app=FastAPI(title='Такт — Backend API',version='1.0.0',lifespan=lifespan,
-    description=DESCRIPTION,openapi_tags=TAGS,docs_url='/docs/swagger',
+app=FastAPI(title='Такт — Backend API',version='1.1.0',lifespan=lifespan,
+    description=DESCRIPTION,openapi_tags=TAGS,servers=SERVERS,
+    contact=CONTACT,license_info=LICENSE,docs_url='/docs/swagger',redoc_url='/redoc',
     swagger_ui_parameters={
-        'docExpansion':'none',
-        'defaultModelsExpandDepth':-1,
-        'defaultModelExpandDepth':-1,
-        'displayOperationId':False,
+        # Keep the operation list readable while leaving request/response
+        # schemas available in the Models section.
+        'docExpansion':'list',
+        'defaultModelsExpandDepth':0,
+        'defaultModelExpandDepth':1,
+        'displayOperationId':True,
         'displayRequestDuration':True,
         'filter':True,
+        'deepLinking':True,
         'persistAuthorization':True,
         'tryItOutEnabled':True,
+        'requestSnippetsEnabled':True,
+        'showExtensions':False,
+        'showCommonExtensions':False,
+        'syntaxHighlight':{'theme':'arta'},
     })
+
+
+def custom_openapi():
+    """Build the published contract with examples and integration metadata."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema=get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        tags=TAGS,
+        servers=SERVERS,
+        contact=CONTACT,
+        license_info=LICENSE,
+    )
+    schema['externalDocs']={
+        'description':'Руководство API и примеры сценариев',
+        'url':'/docs',
+    }
+    schema['info']['x-contract-status']='prototype-local'
+    schema['info']['x-generated-by']='scripts/export_openapi.py'
+    schema['x-tagGroups']=[
+        {'name':'Рабочий контур','tags':['Состояние','Источники и прогноз','Карта','Риски и what-if']},
+        {'name':'Операционная работа','tags':['Диспетчеры','Указания водителю','Источники данных']},
+        {'name':'Диагностика и совместимость','tags':['Качество модели','Совместимость API']},
+    ]
+    for path, methods in OPENAPI_EXAMPLES.items():
+        path_item=schema.get('paths',{}).get(path)
+        if not path_item:
+            continue
+        for method, example in methods.items():
+            operation_schema=path_item.get(method)
+            if not operation_schema:
+                continue
+            if 'request' in example:
+                request_body=operation_schema.setdefault('requestBody',{})
+                media=request_body.setdefault('content',{}).setdefault('application/json',{})
+                media.setdefault('examples',{})['basic']={
+                    'summary':'Минимальный рабочий пример',
+                    'value':example['request'],
+                }
+            if 'response' in example:
+                response=operation_schema.setdefault('responses',{}).setdefault('200',{})
+                media=response.setdefault('content',{}).setdefault('application/json',{})
+                media.setdefault('examples',{})['basic']={
+                    'summary':'Форма успешного ответа',
+                    'value':example['response'],
+                }
+    app.openapi_schema=schema
+    return schema
+
+
+app.openapi=custom_openapi
 
 @app.middleware('http')
 async def observe_request(request:Request,call_next):
@@ -1531,6 +1594,29 @@ def _default_official_config():
     }
 
 
+def _normalized_official_config(current=None, running=True):
+    """Return the canonical 13-unit config required by the prototype.
+
+    The upstream image keeps its config in memory.  A manual one-unit config
+    therefore survives until the next restart and makes the remaining mapped
+    vehicles look like they are waiting forever.  The prototype has one
+    deterministic original fleet: rebuild the unit list from the mapping,
+    while retaining the current target host/port when the image supplied them.
+    """
+    default=_default_official_config()
+    current=current or {}
+    config={**default}
+    if current.get('targetHost'):
+        config['targetHost']=current['targetHost']
+    if current.get('targetPort'):
+        config['targetPort']=current['targetPort']
+    config['units']=[
+        {**unit,'autoGenerate':bool(running)}
+        for unit in default.get('units',[])
+    ]
+    return config
+
+
 async def official_emulator_config(enabled:bool|None=None):
     """Read or toggle the original image generator through its config API.
 
@@ -1545,16 +1631,34 @@ async def official_emulator_config(enabled:bool|None=None):
         response.raise_for_status(); config=response.json()
         if config.get('units'):
             _remember_official_config(config)
+        cached=_cached_official_config()
         if enabled is not None:
-            if enabled and not config.get('units'):
-                config=_cached_official_config() or _default_official_config()
-                for unit in config.get('units',[]):
-                    unit['autoGenerate']=True
-            elif not enabled:
+            if enabled:
+                # A cached one-unit config is an old/partial setup.  Resume
+                # always restores the complete official fleet.
+                config=_normalized_official_config(config if config.get('units') else cached, running=True)
+            else:
                 _remember_official_config(config)
                 config={**config,'units':[]}
             response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
             response.raise_for_status(); config=response.json() if response.content else config
+        else:
+            units=config.get('units',[])
+            expected=_default_official_config().get('units',[])
+            expected_ids={int(unit['unitId']) for unit in expected}
+            current_ids={int(unit.get('unitId')) for unit in units if unit.get('unitId') is not None}
+            if not units and cached is None:
+                # Fresh image: seed and start the mandatory 13-unit source.
+                config=_normalized_official_config(None,running=True)
+                response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
+                response.raise_for_status(); config=response.json() if response.content else config
+            elif units and current_ids != expected_ids:
+                # Existing partial config: repair it without waiting for a
+                # manual admin action.  Preserve whether its stream was live.
+                running=any(item.get('autoGenerate') for item in units)
+                config=_normalized_official_config(config,running=running)
+                response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
+                response.raise_for_status(); config=response.json() if response.content else config
         units=config.get('units',[])
         if units:
             _remember_official_config(config)
