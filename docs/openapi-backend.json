@@ -1216,7 +1216,7 @@
           "Качество модели"
         ],
         "summary": "Прочитать офлайн-метрики",
-        "description": "Возвращает актуальный отчёт V5.5, объект v5, feature_importance и строки readable. Для V5 используйте `v5.mae_s`; верхнеуровневые поля дублируют тот же отчёт для CSV-совместимости. Текущая задержка ML — counters.last_inference_ms в /api/state.",
+        "description": "Возвращает актуальный отчёт champion-b4b, объект v5, feature_importance и строки readable. Краткая MAE находится в `v5.mae_s`, полный отчёт — в `mae_test` и `real_vehicle_group_holdout`. Текущая задержка ML — counters.last_inference_ms в /api/state.",
         "operationId": "metrics_api_metrics_get",
         "responses": {
           "200": {

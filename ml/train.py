@@ -1,7 +1,8 @@
-"""Reproducible V5 training, calibration, evaluation and submission pipeline."""
+"""Reproduce, evaluate and package the strongest submitted CatBoost model."""
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -9,178 +10,215 @@ from pathlib import Path
 import catboost
 import numpy as np
 import pandas as pd
-import torch
 from catboost import CatBoostRegressor
 
-from ml.feature_builder import (
-    add_target_coordinates, build_feature_matrix, build_route_features,
-    build_telemetry_features, prepare_schedule, prepare_traffic,
-)
+from ml.feature_builder import FEATURE_COLUMNS, build_feature_table
 
-EXCLUDED_IDENTIFIERS={"tr_id","target_stop_id"}
-LATE_THRESHOLD_S=120.0
-NOMINAL_COVERAGE=.90
-TARGET_MODE="direct_delay"
-MODEL_VERSION="v5.5"
+MODEL_VERSION = "champion-b4b"
+REFERENCE_COMMIT = "b4b636b"
+LATE_THRESHOLD_S = 120.0
+NOMINAL_COVERAGE = 0.90
 
 
-def mae(actual,prediction):
-    return float(np.mean(np.abs(np.asarray(actual)-np.asarray(prediction))))
+def mae(actual, prediction) -> float:
+    return float(np.mean(np.abs(np.asarray(actual, dtype=float) - np.asarray(prediction, dtype=float))))
 
 
-def load_points(path):
-    frame=pd.read_csv(path)
-    frame["T"]=pd.to_datetime(frame["T"],utc=True)
-    frame["target_time_begin"]=pd.to_datetime(frame["target_time_begin"],utc=True)
-    frame["tr_id"]=frame["tr_id"].astype(str)
-    frame["target_stop_id"]=frame["target_stop_id"].astype(str)
-    return frame
-
-
-def load_traffic(path):
-    frame=pd.read_csv(path)
-    frame["tr_id"]=frame["tr_id"].astype(str)
-    frame["event_time"]=pd.to_datetime(frame["event_time"],utc=True)
-    for column,default in (("alt",0.0),("heading",0.0)):
-        if column not in frame:frame[column]=default
-    return prepare_traffic(frame)
-
-
-def build_features(points,traffic_path,schedule_path,name):
-    traffic=load_traffic(traffic_path)
-    schedule=prepare_schedule(pd.read_csv(schedule_path))
-    enriched=add_target_coordinates(points,schedule)
-    telemetry=build_telemetry_features(enriched,traffic,name)
-    route=build_route_features(enriched,schedule,telemetry,name)
-    features=build_feature_matrix(enriched,telemetry,route)
-    return features.drop(columns=list(EXCLUDED_IDENTIFIERS),errors="ignore")
-
-
-def conformal_radius(residuals,coverage=NOMINAL_COVERAGE):
-    values=np.sort(np.abs(np.asarray(residuals,dtype=float)))
-    rank=min(len(values)-1,int(np.ceil((len(values)+1)*coverage))-1)
+def conformal_radius(residuals, coverage: float = NOMINAL_COVERAGE) -> float:
+    values = np.sort(np.abs(np.asarray(residuals, dtype=float)))
+    rank = min(len(values) - 1, int(np.ceil((len(values) + 1) * coverage)) - 1)
     return float(values[rank])
 
 
-def late_probability(predictions,residuals):
-    residuals=np.asarray(residuals,dtype=float)
-    return np.asarray([(1+np.sum(residuals>LATE_THRESHOLD_S-p))/(len(residuals)+2) for p in predictions],dtype=float)
+def make_model() -> CatBoostRegressor:
+    """Return the deterministic hyperparameters of the reference champion."""
+    return CatBoostRegressor(
+        iterations=500,
+        depth=6,
+        learning_rate=0.04,
+        l2_leaf_reg=5,
+        loss_function="MAE",
+        eval_metric="MAE",
+        random_seed=42,
+        verbose=False,
+        allow_writing_files=False,
+        thread_count=4,
+    )
 
 
-def torch_baseline(x_fit,y_fit,x_tune):
-    medians=np.nanmedian(x_fit,axis=0)
-    medians=np.where(np.isfinite(medians),medians,0.0)
-    fit=np.where(np.isfinite(x_fit),x_fit,medians)
-    tune=np.where(np.isfinite(x_tune),x_tune,medians)
-    center=np.median(fit,axis=0);scale=np.maximum(np.std(fit,axis=0),1.0)
-    torch.manual_seed(42);torch.set_num_threads(2)
-    model=torch.nn.Linear(fit.shape[1],1)
-    optimizer=torch.optim.Adam(model.parameters(),lr=.03)
-    tx=torch.tensor((fit-center)/scale,dtype=torch.float32)
-    ty=torch.tensor(y_fit,dtype=torch.float32)
-    for _ in range(400):
-        optimizer.zero_grad()
-        loss=torch.nn.functional.l1_loss(model(tx).squeeze(1),ty)+.0005*model.weight.square().mean()
-        loss.backward();optimizer.step()
-    with torch.no_grad():
-        return model(torch.tensor((tune-center)/scale,dtype=torch.float32)).squeeze(1).numpy()
+def load_split(root: Path, split: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if split == "train":
+        points_path, schedule_name = root / "labels/labels_train.csv", "schedule.csv"
+    elif split == "test":
+        points_path, schedule_name = root / "labels/labels_test.csv", "schedule.csv"
+    else:
+        points_path, schedule_name = root / "validate/points.csv", "schedule_plan.csv"
+    points = pd.read_csv(points_path)
+    features = build_feature_table(
+        points,
+        pd.read_csv(root / split / "traffic.csv", low_memory=False),
+        pd.read_csv(root / split / schedule_name, low_memory=False),
+    )
+    return points, features
 
 
-def main():
-    parser=argparse.ArgumentParser()
-    parser.add_argument("--data",default="dataset")
-    parser.add_argument("--out",default="artifacts")
-    parser.add_argument("--iterations",type=int,default=1200)
-    args=parser.parse_args()
-    root=Path(args.data);out=Path(args.out);out.mkdir(parents=True,exist_ok=True)
-
-    train=load_points(root/"labels/labels_train.csv")
-    train=train[pd.to_numeric(train.tr_id)<9_000_000].sort_values("T").reset_index(drop=True)
-    test=load_points(root/"labels/labels_test.csv")
-    validate=load_points(root/"validate/points.csv")
-    train_x=build_features(train,root/"train/traffic.csv",root/"train/schedule.csv","TRAIN")
-    test_x=build_features(test,root/"test/traffic.csv",root/"test/schedule.csv","TEST")
-    validate_x=build_features(validate,root/"validate/traffic.csv",root/"validate/schedule_plan.csv","VALIDATE")
-    test_x=test_x.reindex(columns=train_x.columns);validate_x=validate_x.reindex(columns=train_x.columns)
-    if set(EXCLUDED_IDENTIFIERS)&set(train_x.columns):raise RuntimeError("Raw identifiers leaked into V5 features")
-
-    point_time=train["T"].map(lambda value:value.timestamp())
-    target_time=train.target_time_begin.map(lambda value:value.timestamp())
-    target=train.target_delay_s.to_numpy(dtype=float)
-    available=target_time+np.maximum(target,0)
-    cut1=float(point_time.quantile(.65));cut2=float(point_time.quantile(.83))
-    fit=available<cut1
-    tune=(point_time>=cut1)&(available<cut2)
-    calibration=point_time>=cut2
-    if min(fit.sum(),tune.sum(),calibration.sum())<20:raise RuntimeError("Chronological split is too small")
-
-    selector=CatBoostRegressor(iterations=args.iterations,depth=6,learning_rate=.03,l2_leaf_reg=8,
-        loss_function="MAE",random_seed=42,verbose=False,allow_writing_files=False,thread_count=4)
-    selector.fit(train_x[fit],target[fit],eval_set=(train_x[tune],target[tune]),early_stopping_rounds=100)
-    best_iterations=max(50,selector.get_best_iteration()+1)
-    torch_tune=torch_baseline(train_x[fit].to_numpy(dtype=float),target[fit],train_x[tune].to_numpy(dtype=float))
-
-    development=available<cut2
-    model=CatBoostRegressor(iterations=best_iterations,depth=6,learning_rate=.03,l2_leaf_reg=8,
-        loss_function="MAE",random_seed=42,verbose=False,allow_writing_files=False,thread_count=4)
-    model.fit(train_x[development],target[development])
-    calibration_prediction=model.predict(train_x[calibration])
-    residuals=target[calibration]-calibration_prediction
-    radius=conformal_radius(residuals)
-
-    started=time.perf_counter()
-    test_prediction=model.predict(test_x);batch_ms=(time.perf_counter()-started)*1000
-    validate_prediction=model.predict(validate_x)
-    truth=test.target_delay_s.to_numpy(dtype=float)
-    probability=late_probability(test_prediction,residuals)
-    actual_late=truth>LATE_THRESHOLD_S
-    coverage=float(np.mean((truth>=test_prediction-radius)&(truth<=test_prediction+radius)))
-
-    feature_names=train_x.columns.tolist()
-    metadata={"selected":"v5","version":MODEL_VERSION,"target_mode":TARGET_MODE,"ensemble":False,
-        "features":feature_names,
-        "calibration_residuals":residuals.tolist(),"interval_radius_s":radius,
-        "late_threshold_s":LATE_THRESHOLD_S,"nominal_coverage":NOMINAL_COVERAGE,
-        "training":{"split":"purged_chronological","fit_rows":int(development.sum()),
-                    "calibration_rows":int(calibration.sum()),"iterations":best_iterations,
-                    "identifiers_excluded":sorted(EXCLUDED_IDENTIFIERS)}}
-    model.save_model(str(out/"model.cbm"))
-    (out/"model.json").write_text(json.dumps(metadata,ensure_ascii=False,indent=2),encoding="utf-8")
-    schema={"version":MODEL_VERSION,"target_mode":TARGET_MODE,"features":feature_names}
-    (out/"feature_schema.json").write_text(json.dumps(schema,ensure_ascii=False,indent=2),encoding="utf-8")
-
-    report={"model":MODEL_VERSION,"target_mode":TARGET_MODE,"rows_train":len(train),"fit":int(development.sum()),
-        "tune":int(tune.sum()),"calibration":int(calibration.sum()),"official_test":len(test),
-        "validate":len(validate),"features":len(feature_names),"identifiers_excluded":sorted(EXCLUDED_IDENTIFIERS),
-        "test_mae_s":mae(truth,test_prediction),"persistence_mae_s":mae(truth,test.cur_dev_s),
-        "zero_mae_s":mae(truth,np.zeros(len(test))),"interval_coverage":coverage,
-        "interval_radius_s":radius,"brier_score":float(np.mean((probability-actual_late)**2)),
-        "alert_precision":float(np.sum((probability>=.7)&actual_late)/max(1,np.sum(probability>=.7))),
-        "alert_recall":float(np.sum((probability>=.7)&actual_late)/max(1,np.sum(actual_late))),
-        "batch_inference_ms":float(batch_ms),"batch_size":len(test),
-        "leaderboard_score":1.0,
-        "tuning_mae":{"catboost":mae(target[tune],selector.predict(train_x[tune])),
-                      "torch_lad":mae(target[tune],torch_tune),"persistence":mae(target[tune],train.loc[tune,"cur_dev_s"])},
-        "limitations":["Only one historical day is available.","Test overlaps train in vehicles and calendar day.",
-                       "Door state, official route IDs and labelled incident causes are absent."]}
-    (out/"metrics.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
-
-    test_result=test[["sample_id","tr_id","T","target_stop_id","cur_dev_s","target_delay_s"]].copy()
-    test_result["prediction"]=test_prediction;test_result["abs_error"]=np.abs(truth-test_prediction)
-    test_result["baseline_abs_error"]=np.abs(truth-test.cur_dev_s.to_numpy(dtype=float))
-    test_result["lower_s"]=test_prediction-radius;test_result["upper_s"]=test_prediction+radius
-    test_result["late_probability"]=probability
-    test_result.to_csv(out/"test_predictions.csv",index=False)
-
-    template=pd.read_csv(root/"sample_submission.csv",sep=";")
-    submission=pd.DataFrame({"sample_id":validate.sample_id.astype(str),"prediction":validate_prediction})
-    submission=submission.set_index("sample_id").loc[template.sample_id.astype(str)].reset_index()
-    submission.to_csv(out/"submission.csv",sep=";",index=False)
-    pd.DataFrame({"feature":feature_names,"importance":model.get_feature_importance()}).sort_values("importance",ascending=False).to_csv(out/"feature_importance.csv",index=False)
-    train_x.assign(target_delay_s=target).to_csv(out/"train_features.csv",index=False)
-    (out/"environment.json").write_text(json.dumps({"numpy":np.__version__,"pandas":pd.__version__,
-        "catboost":catboost.__version__,"torch":torch.__version__},indent=2),encoding="utf-8")
-    print(json.dumps(report,ensure_ascii=False,indent=2))
+def group_holdout(features: pd.DataFrame) -> dict[str, object]:
+    """Evaluate transfer to unseen real vehicle IDs; synthetic clones are excluded."""
+    real = features[pd.to_numeric(features["tr_id"]) < 9_000_000].copy()
+    vehicles = np.array(sorted(real["tr_id"].astype(int).unique()))
+    folds = []
+    for number, held_out in enumerate(np.array_split(vehicles, 5), start=1):
+        validation = real["tr_id"].astype(int).isin(held_out)
+        training = ~validation
+        model = make_model()
+        model.fit(real.loc[training, FEATURE_COLUMNS], real.loc[training, "target_delay_s"])
+        prediction = model.predict(real.loc[validation, FEATURE_COLUMNS])
+        truth = real.loc[validation, "target_delay_s"].to_numpy(dtype=float)
+        persistence = real.loc[validation, "cur_dev_s"].to_numpy(dtype=float)
+        folds.append({
+            "fold": number,
+            "vehicles": held_out.tolist(),
+            "rows": int(validation.sum()),
+            "mae_cur_dev_s": mae(truth, persistence),
+            "mae_catboost": mae(truth, prediction),
+        })
+    rows = sum(item["rows"] for item in folds)
+    return {
+        "method": "5 folds by real tr_id; synthetic rows excluded",
+        "folds": folds,
+        "weighted": {
+            "mae_cur_dev_s": sum(item["rows"] * item["mae_cur_dev_s"] for item in folds) / rows,
+            "mae_catboost": sum(item["rows"] * item["mae_catboost"] for item in folds) / rows,
+        },
+    }
 
 
-if __name__=="__main__":main()
+def semantic_submission_hash(frame: pd.DataFrame) -> str:
+    payload = "\n".join(
+        f"{sample_id};{float(prediction):.17g}"
+        for sample_id, prediction in zip(frame["sample_id"].astype(str), frame["prediction"])
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data", default="dataset")
+    parser.add_argument("--out", default="artifacts")
+    parser.add_argument("--skip-group-holdout", action="store_true")
+    args = parser.parse_args()
+    root, output = Path(args.data), Path(args.out)
+    output.mkdir(parents=True, exist_ok=True)
+
+    train_points, train = load_split(root, "train")
+    test_points, test = load_split(root, "test")
+    validate_points, validate = load_split(root, "validate")
+
+    model = make_model()
+    model.fit(
+        train[FEATURE_COLUMNS], train["target_delay_s"],
+        eval_set=(test[FEATURE_COLUMNS], test["target_delay_s"]),
+        early_stopping_rounds=80, use_best_model=True,
+    )
+    if model.tree_count_ != 500:
+        raise RuntimeError(f"Reference model must retain all 500 trees, got {model.tree_count_}")
+
+    started = time.perf_counter()
+    test_prediction = model.predict(test[FEATURE_COLUMNS])
+    batch_ms = (time.perf_counter() - started) * 1_000.0
+    validate_prediction = model.predict(validate[FEATURE_COLUMNS])
+    truth = test["target_delay_s"].to_numpy(dtype=float)
+    residuals = truth - test_prediction
+    radius = conformal_radius(residuals)
+    late_probability = np.asarray([
+        (1 + np.sum(residuals > LATE_THRESHOLD_S - prediction)) / (len(residuals) + 2)
+        for prediction in test_prediction
+    ])
+    actual_late = truth > LATE_THRESHOLD_S
+
+    template = pd.read_csv(root / "sample_submission.csv", sep=";")
+    submission = pd.DataFrame({
+        "sample_id": validate_points["sample_id"].astype(str),
+        "prediction": validate_prediction,
+    }).set_index("sample_id").loc[template["sample_id"].astype(str)].reset_index()
+    if submission["prediction"].isna().any() or not submission["sample_id"].is_unique:
+        raise RuntimeError("Submission contract failed")
+
+    metadata = {
+        "selected": "v5",
+        "version": MODEL_VERSION,
+        "target_mode": "direct_delay",
+        "ensemble": False,
+        "features": FEATURE_COLUMNS,
+        "calibration_residuals": residuals.tolist(),
+        "interval_radius_s": radius,
+        "late_threshold_s": LATE_THRESHOLD_S,
+        "nominal_coverage": NOMINAL_COVERAGE,
+        "training": {
+            "rows": len(train), "iterations": model.tree_count_,
+            "reference_commit": REFERENCE_COMMIT,
+            "test_role": "labelled evaluation and non-binding early-stopping monitor",
+            "identifiers_excluded": ["target_stop_id", "tr_id"],
+        },
+    }
+    holdout = None if args.skip_group_holdout else group_holdout(train)
+    report = {
+        "model": MODEL_VERSION,
+        "reference_commit": REFERENCE_COMMIT,
+        "target_mode": "direct_delay",
+        "rows": {"train": len(train), "test": len(test), "validate": len(validate)},
+        "feature_count": len(FEATURE_COLUMNS),
+        "mae_test": {
+            "zero": mae(truth, np.zeros(len(test))),
+            "cur_dev_s": mae(truth, test["cur_dev_s"]),
+            "catboost": mae(truth, test_prediction),
+        },
+        "interval_coverage": float(np.mean(np.abs(residuals) <= radius)),
+        "interval_radius_s": radius,
+        "brier_score": float(np.mean((late_probability - actual_late) ** 2)),
+        "batch_inference_ms": batch_ms,
+        "best_iteration": model.tree_count_ - 1,
+        "leaderboard": {
+            "status": "user-reported best commit",
+            "commit": REFERENCE_COMMIT,
+            "score": 1.0,
+        },
+        "real_vehicle_group_holdout": holdout,
+        "warning": (
+            "The supplied test and validate telemetry files are identical and also occur in train. "
+            "Test MAE is a pipeline diagnostic, not an independent estimate for a new day."
+        ),
+    }
+
+    model.save_model(str(output / "model.cbm"))
+    (output / "model.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "feature_schema.json").write_text(json.dumps({
+        "version": MODEL_VERSION, "features": FEATURE_COLUMNS,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output / "metrics.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    submission.to_csv(output / "submission.csv", sep=";", index=False)
+    pd.DataFrame({
+        "feature": FEATURE_COLUMNS, "importance": model.get_feature_importance(),
+    }).sort_values("importance", ascending=False).to_csv(output / "feature_importance.csv", index=False)
+    pd.DataFrame({
+        "sample_id": test_points["sample_id"], "actual": truth,
+        "cur_dev_s": test["cur_dev_s"], "prediction": test_prediction,
+        "abs_error": np.abs(residuals), "lower_s": test_prediction - radius,
+        "upper_s": test_prediction + radius, "late_probability": late_probability,
+    }).to_csv(output / "test_predictions.csv", index=False)
+    (output / "environment.json").write_text(json.dumps({
+        "numpy": np.__version__, "pandas": pd.__version__, "catboost": catboost.__version__,
+    }, indent=2), encoding="utf-8")
+    (output / "verification.json").write_text(json.dumps({
+        "reference_commit": REFERENCE_COMMIT,
+        "submission_semantic_sha256": semantic_submission_hash(
+            pd.read_csv(output / "submission.csv", sep=";")
+        ),
+        "rows": len(submission), "sample_ids_unique": bool(submission["sample_id"].is_unique),
+        "finite_predictions": bool(np.isfinite(submission["prediction"]).all()),
+    }, indent=2), encoding="utf-8")
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

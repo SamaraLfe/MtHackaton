@@ -1,6 +1,5 @@
 {
   "numpy": "2.5.3",
   "pandas": "3.0.6",
-  "catboost": "1.2.10",
-  "torch": "2.14.0+cpu"
+  "catboost": "1.2.10"
 }

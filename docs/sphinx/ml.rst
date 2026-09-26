@@ -2,10 +2,10 @@
 =================
 
 ML запускается как самостоятельный FastAPI-сервис ``ml.service:app``. Backend
-передаёт ему исходную точку, причинную историю и план остановок. В V5.5 модель
-не принимает заранее вычисленный набор 15 признаков: она строит 104 сырых
-признака через ``build_v5_row`` и передаёт модели 102 признака после
-исключения идентификаторов. Обучаемая цель V5.5 — непосредственно
+передаёт ему исходную точку, причинную историю и план остановок. Модель
+``champion-b4b`` строит через ``build_v5_row`` 60 причинных GPS-признаков.
+Идентификаторы транспорта и остановки в модель не передаются. Обучаемая цель —
+непосредственно
 ``target_delay_s``; ``cur_dev_s`` является причинным признаком и не прибавляется
 к прогнозу повторно.
 
@@ -30,11 +30,11 @@ ML запускается как самостоятельный FastAPI-серв
    :members:
    :show-inheritance:
 
-Признаки V5
------------
+Признаки модели
+---------------
 
 .. automodule:: ml.feature_builder
-   :members: empty_feature_dict, normalize_bool, haversine_m, bearing_deg, parse_point, prepare_traffic, prepare_schedule, add_target_coordinates, make_basic_features, build_telemetry_features, build_route_features, build_feature_matrix, build_v5_row
+   :members: normalize_bool, haversine_m, parse_point, prepare_traffic, prepare_schedule, build_feature_row, build_feature_table, build_v5_row
 
 Обучение
 --------

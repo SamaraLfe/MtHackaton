@@ -30,7 +30,7 @@ def test_metrics_expose_readable_v5_summary():
         assert response.status_code==200
         data=response.json()
         assert data['v5']['model']=='v5'
-        assert data['v5']['features']==102
+        assert data['v5']['features']==60
         assert data['v5']['test_points']==353
         assert data['v5']['mae_s']<data['v5']['baseline_mae_s']
         assert data['v5']['improvement_pct']>0
