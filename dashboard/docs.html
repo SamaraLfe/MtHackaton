@@ -197,7 +197,7 @@ curl -sS "$TAKT_URL/health"</code></pre>
 
   <section id="dispatchers">
     <div class="endpoint"><span class="method get">GET</span><code>/api/dispatchers</code><span class="service">Backend · рабочие места</span></div><h2>Профили диспетчеров и назначения</h2>
-    <p>Профиль определяет, какие рейсы показывает диспетчерская. Это локальный демонстрационный вход: парольных логинов, токенов и SSO здесь нет, при входе выбирается тестовая учётная запись. При первом запуске создаются <code>admin-01</code>, <code>dispatcher-01</code> и <code>dispatcher-02</code>.</p>
+    <p>Профиль определяет, какие рейсы показывает диспетчерская. Это локальный демонстрационный вход: парольных логинов, токенов и SSO здесь нет, при входе выбирается тестовая учётная запись. При первом запуске создаются <code>admin-01</code>, <code>dispatcher-01</code> и старший «Диспетчер №2 (все ТС)» (<code>dispatcher-02</code>), которому по умолчанию назначен весь парк.</p>
     <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/dispatchers"
 curl -sS "$TAKT_URL/api/dispatchers/dispatcher-01"
 curl -sS "$TAKT_URL/api/state?dispatcher_id=dispatcher-01"</code></pre>

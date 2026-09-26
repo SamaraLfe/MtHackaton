@@ -208,6 +208,18 @@ def test_dispatcher_profiles_are_available_for_local_workspaces():
         assert {'id','name','role'}<=set(profiles[0])
 
 
+def test_senior_dispatcher_defaults_to_the_complete_fleet():
+    with sqlite3.connect(backend.DB_PATH) as store:
+        store.execute("DELETE FROM app_meta WHERE key='dispatcher_02_all_routes_v1'")
+        store.execute("DELETE FROM assignments WHERE dispatcher_id='dispatcher-02'")
+    with TestClient(backend.app) as client:
+        profile=client.get('/api/dispatchers/dispatcher-02').json()
+        expected=sorted(int(value) for value in backend.schedule.tr_id.unique())
+        assert profile['name']=='Диспетчер №2 (все ТС)'
+        assert profile['role']=='Старший диспетчер'
+        assert profile['assigned_tr_ids']==expected
+
+
 def test_admin_can_create_dispatcher_and_assign_routes():
     dispatcher_id=None
     try:

@@ -51,6 +51,7 @@ history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};c
 deviations={};position_offsets={};position_states={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
+seed_dispatcher_02_all_routes=False
 OFFICIAL_CONFIG_PATH=Path(os.getenv('STATE_DIR','state'))/'official_emulator_config.json'
 simulation_runs={};simulation_tasks={}
 official_config_cache=None
@@ -142,7 +143,7 @@ def _account(row):
     return {'id':row['id'],'name':row['name'],'login':row['login'],'role':row['role'],'status':row['status']}
 
 def init_store():
-    global db
+    global db, seed_dispatcher_02_all_routes
     DB_PATH.parent.mkdir(parents=True,exist_ok=True)
     db=sqlite3.connect(DB_PATH,check_same_thread=False);db.row_factory=sqlite3.Row
     db.executescript('''
@@ -156,10 +157,19 @@ def init_store():
           id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS driver_commands (
           id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS app_meta (
+          key TEXT PRIMARY KEY, value TEXT NOT NULL);
     ''')
-    seeds=[('admin-01','Администратор','admin','Администратор'),('dispatcher-01','Диспетчер №01','dispatcher01','Маршрутный диспетчер'),('dispatcher-02','Диспетчер №02','dispatcher02','Старший диспетчер')]
+    seeds=[('admin-01','Администратор','admin','Администратор'),('dispatcher-01','Диспетчер №01','dispatcher01','Маршрутный диспетчер'),('dispatcher-02','Диспетчер №2 (все ТС)','dispatcher02','Старший диспетчер')]
     for account in seeds:
         db.execute('INSERT OR IGNORE INTO dispatchers(id,name,login,role,status,created_at) VALUES(?,?,?,?,?,?)',(*account,'active',pd.Timestamp.now(tz='Europe/Moscow').isoformat()))
+    # Rename the built-in profile in existing state volumes without touching
+    # names of user-created accounts.
+    db.execute('UPDATE dispatchers SET name=?, role=? WHERE id=?',
+               ('Диспетчер №2 (все ТС)','Старший диспетчер','dispatcher-02'))
+    seed_dispatcher_02_all_routes=db.execute(
+        'SELECT 1 FROM app_meta WHERE key=?',('dispatcher_02_all_routes_v1',)
+    ).fetchone() is None
     db.commit()
 
 def get_dispatcher(dispatcher_id):
@@ -865,9 +875,14 @@ async def lifespan(app):
 
     schedule_template = schedule.copy()
     all_ids=sorted({int(item) for item in schedule.tr_id.unique()})
-    for dispatcher_id,parity in (('dispatcher-01',0),('dispatcher-02',1)):
-        if db.execute('SELECT COUNT(*) AS count FROM assignments WHERE dispatcher_id=?',(dispatcher_id,)).fetchone()['count']==0:
-            db.executemany('INSERT OR IGNORE INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,tr_id) for index,tr_id in enumerate(all_ids) if index%2==parity])
+    if db.execute('SELECT COUNT(*) AS count FROM assignments WHERE dispatcher_id=?',('dispatcher-01',)).fetchone()['count']==0:
+        db.executemany('INSERT OR IGNORE INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',
+                       [('dispatcher-01',tr_id) for index,tr_id in enumerate(all_ids) if index%2==0])
+    if seed_dispatcher_02_all_routes:
+        db.executemany('INSERT OR IGNORE INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',
+                       [('dispatcher-02',tr_id) for tr_id in all_ids])
+        db.execute('INSERT OR REPLACE INTO app_meta(key,value) VALUES(?,?)',
+                   ('dispatcher_02_all_routes_v1',pd.Timestamp.now(tz='Europe/Moscow').isoformat()))
     db.commit()
     # Если базовое ТС назначено диспетчеру,
     # автоматически назначаем ему и его custom-копию.
