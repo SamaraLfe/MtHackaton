@@ -15,6 +15,8 @@ services:
     command: python scripts/start_backend.py
     environment:
       ML_URL: http://ml:8001
+      CUSTOM_EMULATOR_URL: http://custom-emulator:18081
+      OFFICIAL_EMULATOR_URL: http://emulator:18080
       NDTP_PORT: "9201"
       START_MODE: live
     volumes:
@@ -56,7 +58,7 @@ services:
       EMULATOR_INTERVAL_S: "3"
       EMULATOR_MAX_VEHICLES: "0"
 
-      EMULATOR_START_PAUSED: "1"
+      EMULATOR_START_PAUSED: "0"
 
       CUSTOM_TR_ID_OFFSET: "1000000"
       CUSTOM_UNIT_ID_OFFSET: "100000000"

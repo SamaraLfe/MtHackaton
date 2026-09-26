@@ -129,7 +129,7 @@ curl -sS "$TAKT_URL/health"</code></pre>
       <tr><td><code>model</code>, <code>degraded</code></td><td>В штатном режиме <code>v5</code> и <code>false</code>. При ошибке ML — <code>persistence_fallback</code> и <code>true</code>: прогноз равен текущему <code>cur_dev_s</code>, вероятность отсутствует.</td></tr>
       <tr><td><code>stale</code></td><td>Истина при отсутствии достоверного GPS или возрасте телеметрии больше 120 с на момент расчёта. <code>/api/state</code> дополнительно проверяет возраст самого прогноза.</td></tr>
       <tr><td><code>deviation_estimated</code></td><td>Необязательное поле: <code>true</code>, если в live ещё не подтверждено текущее отклонение. Такой результат получает <code>level: "unknown"</code>.</td></tr>
-      <tr><td><code>source</code>, <code>telemetry_source</code></td><td><code>source</code> обозначает контекст расчёта: <code>live</code>, <code>historical_replay</code> или <code>api</code>. <code>telemetry_source</code> показывает путь живой координаты: <code>ndtp_nav00</code> — Nav00 с проверкой CRC и разбором NDTP; <code>http_json</code> — событие POST <code>/api/telemetry</code>.</td></tr>
+      <tr><td><code>source</code>, <code>telemetry_source</code></td><td><code>source</code> обозначает контекст расчёта: <code>live</code>, <code>historical_replay</code> или <code>api</code>. <code>telemetry_source</code> показывает путь живой координаты: <code>custom_ndtp_nav00</code> — собственный custom-emulator, <code>ndtp_nav00</code> — оригинальный Nav00 с проверкой CRC и разбором NDTP; <code>http_json</code> — событие POST <code>/api/telemetry</code>.</td></tr>
       <tr><td><code>reason</code>, <code>reason_is_hypothesis</code>, <code>recommendation</code></td><td>Текст наблюдаемого паттерна и рекомендуемого действия. Причина является гипотезой: низкая скорость сама по себе не доказывает пробку или поломку.</td></tr>
       <tr><td><code>lon</code>, <code>lat</code>, <code>position_time</code></td><td>Последняя подходящая позиция и её Unix-время в секундах. Координаты могут быть <code>null</code>; <code>position_time</code> — число, в отличие от строкового <code>T</code>.</td></tr>
       <tr><td><code>features</code></td><td>Диагностические признаки backend: скорость, возраст GPS, простой и другие значения. Это компактный набор полей для объяснения, а не полный вход модели из 102 признаков.</td></tr>
@@ -195,7 +195,7 @@ curl -sS "$TAKT_URL/health"</code></pre>
 
   <section id="dispatchers">
     <div class="endpoint"><span class="method get">GET</span><code>/api/dispatchers</code><span class="service">Backend · рабочие места</span></div><h2>Профили диспетчеров и назначения</h2>
-    <p>Профиль определяет, какие рейсы показывает диспетчерская. Это локальный контур управления: данные лежат в <code>state/dispatcher.db</code>, но логинов с паролями, токенов и SSO здесь нет. При первом запуске создаются <code>admin-01</code>, <code>dispatcher-01</code> и <code>dispatcher-02</code>.</p>
+    <p>Профиль определяет, какие рейсы показывает диспетчерская. Это локальный демонстрационный вход: парольных логинов, токенов и SSO здесь нет, при входе выбирается тестовая учётная запись. При первом запуске создаются <code>admin-01</code>, <code>dispatcher-01</code> и <code>dispatcher-02</code>.</p>
     <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/dispatchers"
 curl -sS "$TAKT_URL/api/dispatchers/dispatcher-01"
 curl -sS "$TAKT_URL/api/state?dispatcher_id=dispatcher-01"</code></pre>
@@ -402,6 +402,15 @@ projected_late_probability = max_late_probability × risk_multiplier</code></pre
     <p><code>id</code> — идентификатор записи, <code>created_at</code> — время её создания, <code>action_title</code> — русское название действия. <code>status: "queued_for_integration"</code> означает, что запись добавлена в локальную очередь; <code>channel</code> называет эту очередь.</p>
     <div class="note warn"><strong>Водителю ничего не доставлено.</strong><p><code>external_delivery: false</code> означает, что радио-, телефонный или телематический канал не подключён. Не показывайте пользователю «отправлено водителю» на основании этого ответа.</p></div>
     <p>Существование <code>tr_id</code> в текущем состоянии не проверяется, но <code>dispatcher_id</code> обязан существовать. Роль берётся из тела запроса. Неверные поля или неизвестный профиль дают <code>422</code>. Повтор запроса создаёт новую запись — защиты от дублирования нет.</p>
+  </section>
+
+  <section id="emulator-control">
+    <div class="endpoint"><span class="method get">GET</span><code>/api/admin/emulators</code><span class="service">Backend · источники</span></div><h2>Источники и пауза потока</h2>
+    <p>Ответ различает собственный <code>custom-emulator</code> и внешний оригинальный NDTP-образ. <code>POST /api/admin/emulators/custom-emulator/pause</code> и <code>resume</code> управляют встроенной эмуляцией. Для всей картины используйте <code>/api/admin/emulators/all/pause</code>: backend перестаёт принимать новые события и отменяет активные тестовые запуски.</p>
+    <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/admin/emulators"
+curl -sS -X POST "$TAKT_URL/api/admin/emulators/all/pause" \
+  -H 'Content-Type: application/json' -d '{"dispatcher_id":"admin-01"}'</code></pre>
+    <p>Это управляемая пауза, а не удаление контейнера. Для внешнего образа переключается только <code>autoGenerate</code> через его штатный <code>/api/config</code>; жизненный цикл контейнера остаётся в Docker Compose.</p>
   </section>
 
   <section id="simulation-status">

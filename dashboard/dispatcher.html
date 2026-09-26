@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-6">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-5">
 </head>
 <body>
   <header class="topbar">
@@ -17,7 +17,7 @@
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1></div>
+      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1><p class="intro-note"><b>Как читать прогноз:</b> отклонение — секунды относительно следующей плановой остановки; гипотеза требует проверки.</p></div>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
@@ -71,11 +71,11 @@
 
   <div class="drawer" id="drawer" aria-hidden="true"><div class="drawer-overlay" data-close-drawer></div><aside class="drawer-panel"><button class="close" data-close-drawer type="button" aria-label="Закрыть">×</button><div id="vehicle-detail"></div></aside></div>
 
-  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ЛИЧНЫЙ ПРОФИЛЬ</p><h2>Рабочее место диспетчера</h2><p>Профиль подписывает указания в журнале текущей смены.</p></div><button value="cancel" class="close" type="button" id="profile-close">×</button></div><label class="profile-select">Диспетчер<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" value="cancel">Отмена</button><button class="primary" id="profile-save" value="default">Открыть рабочее место</button></div><p class="dialog-note">Локальный MVP использует профиль смены, а не защищённую учётную запись. Для промышленного доступа необходимы SSO/JWT и права из серверной сессии.</p></form></dialog>
+  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ДИСПЕТЧЕРСКУЮ</p><h2>Выберите тестовую учётную запись</h2><p>Выбор нужен, чтобы подписывать указания и показывать закреплённые рейсы.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Рабочее место<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Войти в дашборд</button></div><p class="dialog-note">Это локальный вход для прототипа: пароль, SSO и серверная сессия не имитируются. Для production подключаются корпоративные права доступа.</p></form></dialog>
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=prototype-6"></script>
-  <script src="/static/dispatcher.js?v=prototype-6"></script>
+  <script src="/static/map.js?v=prototype-5"></script>
+  <script src="/static/dispatcher.js?v=prototype-5"></script>
 </body>
 </html>

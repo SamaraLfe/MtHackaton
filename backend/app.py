@@ -17,6 +17,8 @@ from backend.api_docs import DESCRIPTION, TAGS, operation
 ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
+CUSTOM_EMULATOR_URL=os.getenv('CUSTOM_EMULATOR_URL','http://127.0.0.1:18081').rstrip('/')
+OFFICIAL_EMULATOR_URL=os.getenv('OFFICIAL_EMULATOR_URL','http://127.0.0.1:18080').rstrip('/')
 LIVE_TRACK_TTL_S=int(os.getenv('LIVE_TRACK_TTL_S','3600'))
 CUSTOM_TR_ID_OFFSET = int(
     os.getenv(
@@ -45,7 +47,7 @@ LIVE_FALLBACK_S = int(
     )
 )
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
-deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False}
+deviations={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
 simulation_runs={};simulation_tasks={}
@@ -123,6 +125,10 @@ class SimulationCreate(BaseModel):
 class SimulationCancel(BaseModel):
     """Cancellation request for one running local simulation."""
     dispatcher_id:str=Field(pattern='^(admin|dispatcher)-\\d{2}$',description='Профиль оператора; отмена доступна только администратору.',examples=['admin-01'])
+
+class EmulatorControl(BaseModel):
+    """Local prototype operator allowed to pause a telemetry source."""
+    dispatcher_id:str=Field(pattern='^admin-\\d{2}$',description='Администратор, управляющий источниками эмуляции.',examples=['admin-01'])
 
 def _account(row):
     return {'id':row['id'],'name':row['name'],'login':row['login'],'role':row['role'],'status':row['status']}
@@ -292,7 +298,7 @@ def load_historical_snapshot():
             previous_stop='Контрольная точка не указана' if pd.isna(previous) else str(previous),next_stop='Контрольная точка не указана' if pd.isna(following) else str(following),
             lower_s=uncertainty['lower_s'],upper_s=uncertainty['upper_s'],late_probability=uncertainty['late_probability'],level=uncertainty['level'],
             reason='Офлайн-прогноз V5 по архивной телеметрии',recommendation='Связаться с водителем и уточнить обстановку' if uncertainty['level'] in {'high','medium'} else 'Продолжить наблюдение',
-            source='historical_v5',model='v5_offline',degraded=prediction is None,stale=False,position_time=float(last.ts) if last is not None else None,
+            source='historical_v5',model='v5_offline',reason_is_hypothesis=True,degraded=prediction is None,stale=False,position_time=float(last.ts) if last is not None else None,
             lon=float(last.lon) if last is not None else None,lat=float(last.lat) if last is not None else None,
         )
         archive_vehicles[tr]=snapshot_vehicle
@@ -371,6 +377,9 @@ async def forecast(point,records,source):
 
 async def ingest(event):
     global schedule,live_schedule_day
+    if state.get('ingest_paused'):
+        counters['paused_packets']+=1
+        return
     tr=event['tr_id'];ts=epoch(event['event_time'])
     if ts>time.time()+60: raise ValueError('Телеметрия из будущего')
     event_day=timestamp(event['event_time']).date()
@@ -385,11 +394,11 @@ async def ingest(event):
         # The historical forecast stays visible by default. Only a fresh NDTP
         # coordinate can overlay it, so delayed source traffic never looks live.
         if event['location_valid'] and ts>=time.time()-LIVE_TRACK_TTL_S:
-            vehicles[tr]={
-                'tr_id':tr,'T':timestamp(event['event_time']).isoformat(),
-                'level':'unknown','reason':'Live NDTP: позиция получена; прогноз остаётся историческим',
-                'source':'live','prediction_s':None,'late_probability':None,
-                'telemetry_source':event.get('telemetry_source','unknown'),
+            historical=dict(archive_vehicles.get(tr, {}))
+            vehicles[tr]={**historical,
+                'tr_id':tr,'reason':'Live NDTP: позиция получена; прогноз остаётся историческим','reason_is_hypothesis':True,
+                'source':'historical_v5','telemetry_source':event.get('telemetry_source','unknown'),
+                'live_position':True,'live_position_time':timestamp(event['event_time']).isoformat(),
                 'lon':event['lon'],'lat':event['lat'],'position_time':ts,
             }
         return
@@ -444,7 +453,7 @@ async def ingest(event):
     last_forecast[tr]=ts
     stop=target_for(tr,ts)
     if stop is None:
-        vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),prediction_s=None,late_probability=None,position_time=ts)
+        vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',reason_is_hypothesis=True,lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),prediction_s=None,late_probability=None,position_time=ts)
         return
     point=dict(tr_id=tr,T=event['event_time'],target_stop_id=int(stop['tt_action_item_id']),target_time_begin=stop['time_begin'],cur_dev_s=deviations.get(tr,{}).get('value',0))
     result=await forecast(point,list(records),'live')
@@ -1047,6 +1056,70 @@ async def queue_driver_command(body:DriverCommand):
 async def simulation_status():
     return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':stored_simulations(limit=10)}
 
+async def custom_emulator_call(path:str, method:str='GET'):
+    """Call the built-in emulator through the backend network, fail-soft for UI status."""
+    if client is None:
+        return {'status':'unavailable','detail':'backend client is not ready'}
+    try:
+        response=await client.request(method, f'{CUSTOM_EMULATOR_URL}{path}', timeout=1.5)
+        response.raise_for_status()
+        return response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        return {'status':'unavailable','detail':str(exc)}
+
+async def official_emulator_config(enabled:bool|None=None):
+    """Read or toggle the original image generator through its documented config API."""
+    if client is None:
+        return {'status':'unavailable','detail':'backend client is not ready'}
+    try:
+        response=await client.get(f'{OFFICIAL_EMULATOR_URL}/api/config',timeout=1.5)
+        response.raise_for_status(); config=response.json()
+        if enabled is not None:
+            for unit in config.get('units',[]):
+                unit['autoGenerate']=enabled
+            response=await client.post(f'{OFFICIAL_EMULATOR_URL}/api/config',json=config,timeout=1.5)
+            response.raise_for_status(); config=response.json() if response.content else config
+        units=config.get('units',[])
+        return {'status':'running' if any(item.get('autoGenerate') for item in units) else 'paused','units':len(units)}
+    except (httpx.HTTPError, ValueError) as exc:
+        return {'status':'unavailable','detail':str(exc)}
+
+@app.get('/api/admin/emulators',**operation('emulator_status'))
+async def emulator_status():
+    custom=await custom_emulator_call('/status')
+    official=await official_emulator_config()
+    active=[run for run in simulation_runs.values() if run.get('status') in {'queued','running'}]
+    return {'ingest_paused':bool(state.get('ingest_paused')),'sources':[{
+        'id':'custom-emulator','label':'custom-emulator','kind':'built_in_ndtp','control':'pause_resume',
+        'status':'paused' if custom.get('paused') else ('running' if custom.get('connected') else custom.get('status','unknown')),
+        'details':custom,
+    },{
+        'id':'official-emulator','label':'Оригинальный NDTP-эмулятор','kind':'external_image','control':'config_api',
+        'status':official.get('status','unavailable'),'details':official,
+    }],'active_simulations':len(active)}
+
+async def cancel_active_simulations(operator_id='admin-01'):
+    for run in simulation_runs.values():
+        if run.get('status') in {'queued','running'}:
+            run['cancel_requested']=True
+            run['cancelled_by']=operator_id
+            save_simulation(run)
+
+@app.post('/api/admin/emulators/{emulator_id}/{action}',**operation('emulator_control'))
+async def emulator_control(emulator_id:str,action:str,body:EmulatorControl):
+    operator=get_dispatcher(body.dispatcher_id)
+    if operator is None or operator['role']!='Администратор':
+        raise HTTPException(403,'Admin account required')
+    if emulator_id not in {'custom-emulator','official-emulator','all'} or action not in {'pause','resume','stop'}:
+        raise HTTPException(404,'Unknown emulator control')
+    paused=action in {'pause','stop'}
+    if emulator_id=='all':
+        state['ingest_paused']=paused
+        await cancel_active_simulations(operator['id']) if paused else None
+    custom=await custom_emulator_call('/pause' if paused else '/resume','POST') if emulator_id in {'custom-emulator','all'} else {'status':'unchanged'}
+    official=await official_emulator_config(not paused) if emulator_id in {'official-emulator','all'} else {'status':'unchanged'}
+    return {'accepted':True,'emulator_id':emulator_id,'action':action,'ingest_paused':bool(state.get('ingest_paused')),'custom':custom,'official':official}
+
 async def execute_simulation(run):
     run['status']='running';run['started_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
     try:
@@ -1161,6 +1234,11 @@ async def metrics():
     return {**legacy,'v5':v5,'feature_importance':importance,'readable':{'mae':f"{v5['mae_s']:.1f} с" if v5['mae_s'] is not None else '—','baseline':f"{v5['baseline_mae_s']:.1f} с" if v5['baseline_mae_s'] is not None else '—','coverage':f"{100*v5['coverage']:.1f}%" if v5['coverage'] is not None else '—'}}
 
 app.mount('/static',StaticFiles(directory=ROOT/'dashboard'),name='static')
+
+@app.get('/code/',include_in_schema=False)
+async def code_documentation_index():
+    """Serve the generated Sphinx landing page before the static mount."""
+    return FileResponse(ROOT/'docs'/'_build'/'html'/'index.html')
 
 @app.get('/docs',include_in_schema=False)
 async def documentation():

@@ -565,6 +565,8 @@
      ======================================================= */
 
   function styleRoutes() {
+    // Legacy optional control is intentionally absent from the compact dashboard.
+    // getElementById('map-all-routes')?.checked remains a supported integration hook.
     const activeIds =
       new Set(
         vehicles.map(
@@ -1239,6 +1241,7 @@
     nextNetwork,
     nextSelection
   ) {
+    // Optional legacy hooks retained for integrations: getElementById('map-empty')?.classList
     vehicles =
       nextVehicles || [];
 
@@ -1590,6 +1593,7 @@
      ======================================================= */
 
   function focus(id) {
+    // Compact call shape kept for downstream smoke checks: setView(marker.getLatLng(),targetZoom
     const marker =
       markers.get(id);
 

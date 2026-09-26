@@ -295,6 +295,16 @@ body {
   max-width: 720px;
 }
 
+.intro-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.intro-note b {
+  color: var(--text);
+}
+
 
 /* ---------------------------------------------------------
    SOURCE NOTE
@@ -1248,6 +1258,11 @@ body.drawer-open .topbar {
   color: #435665;
 
   font-size: 12px;
+}
+
+.explanation-section .evidence-note {
+  color: #71818d;
+  font-size: 11px;
 }
 
 .action-section {

@@ -4,6 +4,7 @@
   const $ = id => document.getElementById(id);
 
   const PROFILE_KEY = 'takt-dispatcher-profile';
+  const AUTH_KEY = 'takt-dispatcher-auth';
 
   const labels = {
     low: 'В графике',
@@ -32,6 +33,9 @@
   let profiles = [];
   let profileId =
     localStorage.getItem(PROFILE_KEY) || '';
+
+  const isAuthenticated = () =>
+    sessionStorage.getItem(AUTH_KEY) === '1' && Boolean(profileId);
 
   let reserveScenario = null;
   let lastRuntime = {};
@@ -128,8 +132,10 @@
     }
 
     const source =
-      vehicle.telemetry_source === 'ndtp_nav00'
-        ? 'Live NDTP Nav00 → CRC → backend'
+      vehicle.telemetry_source === 'custom_ndtp_nav00'
+        ? 'custom-emulator → NDTP Nav00 → CRC → backend'
+        : vehicle.telemetry_source === 'ndtp_nav00'
+          ? 'Оригинальный NDTP → Nav00 → CRC → backend'
         : vehicle.telemetry_source === 'http_json'
           ? 'HTTP JSON → backend'
           : 'живая телеметрия → backend';
@@ -150,7 +156,7 @@
     }
 
     return (
-      'Архивный fallback: validate-телеметрия → ' +
+      'Архивная телеметрия (Архивный fallback): validate-телеметрия → ' +
       'расписание → сохранённый V5.'
     );
   };
@@ -281,17 +287,11 @@
         )
         .join('');
 
-    if (
-      !profiles.some(
-        profile =>
-          profile.id === profileId
-      )
-    ) {
-      profileId =
-        profiles[0]?.id || '';
+    if (!profiles.some(profile => profile.id === profileId)) {
+      profileId = '';
     }
 
-    updateProfile();
+    if (profileId) updateProfile();
   }
 
 
@@ -1464,6 +1464,24 @@
           </b>
         </div>
 
+        <div>
+          <span>
+            ИСТОЧНИК ПОЗИЦИИ
+          </span>
+
+          <b>
+            ${esc(
+              vehicle.telemetry_source === 'custom_ndtp_nav00'
+                ? 'custom-emulator'
+                : vehicle.telemetry_source === 'ndtp_nav00'
+                  ? 'Оригинальный NDTP (Live NDTP)'
+                  : vehicle.live_position
+                    ? 'HTTP / live-телеметрия'
+                    : 'Архивная телеметрия'
+            )}
+          </b>
+        </div>
+
       </div>
 
 
@@ -1500,7 +1518,7 @@
           )}
 
           ${
-            vehicle.reason_is_hypothesis
+            vehicle.reason_is_hypothesis !== false
               ? (
                   '<span class="hypothesis">' +
                   'Рабочая гипотеза, ' +
@@ -1519,6 +1537,10 @@
           ${esc(
             featureText(vehicle)
           )}.
+        </p>
+
+        <p class="evidence-note">
+          Остановка в карточке — плановая контрольная точка. Факт остановки подтверждается только близкой медленной телеметрией; название остановки само по себе не доказывает причину отклонения.
         </p>
 
         <p>
@@ -1970,9 +1992,14 @@
 
 
   $('profile-close').onclick =
-    () =>
-      $('profile-dialog')
-        .close();
+    () => {
+      if (isAuthenticated()) $('profile-dialog').close();
+    };
+
+  $('profile-cancel').onclick =
+    () => {
+      if (isAuthenticated()) $('profile-dialog').close();
+    };
 
 
   $('profile-save').onclick =
@@ -1983,6 +2010,7 @@
         $('profile-select').value;
 
       updateProfile();
+      sessionStorage.setItem(AUTH_KEY, '1');
 
       $('profile-dialog')
         .close();
@@ -2010,6 +2038,10 @@
   (
     async () => {
       await loadProfiles();
+      if (!isAuthenticated()) {
+        $('profile-dialog').showModal();
+        return;
+      }
       await refresh();
 
       setInterval(
