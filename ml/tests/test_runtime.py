@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from ml.model import Predictor
-from ml.v5_features import build_v5_row
+from ml.feature_builder import build_v5_row
 
 
 def test_v5_artifact_has_runtime_schema_and_catboost_model():
@@ -19,7 +19,7 @@ def test_v5_artifact_has_runtime_schema_and_catboost_model():
     assert predictor.model.feature_names_ == predictor.v5_features
 
 
-def test_v5_runtime_builds_causal_row_and_prediction():
+def test_runtime_builds_causal_row_and_prediction():
     root=Path("dataset")
     point = pd.read_csv(root/"labels/labels_test.csv").iloc[0].to_dict()
     traffic = pd.read_csv(root/"test/traffic.csv")

@@ -33,7 +33,7 @@ ML запускается как самостоятельный FastAPI-серв
 Признаки V5
 -----------
 
-.. automodule:: ml.v5_features
+.. automodule:: ml.feature_builder
    :members: empty_feature_dict, normalize_bool, haversine_m, bearing_deg, parse_point, prepare_traffic, prepare_schedule, add_target_coordinates, make_basic_features, build_telemetry_features, build_route_features, build_feature_matrix, build_v5_row
 
 Обучение

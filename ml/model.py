@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostRegressor
 from ml.features import FEATURES
-from ml.v5_features import build_v5_row
+from ml.feature_builder import build_v5_row
 
 class Predictor:
     def __init__(self, directory):
