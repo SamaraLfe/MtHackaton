@@ -726,6 +726,9 @@
 
     $('kpi-predictions').textContent = baseVehicles.filter(v => v.source === 'live' && !v.stale && !v.degraded && Number.isFinite(v.prediction_s)).length;
 
+    const processingMs = Number(counters.last_inference_ms);
+    $('kpi-processing').textContent = Number.isFinite(processingMs) ? `${processingMs} мс` : '—';
+
     /* stream status */
 
     $('stream-title').textContent =
