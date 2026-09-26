@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-4">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-5">
 </head>
 <body>
   <header class="topbar">
@@ -17,21 +17,25 @@
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ПРОГНОЗ НА 10–15 МИНУТ</p><h1>Рейсы, требующие внимания</h1><p class="intro-copy">NDTP-телеметрия автоматически проходит проверку, сопоставляется с расписанием и поступает в модель V5. При отсутствии потока показан явно помеченный архивный fallback.</p></div>
-      <div class="archive-note"><b id="source-title">Источник данных</b><span id="source-detail">Проверка Backend</span><small id="source-note">Архив и live-поток никогда не смешиваются в одном прогнозе</small></div>
+      <div><p class="eyebrow">ПРОГНОЗ НА 10–15 МИНУТ</p><h1>Рейсы, требующие внимания</h1><p class="intro-copy">Сначала — отклонение, следующая контрольная остановка и действие. Архивный прогноз всегда отмечен отдельно от live-позиции.</p></div>
+      <div class="archive-note"><b id="source-title">Источник данных</b><span id="source-detail">Проверка Backend</span><small id="source-note">Архив и live-поток не смешиваются</small></div>
     </section>
 
     <section class="truth-strip" aria-label="Как читать прогноз">
-      <span><b>+180 с</b> — прогноз опоздания на контрольной остановке, не время в пути</span>
-      <span><b>Риск</b> — калиброванная оценка, причина — наблюдаемый сигнал, а не диагноз</span>
+      <span><b>Отклонение</b> — секунды относительно следующей плановой остановки. Риск — сигнал для проверки, не диагноз.</span>
       <a href="/docs">Методика и API →</a>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
-      <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя точка по каждому ТС</small></article>
-      <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск опоздания</small></article>
-      <article><span>NDTP-ПАКЕТОВ</span><b id="kpi-packets">—</b><small id="kpi-telemetry">с начала запуска</small></article>
-      <article><span>ПРОГНОЗОВ V5</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание модели</small></article>
+      <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя позиция по каждому ТС</small></article>
+      <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск</small></article>
+      <article><span>LIVE-ПРОГНОЗЫ</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание свежих данных</small></article>
+    </section>
+
+    <section class="reserve-card card" aria-labelledby="reserve-title">
+      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Сценарий считает ожидаемый эффект на риск линии и показывает резерв на карте. Он не меняет live-расписание и помечен как what-if.</p></div>
+      <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><label>Причина<select id="reserve-reason"><option value="delay">Снижение отставания</option><option value="early">Выравнивание при опережении</option></select></label><label>Изменение интервала<input id="reserve-headway" type="number" min="0" max="50" step="5" value="0"><small>%</small></label><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
+      <div class="reserve-result" id="reserve-result" aria-live="polite"><span>Выберите линию, чтобы проверить выпуск резервного ТС.</span></div>
     </section>
 
     <section class="main-grid">
@@ -58,7 +62,7 @@
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=prototype-4"></script>
-  <script src="/static/dispatcher.js?v=prototype-4"></script>
+  <script src="/static/map.js?v=prototype-5"></script>
+  <script src="/static/dispatcher.js?v=prototype-5"></script>
 </body>
 </html>

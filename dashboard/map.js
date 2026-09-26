@@ -15,11 +15,12 @@
     node.textContent=message;node.hidden=!message;
   }
   function content(v) {
+    if(v.scenario) return `<h3>Резервное ТС · what-if</h3><dl><dt>Линия</dt><dd>ТС ${escape(v.route_id)}</dd><dt>Прогноз риска</dt><dd class="popup-prediction">${escape(v.recommendation||'Сценарий')}</dd></dl><p class="popup-caution">Виртуальная позиция для оценки, не live-телеметрия.</p>`;
     const stop=!v.stop_address||['nan','null','none'].includes(String(v.stop_address).toLowerCase())?'Название не указано':v.stop_address;
     return `<h3>ТС ${escape(v.tr_id)}</h3><dl><dt>Прогноз отклонения</dt><dd class="popup-prediction">${delay(v.prediction_s)}</dd><dt>Целевая остановка</dt><dd>${escape(stop)}</dd><dt>Плановое прибытие · МСК</dt><dd>${arrival(v.target_time_begin)}</dd></dl>${v.stale||v.prediction_s==null||v.level==='unknown'?'<p class="popup-caution">Нет свежего прогноза. Проверьте время данных.</p>':''}`;
   }
   function icon(v) {
-    return L.divIcon({className:'transit-marker',iconSize:[32,32],iconAnchor:[16,16],popupAnchor:[0,-19],html:`<span class="transit-marker-icon" style="--vehicle-color:${colors[v.level]||colors.unknown}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="3" width="14" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5 12h14M8 19v2m8-2v2M9 6h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8.5" cy="15.5" r="1" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1" fill="currentColor"/></svg></span>`});
+    return L.divIcon({className:`transit-marker${v.scenario?' scenario-marker':''}`,iconSize:[32,32],iconAnchor:[16,16],popupAnchor:[0,-19],html:`<span class="transit-marker-icon" style="--vehicle-color:${colors[v.level]||colors.unknown}"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="3" width="14" height="16" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M5 12h14M8 19v2m8-2v2M9 6h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8.5" cy="15.5" r="1" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1" fill="currentColor"/></svg></span>`});
   }
   function styleRoutes() {
     const activeIds=new Set(vehicles.map(v=>v.tr_id)),all=document.getElementById('map-all-routes')?.checked??false,byRoute=new Map(vehicles.map(v=>[v.tr_id,v]));
@@ -89,9 +90,9 @@
     for(const vehicle of positioned) {
       let marker=markers.get(vehicle.tr_id);
       if(!marker) {
-        marker=L.marker([vehicle.lat,vehicle.lon],{icon:icon(vehicle),title:`ТС ${vehicle.tr_id}`,keyboard:true,riseOnHover:true}).addTo(map);
+        marker=L.marker([vehicle.lat,vehicle.lon],{icon:icon(vehicle),title:vehicle.scenario?'Резервное ТС':`ТС ${vehicle.tr_id}`,keyboard:true,riseOnHover:true}).addTo(map);
         marker.bindPopup(content(vehicle),{className:'transit-popup',minWidth:235,maxWidth:270,autoPanPadding:[18,25]});
-        marker.bindTooltip(`ТС ${vehicle.tr_id}`,{className:'transit-map-tooltip',offset:[0,-16],direction:'top'});
+        marker.bindTooltip(vehicle.scenario?'Резерв · what-if':`ТС ${vehicle.tr_id}`,{className:'transit-map-tooltip',offset:[0,-16],direction:'top'});
         marker.on('click',()=>onChoose(vehicle.tr_id));
         markers.set(vehicle.tr_id,marker);
       } else {

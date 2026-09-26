@@ -147,8 +147,18 @@ def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     assert 'github.com/SamaraLfe/MtHackaton' in page
     assert 'late_probability' in source
     assert 'reason_is_hypothesis' in source
-    assert 'prototype-4' in page
+    assert 'prototype-5' in page
     assert '/docs#what-if' in page
+
+
+def test_dispatcher_keeps_operational_reserve_what_if_workflow_visible():
+    page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
+    source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
+    map_source=(Path('dashboard')/'map.js').read_text(encoding='utf-8')
+    assert 'Выпустить резервное ТС' in page
+    assert 'reserve-route' in page and 'reserve-reason' in page
+    assert "'/api/what-if'" in source
+    assert 'scenarioVehicle' in source and 'scenario-marker' in map_source
 
 
 def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():
