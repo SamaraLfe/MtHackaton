@@ -11,13 +11,13 @@
   <header class="topbar">
     <a class="brand" href="/"><span>Т</span><b>ТАКТ</b><small>ДИСПЕТЧЕРСКАЯ</small></a>
     <div class="shift"><span class="shift-dot" id="stream-dot"></span><div><b id="stream-title">Подключение к потоку</b><small id="archive-time">Проверка источника</small></div></div>
-    <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" title="Описание полей, источников и логики прогноза">Описание API</a><a href="/docs#what-if" title="Сценарий what-if">What-if</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
+    <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" title="Описание полей, источников и API">Описание API</a><a href="/code" title="Сгенерированная документация по коду">Документация кода</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
     <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ДИСПЕТЧЕР</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
   </header>
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ПРОГНОЗ НА 10–15 МИНУТ</p><h1>Рейсы, требующие внимания</h1><p class="intro-copy">Сначала — отклонение, следующая контрольная остановка и действие. Архивный прогноз всегда отмечен отдельно от live-позиции.</p></div>
+      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1></div>
       <div class="archive-note"><b id="source-title">Источник данных</b><span id="source-detail">Проверка Backend</span><small id="source-note">Архив и live-поток не смешиваются</small></div>
     </section>
 
@@ -32,12 +32,6 @@
       <article><span>LIVE-ПРОГНОЗЫ</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание свежих данных</small></article>
     </section>
 
-    <section class="reserve-card card" aria-labelledby="reserve-title">
-      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Сценарий считает ожидаемый эффект на риск линии и показывает резерв на карте. Он не меняет live-расписание и помечен как what-if.</p></div>
-      <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><label>Причина<select id="reserve-reason"><option value="delay">Снижение отставания</option><option value="early">Выравнивание при опережении</option></select></label><label>Изменение интервала<input id="reserve-headway" type="number" min="0" max="50" step="5" value="0"><small>%</small></label><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
-      <div class="reserve-result" id="reserve-result" aria-live="polite"><span>Выберите линию, чтобы проверить выпуск резервного ТС.</span></div>
-    </section>
-
     <section class="main-grid">
       <article class="card map-card">
         <div class="card-head"><div><p class="eyebrow">КАРТА ТС</p><h2>Транспорт и плановые траектории</h2><p>Нажмите маркер, чтобы открыть карточку ТС и действия диспетчера.</p></div><button class="fit-map" id="map-fit" type="button">Показать все ТС</button></div>
@@ -48,6 +42,12 @@
         <div id="attention-list" class="attention-list"></div>
         <p class="attention-foot">Откройте рейс, чтобы связаться с водителем или выбрать безопасное указание.</p>
       </article>
+    </section>
+
+    <section class="reserve-card card is-hidden" id="reserve-card" aria-labelledby="reserve-title">
+      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Резерв получает выбранную линию и ставится в хвост текущего интервала. Он едет по плановой траектории в сценарии; live-расписание не меняется.</p></div>
+      <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><span class="reserve-mode">Сценарий: +1 ТС на выбранной плановой траектории</span><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
+      <div class="reserve-result" id="reserve-result" aria-live="polite"><span>Выберите линию: резерв будет показан на её маршруте и в таблице.</span></div>
     </section>
 
     <section class="card fleet-card">

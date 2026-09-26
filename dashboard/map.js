@@ -114,7 +114,8 @@
   function focus(id) {
     const marker=markers.get(id);if(!map||!marker)return;
     selection=id;styleRoutes();
-    if(!map.getBounds().contains(marker.getLatLng()))map.panTo(marker.getLatLng());
+    const targetZoom=Math.max(14,Math.min(16,map.getZoom()+3));
+    map.setView(marker.getLatLng(),targetZoom,{animate:true});
     marker.openPopup();
   }
   window.TransitMap={mount,render,focus};

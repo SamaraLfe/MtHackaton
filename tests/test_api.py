@@ -101,6 +101,7 @@ def test_map_module_tolerates_dispatcher_page_without_legacy_controls():
     source=(Path('dashboard')/'map.js').read_text(encoding='utf-8')
     assert "getElementById('map-all-routes')?.checked" in source
     assert "getElementById('map-empty')?.classList" in source
+    assert 'setView(marker.getLatLng(),targetZoom' in source
 
 
 def test_dispatcher_uses_a_keyless_basemap_and_vehicle_terms():
@@ -140,7 +141,7 @@ def test_vehicle_detail_identifies_the_position_source():
 def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
     source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
-    assert 'ПРОГНОЗ НА 10–15 МИНУТ' in page
+    assert 'ПРОГНОЗ T+10–15' in page
     assert 'Как читать прогноз' in page
     assert 'Архивный fallback' in source
     assert '/docs' in page
@@ -148,7 +149,7 @@ def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     assert 'late_probability' in source
     assert 'reason_is_hypothesis' in source
     assert 'prototype-5' in page
-    assert '/docs#what-if' in page
+    assert '/code' in page
 
 
 def test_dispatcher_keeps_operational_reserve_what_if_workflow_visible():
@@ -156,9 +157,18 @@ def test_dispatcher_keeps_operational_reserve_what_if_workflow_visible():
     source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
     map_source=(Path('dashboard')/'map.js').read_text(encoding='utf-8')
     assert 'Выпустить резервное ТС' in page
-    assert 'reserve-route' in page and 'reserve-reason' in page
+    assert 'reserve-route' in page and 'reserve-mode' in page
     assert "'/api/what-if'" in source
     assert 'scenarioVehicle' in source and 'scenario-marker' in map_source
+
+
+def test_backend_builds_and_exposes_code_documentation_route():
+    source=(Path('backend')/'app.py').read_text(encoding='utf-8')
+    runner=(Path('scripts')/'start_backend.py').read_text(encoding='utf-8')
+    compose=(Path('compose.yaml')).read_text(encoding='utf-8')
+    assert "@app.get('/code/'" in source
+    assert 'sphinx' in runner
+    assert 'python scripts/start_backend.py' in compose
 
 
 def test_replay_mode_populates_a_multi_vehicle_historical_snapshot():

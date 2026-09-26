@@ -11,7 +11,7 @@ services:
       retries: 20
   backend:
     build: .
-    command: python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
+    command: python scripts/start_backend.py
     environment:
       ML_URL: http://ml:8001
       NDTP_PORT: "9201"
