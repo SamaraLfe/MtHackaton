@@ -18,6 +18,19 @@ ROOT=Path(__file__).resolve().parents[1]
 DATA=Path(os.getenv('DATA_DIR','dataset'));ARTIFACT=Path(os.getenv('ARTIFACT_DIR','artifacts'))
 ML_URL=os.getenv('ML_URL','http://127.0.0.1:8001')
 LIVE_TRACK_TTL_S=int(os.getenv('LIVE_TRACK_TTL_S','3600'))
+CUSTOM_TR_ID_OFFSET = int(
+    os.getenv(
+        'CUSTOM_TR_ID_OFFSET',
+        '1000000'
+    )
+)
+
+CUSTOM_UNIT_ID_OFFSET = int(
+    os.getenv(
+        'CUSTOM_UNIT_ID_OFFSET',
+        '100000000'
+    )
+)
 LIVE_STALE_S = int(
     os.getenv(
         'LIVE_STALE_S',
@@ -442,30 +455,151 @@ async def ingest(event):
         vehicles[tr]=result
 
 async def on_ndtp(event):
-    unit=event.pop('unit_id');tr=mapping.get(unit)
-    if tr is None: counters['unknown_units']+=1;return
-    event['tr_id']=tr
+    unit = event.pop('unit_id')
+
+    tr = mapping.get(unit)
+
+    if tr is None:
+        counters['unknown_units'] += 1
+        return
+
+    is_custom = (
+        unit
+        >= CUSTOM_UNIT_ID_OFFSET
+    )
+
+    event['tr_id'] = tr
+
     try:
-        validated=Telemetry(**event)
-        payload=validated.model_dump();payload['telemetry_source']='ndtp_nav00'
-        async with lock: await ingest(payload)
-    except ValueError: counters['invalid_events']+=1
+        validated = Telemetry(
+            **event
+        )
+
+        payload = (
+            validated.model_dump()
+        )
+
+        payload[
+            'telemetry_source'
+        ] = (
+            'custom_ndtp_nav00'
+            if is_custom
+            else 'ndtp_nav00'
+        )
+
+        payload[
+            'simulated'
+        ] = is_custom
+
+        async with lock:
+            await ingest(
+                payload
+            )
+
+    except ValueError:
+        counters[
+            'invalid_events'
+        ] += 1
 
 @asynccontextmanager
 async def lifespan(app):
     global schedule,schedule_template,traffic,points,mapping,client,model_meta
     init_store()
-    schedule=load_schedule(DATA/'validate/schedule_plan.csv')
-    schedule_template=schedule.copy()
+    schedule = load_schedule(
+        DATA / 'validate/schedule_plan.csv'
+    )
+
+    base_schedule = schedule.copy()
+
+    custom_schedule = (
+        base_schedule.copy()
+    )
+
+    custom_schedule['tr_id'] = (
+        custom_schedule['tr_id']
+        .astype(int)
+        + CUSTOM_TR_ID_OFFSET
+    )
+
+    schedule = pd.concat(
+        [
+            base_schedule,
+            custom_schedule,
+        ],
+        ignore_index=True,
+    )
+
+    schedule_template = schedule.copy()
     all_ids=sorted({int(item) for item in schedule.tr_id.unique()})
     for dispatcher_id,parity in (('dispatcher-01',0),('dispatcher-02',1)):
         if db.execute('SELECT COUNT(*) AS count FROM assignments WHERE dispatcher_id=?',(dispatcher_id,)).fetchone()['count']==0:
             db.executemany('INSERT OR IGNORE INTO assignments(dispatcher_id,tr_id) VALUES(?,?)',[(dispatcher_id,tr_id) for index,tr_id in enumerate(all_ids) if index%2==parity])
     db.commit()
+    # Если базовое ТС назначено диспетчеру,
+    # автоматически назначаем ему и его custom-копию.
+    existing_assignments = db.execute(
+        '''
+        SELECT dispatcher_id, tr_id
+        FROM assignments
+        '''
+    ).fetchall()
+
+    custom_assignments = []
+
+    for assignment in existing_assignments:
+        tr_id = int(
+            assignment['tr_id']
+        )
+
+        # Не создаём custom-копию
+        # от уже виртуального ТС.
+        if tr_id >= CUSTOM_TR_ID_OFFSET:
+            continue
+
+        custom_tr_id = (
+            tr_id
+            + CUSTOM_TR_ID_OFFSET
+        )
+
+        custom_assignments.append(
+            (
+                assignment[
+                    'dispatcher_id'
+                ],
+                custom_tr_id,
+            )
+        )
+
+    db.executemany(
+        '''
+        INSERT OR IGNORE INTO assignments(
+            dispatcher_id,
+            tr_id
+        )
+        VALUES (?, ?)
+        ''',
+        custom_assignments,
+    )
+
+    db.commit()
     traffic=load_traffic(DATA/'validate/traffic.csv')
     points=pd.read_csv(DATA/'validate/points.csv').sort_values('T').reset_index(drop=True)
     ids=pd.read_csv(DATA/'validate/traffic.csv',usecols=['unit_id','tr_id']).drop_duplicates()
     mapping={int(r.unit_id):int(r.tr_id) for r in ids.itertuples()}
+    for row in ids.itertuples():
+        custom_unit_id = (
+            int(row.unit_id)
+            + CUSTOM_UNIT_ID_OFFSET
+        )
+
+        custom_tr_id = (
+            int(row.tr_id)
+            + CUSTOM_TR_ID_OFFSET
+        )
+
+        mapping[
+            custom_unit_id
+        ] = custom_tr_id
     mapping.update({int(k):int(v) for k,v in json.loads(os.getenv('UNIT_MAP','{}')).items()})
     client=httpx.AsyncClient(timeout=2)
     model_meta=json.loads((ARTIFACT/'model_v5.json').read_text(encoding='utf-8'))
