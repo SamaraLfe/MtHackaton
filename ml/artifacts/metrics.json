@@ -1,0 +1,89 @@
+{
+  "rows": {
+    "train": 4434,
+    "test": 353,
+    "validate": 151
+  },
+  "feature_count": 60,
+  "mae_test": {
+    "zero": 103.33711048158641,
+    "cur_dev_s": 93.35977337110482,
+    "shrinkage": 86.01814447592068,
+    "catboost": 62.093775229964216
+  },
+  "shrinkage": {
+    "slope": 0.53,
+    "intercept": 8.585000000000003
+  },
+  "best_iteration": 499,
+  "real_vehicle_group_holdout": {
+    "method": "5 folds by real tr_id; synthetic rows excluded",
+    "folds": [
+      {
+        "fold": 1,
+        "vehicles": [
+          122048,
+          122613,
+          122658
+        ],
+        "rows": 269,
+        "mae_cur_dev_s": 75.6728624535316,
+        "mae_catboost": 76.37881498205242
+      },
+      {
+        "fold": 2,
+        "vehicles": [
+          129964,
+          130072,
+          130238
+        ],
+        "rows": 229,
+        "mae_cur_dev_s": 71.37554585152839,
+        "mae_catboost": 64.11422284209357
+      },
+      {
+        "fold": 3,
+        "vehicles": [
+          131672,
+          132430,
+          133300
+        ],
+        "rows": 305,
+        "mae_cur_dev_s": 115.76065573770492,
+        "mae_catboost": 99.0866257950209
+      },
+      {
+        "fold": 4,
+        "vehicles": [
+          133957,
+          134040
+        ],
+        "rows": 227,
+        "mae_cur_dev_s": 73.49779735682819,
+        "mae_catboost": 78.22321295439832
+      },
+      {
+        "fold": 5,
+        "vehicles": [
+          134494,
+          135081
+        ],
+        "rows": 111,
+        "mae_cur_dev_s": 93.6036036036036,
+        "mae_catboost": 72.87728405773812
+      }
+    ],
+    "weighted": {
+      "mae_cur_dev_s": 86.8378615249781,
+      "mae_catboost": 80.01360823799321
+    }
+  },
+  "data_sha256": {
+    "labels_train": "b3058d52683091e77d190d6a99b717ad5c44ae02de37cadf47123dd3c534361d",
+    "labels_test": "7c7b0206d7ee6ee66af6baafba311755d5e033cd291410972eb89a231079df95",
+    "points_validate": "284d35f25cf7b13ed3f1ef0556c41910c6e6abfe5c523d2c2d1d36f3d67c64a6",
+    "traffic_test": "3c74bb9d3cc5e076a2e7f89de7e78fb103c350757d16c9d629de651ee09bf517",
+    "traffic_validate": "3c74bb9d3cc5e076a2e7f89de7e78fb103c350757d16c9d629de651ee09bf517"
+  },
+  "warning": "The supplied test and validate telemetry files are identical and also occur in train. This test MAE is a pipeline diagnostic, not an independent estimate for a new day."
+}

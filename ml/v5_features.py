@@ -261,7 +261,8 @@ def prepare_schedule(df):
 
     df["time_begin"] = (
         pd.to_datetime(
-            df["time_begin"]
+            df["time_begin"],
+            utc=True,
         )
     )
 
@@ -508,9 +509,12 @@ def build_telemetry_features(
             )
         )
 
+        cutoff_time = pd.Timestamp(T)
+        if cutoff_time.tz is not None:
+            cutoff_time = cutoff_time.tz_convert(None)
         cutoff = np.searchsorted(
             event_times,
-            np.datetime64(T),
+            np.datetime64(cutoff_time),
             side="right",
         )
 
@@ -1606,6 +1610,10 @@ def build_feature_matrix(
     # V5 route
     # ========================================================
 
+    # Consolidate the many scalar telemetry columns before adding the V5 route
+    # block. This keeps online single-row inference from fragmenting pandas'
+    # BlockManager on every request.
+    X = X.copy()
     for col in ROUTE_COLUMNS:
 
         X[
@@ -1617,17 +1625,22 @@ def build_feature_matrix(
 def build_v5_row(point, history, schedule):
     """Build one 104-feature V5 row from one prediction point and causal history."""
     points = pd.DataFrame([point]).copy()
-    points["T"] = pd.to_datetime(points["T"])
-    points["target_time_begin"] = pd.to_datetime(points["target_time_begin"])
+    points["T"] = pd.to_datetime(points["T"], utc=True)
+    points["target_time_begin"] = pd.to_datetime(points["target_time_begin"], utc=True)
     points["tr_id"] = points["tr_id"].astype(str)
     points["target_stop_id"] = points["target_stop_id"].astype(str)
     traffic = pd.DataFrame(history).copy()
     if traffic.empty:
         traffic = pd.DataFrame(columns=["tr_id","event_time","location_valid","lat","lon","alt","speed","heading"])
+    for name, default in (("alt",0.0),("heading",0.0)):
+        if name not in traffic.columns: traffic[name]=default
     traffic["tr_id"] = traffic["tr_id"].astype(str)
-    traffic["event_time"] = pd.to_datetime(traffic["event_time"])
+    traffic["event_time"] = pd.to_datetime(traffic["event_time"], utc=True)
     gps = prepare_traffic(traffic)
-    sched = prepare_schedule(pd.DataFrame(schedule).copy())
+    sched = pd.DataFrame(schedule).copy()
+    if 'geom' not in sched.columns and {'lon','lat'}.issubset(sched.columns):
+        sched['geom'] = sched.apply(lambda r: f"POINT ({r['lon']} {r['lat']})", axis=1)
+    sched = prepare_schedule(sched)
     points = add_target_coordinates(points, sched)
     telemetry = build_telemetry_features(points, gps, "ONLINE")
     route = build_route_features(points, sched, telemetry, "ONLINE")
