@@ -12,7 +12,7 @@
 
 * `train/` и `test/` даны **с разметкой** (папка `labels/`) — на них вы обучаете и проверяете модель.
 * Для периода `validate/` даны только **входные данные** (телеметрия + плановое расписание без
-  факта) и `submission_template.csv`. **Фактических задержек по validate нет и не будет.**
+  факта) и `sample_submission.csv`. **Фактических задержек по validate нет и не будет.**
 * Проверка идёт по скрытому эталону (`ground_truth`) на стороне платформы. Вы **предсказываете**
   задержки по validate и загружаете `submission.csv`.
 
@@ -51,8 +51,10 @@
 | `validate/points.csv` | Прогнозные точки validate: `sample_id`, `tr_id`, **`T`**, `target_stop_id`, `target_time_begin`, `cur_dev_s` |
 | `sample_submission.csv` | **Готовый файл для отправки** (2 колонки `sample_id;prediction`) — замените `prediction` своими значениями |
 | `docs/Emulator-and-Telematic-Packets-Specification.md` | Спецификация формата NDTP и эмулятора телеметрии |
-| `ndtp-telemetry-emulator.tar` | Docker-образ эмулятора: живой поток NDTP для real-time части (см. §8) |
 | `README.md` | Этот файл |
+
+Архив `ndtp-telemetry-emulator.tar` в ветку данных не входит: это внешний
+интеграционный артефакт для live-проверки, а не часть офлайн-датасета.
 
 > **Где момент прогноза?** В `validate/points.csv` для каждой точки указан момент **`T`** (когда
 > строится прогноз) и `target_time_begin` (плановое прибытие на целевую остановку). Вы берёте
@@ -156,7 +158,7 @@ CSV-файлы — это **уже раскодированная** телеме
 **Запуск** (подробности и REST-API — в `docs/Emulator-and-Telematic-Packets-Specification.md`):
 
 ```bash
-docker load -i ndtp-telemetry-emulator.tar
+docker load -i <path-to>/ndtp-telemetry-emulator.tar
 docker run --rm -p 18080:18080 --add-host=host.docker.internal:host-gateway \
   --name ndtp-emu ndtp-telemetry-emulator:1.0
 ```
