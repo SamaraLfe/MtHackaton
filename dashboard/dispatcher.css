@@ -1279,6 +1279,10 @@ body.drawer-open .topbar {
   line-height: 1.45;
 }
 
+.interpretation-note.warning-note {
+  color: #8a5a17;
+}
+
 .action-section {
   border: 0;
 

@@ -419,6 +419,50 @@ def calibrated_uncertainty(prediction):
     level='unknown' if probability is None else 'high' if probability>=.7 else 'medium' if probability>=.35 else 'low'
     return {'lower_s':prediction-radius,'upper_s':prediction+radius,'late_probability':probability,'level':level}
 
+
+def stabilize_forecast(result, current_deviation_s, horizon_s):
+    """Prevent an implausibly large recovery between current and target ETA.
+
+    ``current_deviation_s`` is a present position estimate while
+    ``prediction_s`` is the expected deviation at the target stop.  They may
+    differ, but a multi-thousand-second correction in a 10–15 minute horizon
+    is not operationally credible.  Limit only that extreme correction and
+    mark it explicitly so the UI/API never hides the adjustment.
+    """
+    result=dict(result)
+    result.setdefault('prediction_adjusted',False)
+    result.setdefault('prediction_adjustment_s',0.0)
+    if current_deviation_s is None or result.get('prediction_s') is None:
+        return result
+    try:
+        current=float(current_deviation_s)
+        predicted=float(result['prediction_s'])
+        horizon=max(600.0,float(horizon_s))
+    except (TypeError,ValueError):
+        return result
+    if not all(math.isfinite(value) for value in (current,predicted,horizon)) or abs(current)<600:
+        return result
+    # At most 600 seconds of recovery is allowed in this local prototype;
+    # shorter horizons receive the proportionally smaller limit.
+    max_recovery=max(300.0,min(600.0,horizon*0.5))
+    bounded=max(current-max_recovery,min(current+max_recovery,predicted))
+    if abs(bounded-predicted)<0.1:
+        return result
+    radius=None
+    if result.get('lower_s') is not None and result.get('upper_s') is not None:
+        radius=max(0.0,(float(result['upper_s'])-float(result['lower_s']))/2.0)
+    result['prediction_s']=round(bounded,1)
+    if radius is not None:
+        result['lower_s']=round(bounded-radius,1)
+        result['upper_s']=round(bounded+radius,1)
+    calibrated=calibrated_uncertainty(bounded)
+    if calibrated['late_probability'] is not None:
+        result['late_probability']=calibrated['late_probability']
+    result['prediction_adjusted']=True
+    result['prediction_adjustment_s']=round(bounded-predicted,1)
+    result['prediction_adjustment_reason']='Ограничено физически допустимое изменение отклонения на горизонте прогноза'
+    return result
+
 def load_historical_snapshot():
     """Build a fallback view from frozen V5 validate predictions."""
     vehicles.clear();archive_vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear()
@@ -624,6 +668,11 @@ async def forecast(point,records,source):
     except (httpx.HTTPError,KeyError,ValueError):
         counters['ml_failures']+=1;degraded=True
         result=dict(prediction_s=point['cur_dev_s'],lower_s=None,upper_s=None,late_probability=None,model='persistence_fallback')
+    result=stabilize_forecast(
+        result,
+        point.get('cur_dev_s'),
+        epoch(point['target_time_begin'])-t,
+    )
     counters['last_inference_ms']=round((time.perf_counter()-start)*1000,2)
     stale=features['age_s']>120 or bool(features['missing_gps'])
     risk=result['late_probability']
