@@ -33,5 +33,5 @@ napoleon_numpy_docstring = False
 html_theme = "sphinx_rtd_theme"
 html_title = "Такт · Документация кода"
 html_copy_source = True
-html_show_sourcelink = True
+html_show_sourcelink = False
 html_last_updated_fmt = "%d.%m.%Y"
