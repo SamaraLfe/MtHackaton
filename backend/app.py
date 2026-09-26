@@ -48,6 +48,7 @@ LIVE_FALLBACK_S = int(
     )
 )
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
+last_telemetry_received_at=0.0
 deviations={};position_offsets={};position_states={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
 schedule=None;schedule_template=None;live_schedule_day=None;traffic=None;points=None;mapping={};client=None;lock=asyncio.Lock();model_meta={}
 DB_PATH=Path(os.getenv('STATE_DIR','state'))/'dispatcher.db';db=None
@@ -681,7 +682,7 @@ async def forecast(point,records,source):
     return clean(result)
 
 async def ingest(event):
-    global schedule,live_schedule_day
+    global schedule,live_schedule_day,last_telemetry_received_at
     if state.get('ingest_paused'):
         counters['paused_packets']+=1
         return
@@ -694,6 +695,7 @@ async def ingest(event):
     records=history[tr]
     if records and ts<=records[-1]['ts']:
         counters['late_or_duplicate_packets']+=1;return
+    last_telemetry_received_at=time.time()
     row=dict(event,ts=ts);records.append(row);counters['telemetry_rows']+=1
     if state['mode']!='live':
         # The historical forecast stays visible by default. Only a fresh NDTP
@@ -858,7 +860,7 @@ async def on_ndtp(event):
 
 @asynccontextmanager
 async def lifespan(app):
-    global schedule,schedule_template,traffic,points,mapping,client,model_meta
+    global schedule,schedule_template,traffic,points,mapping,client,model_meta,last_telemetry_received_at
     init_store()
     schedule = load_schedule(
         DATA / 'validate/schedule_plan.csv'
@@ -965,7 +967,7 @@ async def lifespan(app):
     model_meta=json.loads((ARTIFACT/'model.json').read_text(encoding='utf-8'))
     load_historical_snapshot()
     if os.getenv('START_MODE','live')=='live':
-        state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear()
+        state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();last_telemetry_received_at=0.0
     server=await asyncio.start_server(lambda r,w:handle(r,w,on_ndtp,counters),'0.0.0.0',int(os.getenv('NDTP_PORT','9201')))
     official_warmup=asyncio.create_task(warm_official_source())
     yield
@@ -1169,12 +1171,12 @@ async def predict(point:Point):
 
 @app.post('/api/mode',**operation('mode'))
 async def mode(body:Mode):
-    global schedule,live_schedule_day
+    global schedule,live_schedule_day,last_telemetry_received_at
     async with lock:
         schedule=schedule_template.copy();live_schedule_day=None
         if body.mode=='replay':load_historical_snapshot()
         else:
-            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear()
+            state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();history.clear();deviations.clear();position_offsets.clear();position_states.clear();last_forecast.clear();last_telemetry_received_at=0.0
     return state
 
 @app.post('/api/replay/step',**operation('replay'))
@@ -1258,10 +1260,99 @@ def operational_vehicle(tr, now):
     return clean(item)
 
 
+def telemetry_fallback_active(now=None):
+    """Return whether live data has been unavailable long enough to degrade.
+
+    The check is intentionally based on packet receipt time, not the timestamp
+    supplied by a device.  A disconnected emulator can leave an old but valid
+    event timestamp in memory; that must not keep the service in live mode.
+    """
+    if state.get('mode') != 'live':
+        return False
+    if state.get('ingest_paused'):
+        return True
+    now = time.time() if now is None else float(now)
+    last = float(last_telemetry_received_at or 0.0)
+    if not last:
+        last = float(runtime_stats.get('started_at', now))
+    return now - last >= LIVE_FALLBACK_S
+
+
+def historical_fallback_state(dispatcher_id=None):
+    """Build a safe archive/last-known response while live input is down."""
+    merged = {}
+    for tr, archived in archive_vehicles.items():
+        item = dict(archived)
+        live = vehicles.get(tr, {})
+        if live.get('position_time') is not None:
+            for key in ('lon', 'lat', 'position_time', 'telemetry_source', 'live_track'):
+                if key in live:
+                    item[key] = live[key]
+            item['live_position'] = True
+            item['live_position_time'] = live.get('T') or live.get('position_time')
+        item.update(
+            source='historical_fallback',
+            connection_state='historical',
+            status_label='Исторические данные · поток недоступен',
+            reason='Поток телеметрии недоступен; показано историческое состояние',
+            reason_is_hypothesis=True,
+            degraded=True,
+            stale=False,
+            trip_status=item.get('trip_status', 'active'),
+            on_route=item.get('on_route', True),
+        )
+        merged[tr] = item
+
+    # If a vehicle has no archived row, preserve its last known live state and
+    # explicitly remove the forecast so it cannot be mistaken for fresh data.
+    for tr, live in vehicles.items():
+        if tr in merged:
+            continue
+        item = dict(live)
+        item.update(
+            source='last_known_live',
+            connection_state='offline',
+            status_label='Последнее известное состояние',
+            reason='Нет связи с эмулятором; показано последнее известное состояние',
+            prediction_s=None,
+            late_probability=None,
+            lower_s=None,
+            upper_s=None,
+            level='unknown',
+            attention_level='critical',
+            degraded=True,
+            stale=True,
+        )
+        merged[tr] = item
+
+    output = []
+    for item in sorted(merged.values(), key=lambda value: int(value['tr_id'])):
+        vehicle = dict(item)
+        track = live_track(int(vehicle['tr_id']))
+        if track:
+            vehicle['live_track'] = track
+        output.append(clean(vehicle))
+
+    if dispatcher_id:
+        profile = get_dispatcher(dispatcher_id)
+        if profile is None:
+            raise HTTPException(404, 'Dispatcher not found')
+        assigned = set(profile['assigned_tr_ids'])
+        output = [item for item in output if int(item['tr_id']) in assigned]
+
+    fallback_state = dict(state)
+    fallback_state.update(mode='replay', fallback_mode='historical', source_mode='live', snapshot=True)
+    return {'vehicles': output, 'state': fallback_state, 'counters': dict(counters),
+            'total_points': len(points), 'dispatcher_id': dispatcher_id}
+
+
 @app.get('/api/state', **operation('state'))
 async def get_state(
     dispatcher_id: str | None = None
 ):
+
+    if telemetry_fallback_active():
+        return historical_fallback_state(dispatcher_id)
 
     if state['mode']=='live':
         ids={int(tr) for tr in schedule.tr_id.unique()}|set(vehicles)

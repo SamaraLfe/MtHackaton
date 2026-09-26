@@ -63,3 +63,30 @@ def test_intentional_pause_is_not_connection_failure(fleet):
     result=fleet.operational_vehicle(1,9000)
     assert result['connection_state']=='paused'
     assert result['attention_level']=='normal'
+
+
+def test_all_streams_stopped_switch_to_historical_fallback(fleet, monkeypatch):
+    monkeypatch.setattr(backend, 'archive_vehicles', {
+        1: dict(tr_id=1, source='historical_v5', prediction_s=90, level='low',
+                lon=37.0, lat=55.0, on_route=True),
+    })
+    monkeypatch.setattr(backend, 'points', pd.DataFrame())
+    fleet.state['ingest_paused'] = True
+
+    assert backend.telemetry_fallback_active(now=2000) is True
+    result = backend.historical_fallback_state()
+
+    assert result['state']['mode'] == 'replay'
+    assert result['state']['fallback_mode'] == 'historical'
+    assert result['vehicles'][0]['source'] == 'historical_fallback'
+    assert result['vehicles'][0]['prediction_s'] == 90
+    assert 'недоступен' in result['vehicles'][0]['reason']
+
+
+def test_fallback_waits_for_the_configured_connection_grace_period(fleet, monkeypatch):
+    monkeypatch.setattr(backend, 'last_telemetry_received_at', 100.0)
+    monkeypatch.setattr(backend, 'LIVE_FALLBACK_S', 60)
+    fleet.state['ingest_paused'] = False
+
+    assert backend.telemetry_fallback_active(now=159.9) is False
+    assert backend.telemetry_fallback_active(now=160.0) is True
