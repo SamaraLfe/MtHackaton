@@ -20,16 +20,16 @@ T + 10 минут < target_time_begin <= T + 15 минут
 
 | Путь | Назначение |
 |---|---|
-| `train/traffic.csv` | размеченная обучающая телеметрия |
-| `train/schedule.csv` | план и факт прибытия для train |
-| `test/traffic.csv` | локальный тестовый поток |
-| `test/schedule.csv` | план и факт прибытия для test |
-| `labels/labels_train.csv` | точки train с `target_delay_s` |
-| `labels/labels_test.csv` | точки test с `target_delay_s` |
-| `validate/traffic.csv` | входная телеметрия без target |
-| `validate/schedule_plan.csv` | только план validate, без `time_fact_begin` |
-| `validate/points.csv` | точки прогноза validate |
-| `sample_submission.csv` | шаблон `sample_id;prediction` |
+| `dataset/train/traffic.csv` | размеченная обучающая телеметрия |
+| `dataset/train/schedule.csv` | план и факт прибытия для train |
+| `dataset/test/traffic.csv` | локальный тестовый поток |
+| `dataset/test/schedule.csv` | план и факт прибытия для test |
+| `dataset/labels/labels_train.csv` | точки train с `target_delay_s` |
+| `dataset/labels/labels_test.csv` | точки test с `target_delay_s` |
+| `dataset/validate/traffic.csv` | входная телеметрия без target |
+| `dataset/validate/schedule_plan.csv` | только план validate, без `time_fact_begin` |
+| `dataset/validate/points.csv` | точки прогноза validate |
+| `dataset/sample_submission.csv` | шаблон `sample_id;prediction` |
 | `dataset/README.md` | подробная спецификация колонок и анти-утечки |
 | `dataset/docs/Emulator-and-Telematic-Packets-Specification.md` | внешний NDTP-эмулятор и бинарный формат |
 
@@ -58,7 +58,7 @@ sample_id;prediction
 ```
 
 В `prediction` должны присутствовать все 151 `sample_id` из
-`validate/points.csv`, без дублей и пропусков. Значение измеряется в секундах,
+`dataset/validate/points.csv`, без дублей и пропусков. Значение измеряется в секундах,
 знак сохраняется.
 
 ## Проверки набора
