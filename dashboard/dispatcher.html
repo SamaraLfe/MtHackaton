@@ -4,9 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
-  <!-- prototype-5 compatibility marker; cache-busted assets are prototype-6. -->
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-6">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=profile-9">
 </head>
 <body>
   <header class="topbar">
@@ -19,13 +18,13 @@
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1><p class="intro-note"><b>Как читать прогноз:</b> «сейчас» — отклонение позиции от планового сегмента, а «прогноз» — ожидаемое отклонение на контрольной точке через 10–15 минут. Это разные моменты одной линии, поэтому числа могут отличаться.</p></div>
+      <div><p class="eyebrow">ДИСПЕТЧЕРСКАЯ</p><h1>Контроль рейсов</h1></div>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
-      <article><span>ТС В КАРТИНЕ</span><b id="kpi-total">—</b><small>последняя позиция по каждому ТС</small></article>
-      <article><span>ТРЕБУЮТ ВНИМАНИЯ</span><b id="kpi-attention">—</b><small>высокий или средний риск</small></article>
-      <article><span>LIVE-ПРОГНОЗЫ</span><b id="kpi-predictions">—</b><small id="kpi-latency">ожидание свежих данных</small></article>
+      <article><span>ТС на маршруте</span><b id="kpi-total">—</b></article>
+      <article><span>Требуют внимания</span><b id="kpi-attention">—</b></article>
+      <article><span>Актуальные прогнозы</span><b id="kpi-predictions">—</b></article>
     </section>
 
     <section class="main-grid">
@@ -73,13 +72,13 @@
 
   <div class="drawer" id="drawer" aria-hidden="true"><div class="drawer-overlay" data-close-drawer></div><aside class="drawer-panel"><button class="close" data-close-drawer type="button" aria-label="Закрыть">×</button><div id="vehicle-detail"></div></aside></div>
 
-  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ТАКТ</p><h2>Выберите рабочее место</h2><p>Диспетчер открывает рабочую картину, администратор — управление источниками и назначениями.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Профиль<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Продолжить</button></div><p class="dialog-note">Это локальный вход прототипа без пароля и SSO.</p></form></dialog>
+  <dialog id="profile-dialog" aria-labelledby="profile-dialog-title"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ТАКТ</p><h2 id="profile-dialog-title">Выберите рабочее место</h2><p>Диспетчер открывает рабочую картину, администратор — управление источниками и назначениями.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Профиль<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Продолжить</button></div><p class="dialog-note">Это локальный вход прототипа без пароля и SSO.</p></form></dialog>
 
   <dialog id="source-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ИСТОЧНИКИ ДАННЫХ</p><h2>Потоки телеметрии</h2><p>Пауза останавливает новые события. Управлять потоком может любой вошедший диспетчер.</p></div><button value="cancel" class="close" type="button" id="source-close" aria-label="Закрыть">×</button></div><div id="source-status" class="source-status"></div><div class="dialog-actions"><button class="secondary" type="button" id="source-pause-all">Пауза всех</button><button class="primary" type="button" id="source-resume-all">Возобновить все</button></div><p class="dialog-note">custom-emulator — собственная NDTP Nav00-эмуляция; оригинальный NDTP восстанавливает последний сохранённый конфиг.</p></form></dialog>
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=prototype-6"></script>
-  <script src="/static/dispatcher.js?v=prototype-6"></script>
+  <script src="/static/map.js?v=profile-9"></script>
+  <script src="/static/dispatcher.js?v=profile-9"></script>
 </body>
 </html>
