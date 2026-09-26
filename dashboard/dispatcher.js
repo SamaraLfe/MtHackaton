@@ -1738,21 +1738,40 @@
   );
 
 
-  $('profile-open').onclick =
-    () =>
-      $('profile-dialog')
-        .showModal();
-
-
-  $('profile-close').onclick =
-    () => {
-      if (isAuthenticated()) $('profile-dialog').close();
-    };
-
-  $('profile-cancel').onclick =
-    () => {
-      if (isAuthenticated()) $('profile-dialog').close();
-    };
+  const profileDialog = $('profile-dialog');
+  const resetProfileChoice = () => {
+    $('profile-select').value = profileId || profiles[0]?.id || '';
+  };
+  const dismissProfile = () => {
+    resetProfileChoice();
+    profileDialog.close('cancel');
+  };
+  $('profile-open').onclick = () => {
+    resetProfileChoice();
+    profileDialog.showModal();
+  };
+  $('profile-close').onclick = dismissProfile;
+  $('profile-cancel').onclick = dismissProfile;
+  profileDialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    dismissProfile();
+  });
+  profileDialog.addEventListener('close', resetProfileChoice);
+  const outsideProfile = event => {
+    const bounds = profileDialog.getBoundingClientRect();
+    return event.target === profileDialog &&
+      (event.clientX < bounds.left || event.clientX > bounds.right ||
+       event.clientY < bounds.top || event.clientY > bounds.bottom);
+  };
+  let backdropPressed = false;
+  profileDialog.addEventListener('pointerdown', event => {
+    backdropPressed = outsideProfile(event);
+  });
+  profileDialog.addEventListener('pointerup', event => {
+    if (backdropPressed && outsideProfile(event)) dismissProfile();
+    backdropPressed = false;
+  });
+  profileDialog.addEventListener('pointercancel', () => { backdropPressed = false; });
 
 
   $('profile-save').onclick =

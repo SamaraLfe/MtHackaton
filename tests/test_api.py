@@ -148,7 +148,7 @@ def test_dispatcher_explains_model_prediction_data_flow_and_reference_links():
     assert 'github.com/SamaraLfe/MtHackaton' in page
     assert 'late_probability' in source
     assert 'reason_is_hypothesis' in source
-    assert 'trip-status-8' in page
+    assert '/static/dispatcher.js?v=' in page
     assert '/code' in page
 
 
