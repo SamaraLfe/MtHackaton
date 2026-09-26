@@ -369,13 +369,52 @@ async def ingest(event):
         return
     state['clock']=timestamp(event['event_time']).isoformat()
     # Conservative arrival match: only already observed stop proximity. No schedule actuals.
-    known=schedule[(schedule.tr_id==tr)&(schedule.ts>=ts-1800)&(schedule.ts<=ts+300)]
-    if event['location_valid'] and event['speed']<5 and not known.empty:
-        dist=known.apply(lambda s:haversine(event['lon'],event['lat'],s.lon,s.lat),axis=1)
-        nearest=known.loc[dist.idxmin()]
-        if dist.min()<60 and deviations.get(tr,{}).get('stop')!=int(nearest.tt_action_item_id):
-            deviations[tr]={'stop':int(nearest.tt_action_item_id),'value':ts-nearest.ts}
-    if ts-last_forecast.get(tr,0)<30:return
+    known = schedule[
+        (schedule.tr_id == tr)
+        & (schedule.ts >= ts - 1800)
+        & (schedule.ts <= ts + 300)
+    ]
+
+    if event['location_valid'] and event['speed'] < 5 and not known.empty:
+        dist = known.apply(
+            lambda s: haversine(
+                event['lon'],
+                event['lat'],
+                s.lon,
+                s.lat,
+            ),
+            axis=1,
+        )
+        nearest = known.loc[dist.idxmin()]
+
+        if (
+            dist.min() < 60
+            and deviations.get(tr, {}).get('stop')
+            != int(nearest.tt_action_item_id)
+        ):
+            deviations[tr] = {
+                'stop': int(nearest.tt_action_item_id),
+                'value': ts - nearest.ts,
+            }
+
+    # Position is refreshed for every valid NDTP packet.
+    # ML inference stays throttled separately below.
+    current = vehicles.get(tr)
+
+    if current is not None and event['location_valid']:
+        current['lon'] = event['lon']
+        current['lat'] = event['lat']
+        current['position_time'] = ts
+        current['telemetry_source'] = event.get(
+            'telemetry_source',
+            'unknown',
+        )
+        current['live_position_time'] = timestamp(
+            event['event_time']
+        ).isoformat()
+
+    if ts - last_forecast.get(tr, 0) < 30:
+        return
     last_forecast[tr]=ts
     stop=target_for(tr,ts)
     if stop is None:
@@ -558,7 +597,10 @@ async def replay():
 @app.get('/api/state',**operation('state'))
 async def get_state(dispatcher_id:str|None=None):
     now=epoch(state['clock']) if state['mode']=='replay' and state['clock'] else time.time()
-    merged={tr:dict(vehicle) for tr,vehicle in archive_vehicles.items()}
+    merged = {} if state['mode'] == 'live' else {
+        tr: dict(vehicle)
+        for tr, vehicle in archive_vehicles.items()
+    }
     for tr,live in vehicles.items():
         if tr in merged and live.get('source')=='live' and time.time()-float(live.get('position_time',0))>LIVE_TRACK_TTL_S:
             continue
