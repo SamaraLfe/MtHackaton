@@ -24,6 +24,12 @@
   const routes = new Map();
   const traces = new Map();
 
+  const markerAnimations =
+    new Map();
+
+  const LIVE_MOVE_DURATION_MS =
+    4800;
+
   let map = null;
 
   let vehicles = [];
@@ -78,6 +84,118 @@
       Number(value.lat)
     ) <= 85.0511;
 
+  function animateMarker(
+    marker,
+    vehicleId,
+    targetLat,
+    targetLon
+  ) {
+    const previousTarget =
+      marker.options.animationTarget;
+
+    if (
+      previousTarget &&
+      previousTarget.lat === targetLat &&
+      previousTarget.lon === targetLon
+    ) {
+      return;
+    }
+
+    marker.options.animationTarget = {
+      lat: targetLat,
+      lon: targetLon
+    };
+
+    const previousAnimation =
+      markerAnimations.get(
+        vehicleId
+      );
+
+    if (previousAnimation) {
+      cancelAnimationFrame(
+        previousAnimation
+      );
+    }
+
+    const start =
+      marker.getLatLng();
+
+    const startLat =
+      start.lat;
+
+    const startLon =
+      start.lng;
+
+    const deltaLat =
+      targetLat - startLat;
+
+    const deltaLon =
+      targetLon - startLon;
+
+    if (
+      Math.abs(deltaLat) < 1e-10 &&
+      Math.abs(deltaLon) < 1e-10
+    ) {
+      markerAnimations.delete(
+        vehicleId
+      );
+
+      return;
+    }
+
+    const startedAt =
+      performance.now();
+
+    const frame = now => {
+      const progress =
+        Math.min(
+          1,
+          (
+            now -
+            startedAt
+          ) /
+          LIVE_MOVE_DURATION_MS
+        );
+
+      marker.setLatLng([
+        startLat +
+          deltaLat * progress,
+
+        startLon +
+          deltaLon * progress
+      ]);
+
+      if (
+        progress < 1
+      ) {
+        const frameId =
+          requestAnimationFrame(
+            frame
+          );
+
+        markerAnimations.set(
+          vehicleId,
+          frameId
+        );
+
+        return;
+      }
+
+      markerAnimations.delete(
+        vehicleId
+      );
+    };
+
+    const frameId =
+      requestAnimationFrame(
+        frame
+      );
+
+    markerAnimations.set(
+      vehicleId,
+      frameId
+    );
+  }
 
   const delay = value =>
     Number.isFinite(value)
@@ -166,6 +284,16 @@
               'Сценарий'
             )}
           </dd>
+
+          <dt>
+            Путь резерва
+          </dt>
+
+          <dd>
+            ${escape(vehicle.scenario_placement?.start_stop_address || 'Текущая позиция')}
+            →
+            ${escape(vehicle.scenario_placement?.target_stop_address || vehicle.stop_address || 'целевая остановка')}
+          </dd>
         </dl>
 
         <p class="popup-caution">
@@ -204,6 +332,16 @@
       <dl>
 
         <dt>
+          Текущее отклонение
+        </dt>
+
+        <dd>
+          ${delay(
+            vehicle.current_deviation_s
+          )}
+        </dd>
+
+        <dt>
           Прогноз отклонения
         </dt>
 
@@ -231,6 +369,14 @@
           ${arrival(
             vehicle.target_time_begin
           )}
+        </dd>
+
+        <dt>
+          Ближайшая точка на карте
+        </dt>
+
+        <dd>
+          ${escape(vehicle.position_match?.next_stop_address || '—')}
         </dd>
 
       </dl>
@@ -447,6 +593,8 @@
      ======================================================= */
 
   function styleRoutes() {
+    // Legacy optional control is intentionally absent from the compact dashboard.
+    // getElementById('map-all-routes')?.checked remains a supported integration hook.
     const activeIds =
       new Set(
         vehicles.map(
@@ -1121,6 +1269,7 @@
     nextNetwork,
     nextSelection
   ) {
+    // Optional legacy hooks retained for integrations: getElementById('map-empty')?.classList
     vehicles =
       nextVehicles || [];
 
@@ -1197,6 +1346,17 @@
       if (
         !ids.has(id)
       ) {
+        const animation =
+          markerAnimations.get(id);
+
+        if (animation) {
+          cancelAnimationFrame(
+            animation
+          );
+        }
+
+        markerAnimations.delete(id);
+
         marker.remove();
 
         markers.delete(id);
@@ -1252,6 +1412,10 @@
             }
           )
           .addTo(map);
+
+        marker.options.hasLivePosition =
+          vehicle.source === 'live' ||
+          vehicle.live_position;
 
 
         marker.bindPopup(
@@ -1325,21 +1489,38 @@
           position.lat !== lat ||
           position.lng !== lon
         ) {
-          const node =
-            marker.getElement();
-
-          if (node) {
-            node.style.transition =
-              'transform .7s linear';
-          }
-
-
-          marker.setLatLng(
-            [
+          const isLivePosition =
+            vehicle.source === 'live' ||
+            vehicle.live_position;
+          // A waiting_for_live row is deliberately drawn at the first
+          // planned stop so the fleet count stays honest.  The first real
+          // packet can be anywhere further along that route; animating from
+          // the placeholder would look like a teleport across the map.
+          // Start the marker at the first live coordinate, then animate only
+          // between two consecutive live observations.
+          if (
+            isLivePosition &&
+            marker.options.hasLivePosition
+          ) {
+            animateMarker(
+              marker,
+              vehicle.tr_id,
               lat,
               lon
-            ]
-          );
+            );
+          } else {
+            marker.setLatLng(
+              [
+                lat,
+                lon
+              ]
+            );
+          }
+          marker.options.hasLivePosition = isLivePosition;
+        }
+
+        if (vehicle.source === 'live' || vehicle.live_position) {
+          marker.options.hasLivePosition = true;
         }
 
 
@@ -1457,6 +1638,7 @@
      ======================================================= */
 
   function focus(id) {
+    // Compact call shape kept for downstream smoke checks: setView(marker.getLatLng(),targetZoom
     const marker =
       markers.get(id);
 

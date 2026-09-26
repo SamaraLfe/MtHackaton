@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
+  <!-- prototype-5 compatibility marker; cache-busted assets are prototype-6. -->
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/static/dispatcher.css?v=prototype-6">
 </head>
@@ -12,12 +13,13 @@
     <a class="brand" href="/"><span>Т</span><b>ТАКТ</b><small>ДИСПЕТЧЕРСКАЯ</small></a>
     <div class="shift"><span class="shift-dot" id="stream-dot"></span><div><b id="stream-title">Подключение к потоку</b><small id="archive-time">Проверка источника</small></div></div>
     <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" title="Описание полей, источников и API">Описание API</a><a href="/code/" title="Сгенерированная документация по коду">Документация кода</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
-    <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ДИСПЕТЧЕР</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
+    <button class="source-button" id="source-control-open" type="button">Источники данных</button>
+    <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ПРОФИЛЬ</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
   </header>
 
   <main class="page">
     <section class="intro">
-      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1></div>
+      <div><p class="eyebrow">ОПЕРАТИВНАЯ СВОДКА · ПРОГНОЗ T+10–15</p><h1>Рейсы, требующие внимания</h1><p class="intro-note"><b>Как читать прогноз:</b> «сейчас» — отклонение позиции от планового сегмента, а «прогноз» — ожидаемое отклонение на контрольной точке через 10–15 минут. Это разные моменты одной линии, поэтому числа могут отличаться.</p></div>
     </section>
 
     <section class="kpis" aria-label="Ключевые показатели">
@@ -58,20 +60,22 @@
     </section>
 
     <section class="reserve-card card is-hidden" id="reserve-card" aria-labelledby="reserve-title">
-      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Резерв получает выбранную линию и ставится в хвост текущего интервала. Он едет по плановой траектории в сценарии; live-расписание не меняется.</p></div>
+      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Backend выбирает текущий плановый сегмент выбранной линии, рассчитывает ожидаемое снижение задержки и строит путь резерва до целевой остановки. Live-расписание не меняется.</p></div>
       <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><span class="reserve-mode">Сценарий: +1 ТС на выбранной плановой траектории</span><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
       <div class="reserve-result" id="reserve-result" aria-live="polite"><span>Выберите линию: резерв будет показан на её маршруте и в таблице.</span></div>
     </section>
 
     <section class="card fleet-card">
       <div class="card-head"><div><p class="eyebrow">ВСЕ ТС</p><h2>Транспорт</h2></div><label class="search">Поиск по ТС <input id="search" placeholder="Например, 131672" inputmode="numeric"></label></div>
-      <div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ОТКЛОНЕНИЕ</th><th>СЛЕДУЮЩАЯ КОНТРОЛЬНАЯ ТОЧКА</th><th>ЧТО НУЖНО СДЕЛАТЬ</th></tr></thead><tbody id="fleet-rows"></tbody></table></div>
+      <div class="table-scroll"><table><thead><tr><th>ТРАНСПОРТ</th><th>СОСТОЯНИЕ</th><th>ПРОГНОЗ · ЦЕЛЕВАЯ ТОЧКА</th><th>ЦЕЛЕВАЯ ОСТАНОВКА</th><th>ЧТО НУЖНО СДЕЛАТЬ</th></tr></thead><tbody id="fleet-rows"></tbody></table></div>
     </section>
   </main>
 
   <div class="drawer" id="drawer" aria-hidden="true"><div class="drawer-overlay" data-close-drawer></div><aside class="drawer-panel"><button class="close" data-close-drawer type="button" aria-label="Закрыть">×</button><div id="vehicle-detail"></div></aside></div>
 
-  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ЛИЧНЫЙ ПРОФИЛЬ</p><h2>Рабочее место диспетчера</h2><p>Профиль подписывает указания в журнале текущей смены.</p></div><button value="cancel" class="close" type="button" id="profile-close">×</button></div><label class="profile-select">Диспетчер<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" value="cancel">Отмена</button><button class="primary" id="profile-save" value="default">Открыть рабочее место</button></div><p class="dialog-note">Локальный MVP использует профиль смены, а не защищённую учётную запись. Для промышленного доступа необходимы SSO/JWT и права из серверной сессии.</p></form></dialog>
+  <dialog id="profile-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ТАКТ</p><h2>Выберите рабочее место</h2><p>Диспетчер открывает рабочую картину, администратор — управление источниками и назначениями.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Профиль<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Продолжить</button></div><p class="dialog-note">Это локальный вход прототипа без пароля и SSO.</p></form></dialog>
+
+  <dialog id="source-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ИСТОЧНИКИ ДАННЫХ</p><h2>Потоки телеметрии</h2><p>Пауза останавливает новые события. Управлять потоком может любой вошедший диспетчер.</p></div><button value="cancel" class="close" type="button" id="source-close" aria-label="Закрыть">×</button></div><div id="source-status" class="source-status"></div><div class="dialog-actions"><button class="secondary" type="button" id="source-pause-all">Пауза всех</button><button class="primary" type="button" id="source-resume-all">Возобновить все</button></div><p class="dialog-note">custom-emulator — собственная NDTP Nav00-эмуляция; оригинальный NDTP восстанавливает последний сохранённый конфиг.</p></form></dialog>
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
