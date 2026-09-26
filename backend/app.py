@@ -999,7 +999,13 @@ async def lifespan(app):
     if os.getenv('START_MODE','live')=='live':
         state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear()
     server=await asyncio.start_server(lambda r,w:handle(r,w,on_ndtp,counters),'0.0.0.0',int(os.getenv('NDTP_PORT','9201')))
+    official_warmup=asyncio.create_task(warm_official_source())
     yield
+    official_warmup.cancel()
+    try:
+        await official_warmup
+    except asyncio.CancelledError:
+        pass
     server.close();await server.wait_closed();await client.aclose()
     if db is not None:db.close()
 
@@ -1715,6 +1721,16 @@ async def official_emulator_config(enabled:bool|None=None):
         return {'status':status,'units':len(units)}
     except (httpx.HTTPError, ValueError) as exc:
         return {'status':'unavailable','detail':str(exc)}
+
+
+async def warm_official_source():
+    """Seed the mandatory 13-unit official source when its container is ready."""
+    for _ in range(12):
+        status=await official_emulator_config()
+        if status.get('status')!='unavailable':
+            return status
+        await asyncio.sleep(1)
+    return {'status':'unavailable','detail':'official emulator did not become ready during startup warm-up'}
 
 @app.get('/api/admin/emulators',**operation('emulator_status'))
 async def emulator_status():
