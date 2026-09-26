@@ -1,4 +1,4 @@
-"""Models and split-conformal uncertainty; no hidden labels are loaded here."""
+"""Packaged predictors and empirical uncertainty; no hidden labels are loaded."""
 import json
 from pathlib import Path
 import numpy as np

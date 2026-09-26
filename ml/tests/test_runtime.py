@@ -6,6 +6,8 @@ import pytest
 from ml.model import Predictor
 from ml.feature_builder import build_v5_row
 
+DATASET = Path("dataset")
+
 
 def test_v5_artifact_has_runtime_schema_and_catboost_model():
     predictor = Predictor("artifacts")
@@ -20,8 +22,9 @@ def test_v5_artifact_has_runtime_schema_and_catboost_model():
     assert predictor.model.feature_names_ == predictor.v5_features
 
 
+@pytest.mark.skipif(not DATASET.exists(), reason="Full dataset is stored outside the ML-only branch")
 def test_runtime_builds_causal_row_and_prediction():
-    root=Path("dataset")
+    root=DATASET
     point = pd.read_csv(root/"labels/labels_test.csv").iloc[0].to_dict()
     traffic = pd.read_csv(root/"test/traffic.csv")
     history = traffic[traffic.tr_id.astype(str) == str(point["tr_id"])]
@@ -40,8 +43,9 @@ def test_runtime_builds_causal_row_and_prediction():
     assert prediction[0] == pytest.approx(expected, abs=1e-12)
 
 
+@pytest.mark.skipif(not DATASET.exists(), reason="Full dataset is stored outside the ML-only branch")
 def test_v5_rejects_target_outside_causal_horizon():
-    point = pd.read_csv(Path("dataset")/"labels/labels_test.csv").iloc[0].to_dict()
+    point = pd.read_csv(DATASET/"labels/labels_test.csv").iloc[0].to_dict()
     point["target_time_begin"] = point["T"]
     with pytest.raises(ValueError, match="окне"):
         build_v5_row(point, [], [])
