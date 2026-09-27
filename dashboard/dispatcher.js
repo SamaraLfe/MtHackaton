@@ -552,9 +552,7 @@
         Number(route.tr_id)
       );
 
-    // The reserve is placed on the selected vehicle's current position so it
-    // remains on the same planned line instead of appearing as an arbitrary
-    // offset marker beside the map geometry.
+    // The backend chooses a stop near half of the remaining route distance.
     const lon = Number(placement?.lon ?? route.position_match?.projected_lon ?? route.lon);
     const lat = Number(placement?.lat ?? route.position_match?.projected_lat ?? route.lat);
 
@@ -578,16 +576,13 @@
           ?.projected_late_probability ??
         null,
 
-      // What-if uses the backend's bounded placement estimate; a risk
-      // probability delta must not be presented as seconds of delay.
+      // A reserve has no independent ML forecast.
       prediction_s:
-        placement?.after_prediction_s ??
-        route.prediction_s ??
+        placement?.reserve_prediction_s ??
         null,
 
       current_deviation_s:
-        placement?.after_current_deviation_s ??
-        route.current_deviation_s ??
+        placement?.reserve_current_deviation_s ??
         null,
 
       deviation_estimated: true,
@@ -691,7 +686,7 @@
         const after =
           before == null
             ? null
-            : before * 0.85;
+            : before;
 
         const level =
           after == null
@@ -762,21 +757,21 @@
           : 'риск не рассчитан';
 
       const placement = data.placement || {};
-      const savedExpectedDelay = Number(data.impact?.saved_expected_delay_minutes);
+      const savedExpectedDelay = Number(data.impact?.expected_stop_compensation_minutes);
       const impactText = Number.isFinite(savedExpectedDelay)
-        ? `Ожидаемый эффект для парка: −${savedExpectedDelay.toFixed(1)} мин.`
-        : 'Эффект для парка не рассчитан.';
+        ? `Ожидаемая компенсация по остановкам: ${savedExpectedDelay.toFixed(1)} мин.`
+        : 'Компенсация не рассчитана.';
       const decision = data.decision || {};
       const blockers = (decision.blockers || []).join('; ');
       const releaseControl = decision.allowed
         ? `<button type="button" class="primary" id="reserve-release">Зарегистрировать выпуск</button>`
         : `<span class="reserve-blocked">Выпуск заблокирован: ${esc(blockers || 'недостаточно подтверждений')}</span>`;
       result.innerHTML =
-        `<b>Резерв размещён на плановом сегменте</b>
+        `<b>Резерв мгновенно размещён около середины оставшегося пути</b>
          <span>
-           Основное ТС ${routeId}: риск ${change}; прогноз ${delay(placement.before_prediction_s)} → ${delay(placement.after_prediction_s)}. ${impactText}
-           Следующая точка: ${esc(placement.next_stop_address || 'не определена')}.
-           Пунктир показывает путь резерва до цели.
+           Основное ТС ${routeId}: прогноз ${delay(placement.before_prediction_s)} (без изменения). ${impactText}
+           Остановка размещения: ${esc(placement.next_stop_address || 'не определена')}. Компенсировано остановок: ${placement.compensation?.compensated_stops || 0}. Сценарная вероятность пользы: ${Math.round((placement.compensation?.benefit_probability || 0) * 100)}%.
+           Пунктир показывает оставшийся путь резерва.
          </span>
          <span>ETA резерва ${duration(placement.reserve_eta_s)} · запас ${placement.slack_s >= 0 ? '+' : '−'}${duration(Math.abs(placement.slack_s || 0))} · уверенность ${Math.round((placement.confidence || 0) * 100)}%.</span>
          ${releaseControl}
@@ -848,7 +843,7 @@
       const after = projection.prediction_after_s;
       $('reserve-result').innerHTML =
         `<b>Флот подтвердил выпуск резерва</b>
-         <span>${esc(response.response || 'Подтверждение получено.')} Прогноз отклонения: ${delay(before)} → ${delay(after)}.</span>
+         <span>${esc(response.response || 'Подтверждение получено.')} Прогноз основного ТС: ${delay(before)} (без изменения). Ожидаемая компенсация по остановкам: ${(Number(projection.expected_saved_delay_s || 0) / 60).toFixed(1)} мин.</span>
          <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
       $('reserve-clear').onclick = clearReserveScenario;
       await refresh();
@@ -1571,7 +1566,7 @@
           </span>
 
           <b>
-            Риск ${change}
+            Сценарная вероятность пользы ${Math.round((vehicle.scenario_placement?.compensation?.benefit_probability || 0) * 100)}%
           </b>
         </div>
 

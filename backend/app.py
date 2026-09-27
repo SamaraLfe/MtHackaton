@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from ml.features import build_one, epoch, timestamp, load_traffic, load_schedule, haversine
 from backend.ndtp import handle
+from backend.reserve import ReservePolicy, compensation
 from backend.api_docs import CONTACT, DESCRIPTION, LICENSE, OPENAPI_EXAMPLES, SERVERS, TAGS, operation
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -84,6 +85,7 @@ class Mode(BaseModel):
 
 class WhatIf(BaseModel):
     """Non-persistent risk scenario inputs."""
+    policy: ReservePolicy = Field(default_factory=ReservePolicy)
     tr_id:int|None=Field(default=None,gt=0,description='ТС/линия, для которой проверяется выпуск резерва.',examples=[131672])
     extra_vehicles:int=Field(default=0,ge=0,le=20,description='Дополнительные ТС только для эвристического расчёта.',examples=[1])
     headway_reduction_pct:float=Field(default=0,ge=0,le=50,description='Сокращение интервала в процентах.',examples=[0])
@@ -112,6 +114,7 @@ class DriverCommand(BaseModel):
 
 class ReserveDispatch(BaseModel):
     """Request to register a reserve release after data-driven validation."""
+    policy: ReservePolicy = Field(default_factory=ReservePolicy)
     dispatcher_id:str=Field(pattern='^(admin|dispatcher)-[a-z0-9-]{2,40}$',description='Профиль оператора, подтверждающий выпуск резерва.',examples=['dispatcher-02'])
     tr_id:int=Field(gt=0,description='Основное ТС/линия, для которой выпускается резерв.',examples=[131672])
 
@@ -448,12 +451,20 @@ def update_action_case_from_delivery(record,kind,now=None):
         'completed_no_result':'Действие выполнено, но заметного улучшения отклонения пока нет.',
         'worsened':'После выполнения отклонение от графика увеличилось. Нужна новая мера.',
     }
+    if kind=='reserve_release' and projection.get('compensation') is not None:
+        benefit=projection['compensation']
+        status='completed_success' if benefit.get('justified') else 'completed_no_result'
+        details[status]='Флот подтвердил выпуск. Сценарная компенсация по остановкам: '+str(round(benefit.get('expected_compensation_s',0)/60,1))+' мин; прогноз основного ТС не изменён.'
+        case['reserve_compensation']=benefit
     case['delivery_confirmed']=True
     case['last_observation_at']=now.isoformat()
     return apply_action_case_outcome(case,status,details[status],now,after,source=response.get('mode') or 'local_simulator')
 
 def reconcile_action_case(case,now=None):
     """Let a newer vehicle forecast improve or worsen a persistent result."""
+    if case.get('reserve_compensation') is not None:
+        # A primary vehicle's later forecast cannot measure reserve service.
+        return case
     now=_moscow_time(now)
     vehicle=action_vehicle(case['tr_id'])
     if not vehicle or vehicle.get('prediction_s') is None or vehicle.get('stale'):
@@ -686,15 +697,9 @@ def business_kpis(items):
     })
 
 
-def reserve_placement(vehicle):
-    """Choose a concrete on-route position for the non-persistent reserve.
-
-    The reserve starts at the selected vehicle's current projected point. That
-    is the only position supported by the available evidence: the backend has
-    no depot, driver or turn-around data from which to invent another start.
-    The returned track follows the remaining planned stop sequence so the UI
-    can draw and animate the scenario on the same line.
-    """
+def reserve_placement(vehicle, policy=None):
+    """Place an instantaneous reserve near half the remaining planned distance."""
+    policy = policy or ReservePolicy()
     tr=int(vehicle['tr_id'])
     route=schedule[schedule.tr_id==tr].dropna(subset=['lon','lat']).sort_values('ts').reset_index(drop=True)
     if route.empty:
@@ -728,7 +733,7 @@ def reserve_placement(vehicle):
         except (TypeError,ValueError):
             target_epoch=None
     index=nearest_index
-    if target_epoch is not None and vehicle.get('T') is not None and len(route)>1:
+    if vehicle.get('position_match') is None and target_epoch is not None and vehicle.get('T') is not None and len(route)>1:
         try:
             current_raw_ts=epoch(vehicle['T'])-schedule_shift
             temporal_index=int(np.searchsorted(route.ts.to_numpy(dtype=float),current_raw_ts,side='right')-1)
@@ -752,73 +757,42 @@ def reserve_placement(vehicle):
             pass
     if target_index <= index:
         target_index=min(len(route)-1,index+1)
-    target=route.iloc[target_index]
-    track=[{'lon':float(match.get('projected_lon',route.iloc[index].lon)),'lat':float(match.get('projected_lat',route.iloc[index].lat)),'simulated':True}]
-    for row in route.iloc[index+1:min(len(route),index+13)].itertuples():
-        track.append({'lon':float(row.lon),'lat':float(row.lat),'simulated':True})
-    current=float(vehicle.get('current_deviation_s') or 0)
-    raw_forecast=vehicle.get('prediction_s')
-    forecast=float(raw_forecast) if raw_forecast is not None else current
-    positive_delay=max(0.0,forecast,current)
-    distance_to_target=0.0
-    if len(route)>1:
-        first_fraction=1.0-float(match.get('fraction',0.0)) if match.get('segment_index')==index else 1.0
-        distance_to_target+=haversine(float(match.get('projected_lon',route.iloc[index].lon)),float(match.get('projected_lat',route.iloc[index].lat)),route.iloc[index+1].lon,route.iloc[index+1].lat)*first_fraction
-        for left,right in zip(route.iloc[index+1:target_index].itertuples(),route.iloc[index+2:target_index+1].itertuples()):
-            distance_to_target+=haversine(left.lon,left.lat,right.lon,right.lat)
-
-    # Validate the scenario against the actual target horizon and planned
-    # geometry.  The reserve starts at the current projected point because no
-    # depot/driver data is available; its effect is therefore bounded by what
-    # can physically be reached before the target stop.
-    fraction=float(match.get('fraction',0.0) or 0.0)
-    if len(route)>1 and index<len(route)-1:
-        current_plan_ts=float(route.iloc[index].ts)+fraction*max(0.0,float(route.iloc[index+1].ts)-float(route.iloc[index].ts))
-    else:
-        current_plan_ts=float(route.iloc[index].ts)
-    planned_time_s=max(1.0,float(target.ts)-current_plan_ts)
-    planned_speed_kmh=distance_to_target/planned_time_s*3.6 if distance_to_target else 0.0
-    reserve_speed_kmh=round(min(60.0,max(15.0,planned_speed_kmh*1.15 if planned_speed_kmh else 25.0)),1)
-    reserve_eta_s=distance_to_target/(reserve_speed_kmh/3.6) if distance_to_target else 0.0
-    horizon=vehicle.get('horizon_s')
-    if horizon is None and vehicle.get('T') is not None and vehicle.get('target_time_begin') is not None:
-        try:horizon=epoch(vehicle['target_time_begin'])-epoch(vehicle['T'])
-        except (TypeError,ValueError):horizon=None
-    horizon=float(horizon) if horizon is not None else None
-    slack_s=(horizon-reserve_eta_s) if horizon is not None else None
-    confidence=float(match.get('confidence') or 0.0)
-    blockers=[]
-    if horizon is None or horizon<=0:
-        blockers.append('Нет положительного горизонта до контрольной точки')
-    if confidence<0.25:
-        blockers.append('Низкая уверенность сопоставления с плановой траекторией')
-    if slack_s is not None and slack_s<0:
-        blockers.append('Резерв не успевает к контрольной точке по расчётному ETA')
-    if vehicle.get('stale') or vehicle.get('connection_state')=='offline':
-        blockers.append('Телеметрия устарела: сначала нужно восстановить связь')
-    feasible=not blockers
-    horizon_factor=min(1.0,max(0.0,(horizon or 0.0)/900.0))
-    slack_factor=min(1.0,max(0.0,(slack_s or 0.0)/max(horizon or 1.0,1.0)))
-    effect_ratio=round(min(0.35,0.05+0.20*confidence*horizon_factor*slack_factor),3) if feasible else 0.0
-    relief=round(positive_delay*effect_ratio,1) if positive_delay else 0.0
-    after_prediction=round(forecast-relief if forecast>0 else forecast,1)
-    after_current=round(current-min(max(0.0,current),relief),1)
+    fraction=min(1.0,max(0.0,float(match.get('fraction') or 0.0)))
+    current_plan_ts=float(route.iloc[index].ts)
+    if index+1<len(route):
+        current_plan_ts+=fraction*(float(route.iloc[index+1].ts)-current_plan_ts)
+    remaining=route.iloc[index+1:]
+    if fraction>=1.0:
+        remaining=route.iloc[index+2:]
+    stops=[];distances=[];distance=0.0
+    lon=float(match.get('projected_lon',route.iloc[index].lon))
+    lat=float(match.get('projected_lat',route.iloc[index].lat))
+    for row in remaining.itertuples():
+        distance+=haversine(lon,lat,float(row.lon),float(row.lat))
+        lon,lat=float(row.lon),float(row.lat)
+        stops.append({'stop_id':int(row.tt_action_item_id),'stop_address':display_text(row.building_address),
+                      'ts':float(row.ts),'lon':lon,'lat':lat})
+        distances.append(distance)
+    confidence=min(1.0,max(0.0,float(match.get('confidence') or 0.0)))
+    result=compensation(stops,distances,current_plan_ts,vehicle,confidence,policy)
+    start=result['start_index']
+    chosen=stops[start] if start is not None else {'lon':lon,'lat':lat,'stop_address':'Нет оставшихся остановок','stop_id':None,'ts':current_plan_ts}
+    track=[{'lon':stop['lon'],'lat':stop['lat'],'simulated':True} for stop in stops[start:]] if start is not None else []
+    forecast=vehicle.get('prediction_s');current=vehicle.get('current_deviation_s')
     return {
-        'tr_id':tr,'segment_index':index,'lon':track[0]['lon'],'lat':track[0]['lat'],
-        'start_stop_address':display_text(match.get('segment_start_stop_address',route.iloc[index].building_address)),
-        'next_stop_address':display_text(match.get('next_stop_address',route.iloc[index+1].building_address if len(route)>1 else route.iloc[index].building_address)),
-        'target_stop_address':display_text(target.building_address),'target_stop_id':int(target.tt_action_item_id),
-        'distance_to_target_m':round(distance_to_target,1),'confidence':confidence,
-        'horizon_s':round(horizon,1) if horizon is not None else None,
-        'planned_time_to_target_s':round(planned_time_s,1),
-        'planned_speed_kmh':round(planned_speed_kmh,1),
-        'reserve_speed_kmh':reserve_speed_kmh,'reserve_eta_s':round(reserve_eta_s,1),
-        'slack_s':round(slack_s,1) if slack_s is not None else None,
-        'feasible':feasible,'blockers':blockers,'effect_ratio':effect_ratio,
-        'reason':'Позиция выбрана по текущей проекции на плановый сегмент; резерв следует к целевой остановке.',
-        'relief_s':relief,'before_current_deviation_s':round(current,1),'after_current_deviation_s':after_current,
-        'before_prediction_s':round(forecast,1),'after_prediction_s':after_prediction,'track':track,
+        'tr_id':tr,'segment_index':index,'lon':chosen['lon'],'lat':chosen['lat'],
+        'start_stop_address':chosen['stop_address'],'next_stop_address':chosen['stop_address'],
+        'target_stop_address':chosen['stop_address'],'target_stop_id':chosen['stop_id'],
+        'distance_to_target_m':0.0,'confidence':confidence,
+        'horizon_s':max(0.0,chosen['ts']-current_plan_ts),'reserve_eta_s':0.0,
+        'slack_s':max(0.0,chosen['ts']-current_plan_ts),
+        'feasible':result['justified'],'blockers':result['blockers'],'effect_ratio':0.0,
+        'reason':'Мгновенное появление на остановке около середины оставшегося пути; далее плановые времена между остановками.',
+        'relief_s':0.0,'before_current_deviation_s':current,'after_current_deviation_s':current,
+        'before_prediction_s':forecast,'after_prediction_s':forecast,'track':track,
+        'compensation':result,
     }
+
 
 def calibrated_uncertainty(prediction):
     """Apply the same frozen residual calibration as the ML service."""
@@ -1851,7 +1825,8 @@ def simulate_reserve_response(action):
         'response':'Флот подтвердил выпуск резервного ТС на рассчитанный участок.',
         'projection':{
             'prediction_before_s':before,'prediction_after_s':after,
-            'expected_saved_delay_s':None if before is None or after is None else round(max(0.0,float(before)-float(after)),1),
+            'expected_saved_delay_s':placement.get('compensation',{}).get('expected_compensation_s',0.0),
+            'compensation':placement.get('compensation'),
         },
         'note':'Локальная эмуляция подтверждения флота; реальный внешний парк не подключён.',
     })
@@ -1915,25 +1890,17 @@ def driver_decision(vehicle,action):
 
 def reserve_release_decision(vehicle,placement):
     """Gate a real reserve-release record with explicit operational evidence."""
-    blockers=list(placement.get('blockers',[]))
-    prediction=vehicle.get('prediction_s')
-    probability=vehicle.get('late_probability')
-    if prediction is None or float(prediction)<=0:
-        blockers.append('Нет положительного прогноза задержки')
-    if probability is None or float(probability)<.35:
-        blockers.append('Риск задержки ниже порога выпуска резерва (35%)')
-    if vehicle.get('degraded'):
-        blockers.append('Прогноз работает в fallback-режиме')
-    expected_before=None if prediction is None or probability is None else round(max(0.0,float(prediction))*min(1.0,max(0.0,float(probability))),1)
-    effect_ratio=float(placement.get('effect_ratio') or 0.0)
-    expected_after=None if expected_before is None else round(expected_before*(1-effect_ratio),1)
+    result=placement['compensation']
     return clean({
-        'action':'release_reserve','allowed':not blockers,
-        'status':'ready' if not blockers else 'blocked_by_guardrail',
-        'goal':'Снизить ожидаемое воздействие задержки до контрольной остановки',
-        'blockers':blockers,
-        'evidence':{'prediction_s':prediction,'late_probability':probability,'expected_delay_s':expected_before,'expected_after_s':expected_after,'effect_ratio':effect_ratio,'horizon_s':placement.get('horizon_s'),'reserve_eta_s':placement.get('reserve_eta_s'),'slack_s':placement.get('slack_s'),'confidence':placement.get('confidence')},
-        'expected_effect':{'saved_expected_delay_s':None if expected_before is None else round(expected_before-expected_after,1),'note':'Сценарная оценка на основе геометрии и текущей вероятности, не гарантия фактического результата.'},
+        'action':'release_reserve','allowed':result['justified'],
+        'status':'ready' if result['justified'] else 'blocked_by_guardrail',
+        'goal':'Компенсировать обслуживание оставшихся остановок отдельным резервным ТС',
+        'blockers':result['blockers'],
+        'evidence':{'prediction_s':vehicle.get('prediction_s'),'late_probability':vehicle.get('late_probability'),
+                    'benefit_probability':result['benefit_probability'],'compensated_stops':result['compensated_stops'],
+                    'policy':result['policy']},
+        'expected_effect':{'saved_expected_delay_s':result['expected_compensation_s'],
+                           'note':'Сумма компенсации по остановкам в сценарии, не изменение прогноза основного ТС.'},
     })
 
 
@@ -2125,52 +2092,39 @@ async def get_risk():
 
 @app.post('/api/what-if',**operation('what_if'))
 async def what_if(body:WhatIf):
-    source_items=list(vehicles.values())
+    snapshot=await get_state()
+    source_items=snapshot['vehicles']
     baseline=route_risk(source_items)
-    vehicle=None
-    placement=None
-    reserve_effect_ratio=0.15
-    if body.tr_id is not None:
-        vehicle=vehicles.get(int(body.tr_id)) or archive_vehicles.get(int(body.tr_id))
-        if vehicle is None:
-            raise HTTPException(422,'Unknown vehicle/route for reserve scenario')
-        placement=reserve_placement(vehicle)
-        if placement is None:
-            raise HTTPException(422,'Selected vehicle has no planned geometry')
-        if placement.get('feasible'):
-            reserve_effect_ratio=float(placement.get('effect_ratio') or 0.0)
-    relief=max(0.5,1-reserve_effect_ratio*body.extra_vehicles-body.headway_reduction_pct/100)
-    projected=[]
-    for item in baseline:
-        probability=item['max_late_probability']
-        adjusted=None if probability is None else probability*relief
-        level='unknown' if adjusted is None else 'high' if adjusted>=.7 else 'medium' if adjusted>=.35 else 'low'
-        projected.append({**item,'projected_late_probability':adjusted,'projected_level':level})
-    projected_items=[]
-    for item in source_items:
-        probability=item.get('late_probability')
-        adjusted=None if probability is None else float(probability)*relief
-        projected_items.append({**item,'late_probability':adjusted,'level':'unknown' if adjusted is None else 'high' if adjusted>=.7 else 'medium' if adjusted>=.35 else 'low'})
-    baseline_business=business_kpis(source_items)
-    projected_business=business_kpis(projected_items)
-    response={'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'reserve_effect_ratio':reserve_effect_ratio,'risk_multiplier':relief},'baseline':baseline,'projected':projected,
-              'impact':{'baseline':baseline_business,'projected':projected_business,
-                        'saved_expected_delay_minutes':round(max(0.0,(baseline_business.get('expected_delay_minutes') or 0)-(projected_business.get('expected_delay_minutes') or 0)),1),
-                        'note':'Сценарная оценка: риск масштабируется заданным коэффициентом и не является вторым ML-прогнозом.'}}
+    business=business_kpis(source_items)
+    response={'assumptions':{'model':'reserve-stops-v1','instant_placement':True,
+                            'policy':body.policy.model_dump()},
+              'baseline':baseline,
+              'projected':[{**item,'projected_late_probability':item['max_late_probability'],
+                            'projected_level':item['level']} for item in baseline],
+              'impact':{'baseline':business,'projected':dict(business),'saved_expected_delay_minutes':0.0,
+                        'note':'Прогнозы ТС неизменны; компенсация обслуживания учитывается отдельно по остановкам.'}}
     if body.tr_id is None:
         return response
-    selected=next((item for item in projected if int(item['tr_id'])==int(body.tr_id)),None)
-    if selected is None:
-        selected={'tr_id':int(body.tr_id),'level':vehicle.get('level','unknown'),'max_late_probability':vehicle.get('late_probability'),'projected_late_probability':None,'projected_level':'unknown'}
+    vehicle=next((item for item in source_items if int(item['tr_id'])==body.tr_id),None)
+    if vehicle is None:
+        raise HTTPException(422,'Unknown vehicle/route for reserve scenario')
+    if body.extra_vehicles!=1 or body.headway_reduction_pct!=0:
+        raise HTTPException(422,'Reserve scenario requires extra_vehicles=1 and headway_reduction_pct=0')
+    placement=reserve_placement(vehicle,body.policy)
+    if placement is None:
+        raise HTTPException(422,'Selected vehicle has no planned geometry')
     response.update({
-        'selected_tr_id':int(body.tr_id),
-        'placement':placement,
+        'selected_tr_id':body.tr_id,'placement':placement,
         'affected_vehicles':[
-            {'tr_id':int(body.tr_id),'role':'Основное ТС','before_prediction_s':placement['before_prediction_s'],'after_prediction_s':placement['after_prediction_s'],'before_current_deviation_s':placement['before_current_deviation_s'],'after_current_deviation_s':placement['after_current_deviation_s'],'before_late_probability':selected.get('max_late_probability'),'after_late_probability':selected.get('projected_late_probability')},
-            {'tr_id':-abs(int(body.tr_id)),'role':'Резервное ТС','placement':'На текущем плановом сегменте','target_stop_address':placement['target_stop_address'],'track':placement['track']},
-        ],
+            {'tr_id':body.tr_id,'role':'Основное ТС',
+             'before_prediction_s':vehicle.get('prediction_s'),'after_prediction_s':vehicle.get('prediction_s'),
+             'before_current_deviation_s':vehicle.get('current_deviation_s'),'after_current_deviation_s':vehicle.get('current_deviation_s'),
+             'before_late_probability':vehicle.get('late_probability'),'after_late_probability':vehicle.get('late_probability')},
+            {'tr_id':-body.tr_id,'role':'Резервное ТС','placement':'Остановка около середины оставшегося пути',
+             'target_stop_address':placement['target_stop_address'],'track':placement['track']}],
         'decision':reserve_release_decision(vehicle,placement),
     })
+    response['impact']['expected_stop_compensation_minutes']=placement['compensation']['expected_compensation_s']/60
     return response
 
 @app.post('/api/map-match',**operation('map_match'))
@@ -2265,7 +2219,7 @@ async def release_reserve(body:ReserveDispatch):
     vehicle=action_vehicle(body.tr_id)
     if not vehicle:
         raise HTTPException(422,'Unknown vehicle/route for reserve release')
-    placement=reserve_placement(vehicle)
+    placement=reserve_placement(vehicle,body.policy)
     if placement is None:
         raise HTTPException(422,'Selected vehicle has no planned geometry')
     decision=reserve_release_decision(vehicle,placement)
