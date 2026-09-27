@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
+  <script>try { if (localStorage.getItem('takt-dispatcher-theme') === 'dark') document.documentElement.classList.add('theme-dark'); } catch (_) {}</script>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=action-results-13">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=theme-15">
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +14,7 @@
     <div class="shift"><span class="shift-dot" id="stream-dot"></span><div><b id="stream-title">Подключение к потоку</b><small id="archive-time">Проверка источника</small></div></div>
     <nav class="reference-links" aria-label="Справочные материалы"><a href="/docs" target="_blank" rel="noopener noreferrer" title="Описание полей, источников и API">Описание API ↗</a><a href="/code/" target="_blank" rel="noopener noreferrer" title="Сгенерированная документация по коду">Документация кода ↗</a><a href="https://github.com/SamaraLfe/MtHackaton" target="_blank" rel="noreferrer" title="Исходный код локального прототипа">Исходный код ↗</a></nav>
     <button class="source-button" id="source-control-open" type="button">Источники данных</button>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false" aria-label="Включить тёмную тему"><span class="theme-toggle-icon" aria-hidden="true"></span><span id="theme-toggle-label">Тёмная</span></button>
     <button class="profile-button" id="profile-open" type="button"><span class="profile-icon">Д</span><span><small>ПРОФИЛЬ</small><b id="profile-name">Выберите профиль</b></span><i>⌄</i></button>
   </header>
 
@@ -26,7 +28,6 @@
       <article><span>Требуют внимания</span><b id="kpi-attention">—</b></article>
       <article><span>Актуальные прогнозы</span><b id="kpi-predictions">—</b></article>
       <article><span>Время обработки данных</span><b id="kpi-processing">—</b></article>
-      <article title="Сумма положительных прогнозов, взвешенная вероятностью задержки более 120 секунд"><span>Ожидаемые минуты задержки</span><b id="kpi-expected-delay">—</b><small>proxy для приоритизации</small></article>
       <article title="Доля активных ТС с актуальным прогнозом в окне T+10…T+15"><span>Покрытие прогнозом</span><b id="kpi-coverage">—</b><small>качество операционной картины</small></article>
     </section>
 
@@ -90,6 +91,6 @@
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
   <script src="/static/map.js?v=action-results-12"></script>
-  <script src="/static/dispatcher.js?v=action-results-13"></script>
+  <script src="/static/dispatcher.js?v=theme-15"></script>
 </body>
 </html>

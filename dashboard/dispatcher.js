@@ -6,6 +6,7 @@
   const PROFILE_KEY = 'takt-dispatcher-profile';
   const PREVIOUS_PROFILE_KEY = 'takt-dispatcher-previous-profile';
   const AUTH_KEY = 'takt-dispatcher-auth';
+  const THEME_KEY = 'takt-dispatcher-theme';
 
   const labels = {
     low: 'В графике',
@@ -50,6 +51,31 @@
 
   const isAuthenticated = () =>
     sessionStorage.getItem(AUTH_KEY) === '1' && Boolean(profileId);
+
+  function applyTheme(theme) {
+    const dark = theme === 'dark';
+    document.documentElement.classList.toggle('theme-dark', dark);
+    const toggle = $('theme-toggle');
+    const label = $('theme-toggle-label');
+    if (toggle) {
+      toggle.setAttribute('aria-pressed', String(dark));
+      toggle.setAttribute('aria-label', dark ? 'Включить светлую тему' : 'Включить тёмную тему');
+      toggle.title = dark ? 'Переключить на светлую тему' : 'Переключить на тёмную тему';
+    }
+    if (label) label.textContent = dark ? 'Светлая' : 'Тёмная';
+  }
+
+  function toggleTheme() {
+    const next = document.documentElement.classList.contains('theme-dark')
+      ? 'light'
+      : 'dark';
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (_) {
+      // The UI still switches when local storage is unavailable.
+    }
+    applyTheme(next);
+  }
 
   let reserveScenario = null;
   let lastRuntime = {};
@@ -914,9 +940,6 @@
 
     const processingMs = Number(counters.last_inference_ms);
     $('kpi-processing').textContent = Number.isFinite(processingMs) ? `${processingMs} мс` : '—';
-    $('kpi-expected-delay').textContent = Number.isFinite(Number(business.expected_delay_minutes))
-      ? `${Number(business.expected_delay_minutes).toFixed(1)} мин`
-      : '—';
     $('kpi-coverage').textContent = Number.isFinite(Number(business.coverage_pct))
       ? `${Math.round(Number(business.coverage_pct))}%`
       : '—';
@@ -2167,6 +2190,13 @@
   /* =======================================================
      EVENTS
      ======================================================= */
+
+  applyTheme(
+    document.documentElement.classList.contains('theme-dark')
+      ? 'dark'
+      : 'light'
+  );
+  $('theme-toggle')?.addEventListener('click', toggleTheme);
 
   window.TransitMap.mount(
     id =>
