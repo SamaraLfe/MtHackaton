@@ -141,6 +141,11 @@ class EmulatorControl(BaseModel):
     """Local prototype operator allowed to pause a telemetry source."""
     dispatcher_id:str=Field(pattern='^(admin|dispatcher)-[a-z0-9-]{2,40}$',description='Существующий рабочий профиль, управляющий источниками эмуляции.',examples=['dispatcher-01'])
 
+class DebugSpeedOverride(EmulatorControl):
+    """Ephemeral debug-only speed overlay for a custom-emulator vehicle."""
+    tr_id:int=Field(gt=0,description='ТС собственного эмулятора.')
+    speed_kmh:float=Field(ge=0,le=130,description='Искусственная скорость, км/ч.')
+
 class AdminAction(BaseModel):
     """Administrator profile authorizing a destructive local account action."""
     operator_id:str=Field(pattern='^admin-[a-z0-9-]{2,40}$',description='Существующий профиль администратора.',examples=['admin-01'])
@@ -2157,12 +2162,12 @@ async def get_action_center(dispatcher_id:str|None=None):
 async def simulation_status():
     return {'role_required':'admin','mode':state['mode'],'supported_scenarios':['normal','slow','stop'],'active_vehicles':len(vehicles),'runs':stored_simulations(limit=10)}
 
-async def custom_emulator_call(path:str, method:str='GET'):
+async def custom_emulator_call(path:str, method:str='GET', payload:dict|None=None):
     """Call the built-in emulator through the backend network, fail-soft for UI status."""
     if client is None:
         return {'status':'unavailable','detail':'backend client is not ready'}
     try:
-        response=await client.request(method, f'{CUSTOM_EMULATOR_URL}{path}', timeout=1.5)
+        response=await client.request(method, f'{CUSTOM_EMULATOR_URL}{path}', json=payload, timeout=1.5)
         response.raise_for_status()
         return response.json()
     except (httpx.HTTPError, ValueError) as exc:
@@ -2351,6 +2356,33 @@ async def emulator_control(emulator_id:str,action:str,body:EmulatorControl):
     custom=await custom_emulator_call('/pause' if paused else '/resume','POST') if emulator_id in {'custom-emulator','all'} else {'status':'unchanged'}
     official=await official_emulator_config(not paused) if emulator_id in {'official-emulator','all'} else {'status':'unchanged'}
     return {'accepted':True,'emulator_id':emulator_id,'action':action,'ingest_paused':bool(state.get('ingest_paused')),'custom':custom,'official':official}
+
+@app.post('/api/debug/custom-emulator/speed',**operation('debug_speed'))
+async def set_debug_speed(body:DebugSpeedOverride):
+    """Forward a temporary speed overlay without changing dispatcher logic."""
+    if get_dispatcher(body.dispatcher_id) is None:
+        raise HTTPException(403,'Valid dispatcher profile required')
+    if body.tr_id < CUSTOM_TR_ID_OFFSET:
+        raise HTTPException(409,'Debug speed is available only for custom-emulator vehicles')
+    result=await custom_emulator_call(
+        f'/debug/vehicles/{body.tr_id}/speed',
+        'POST',
+        {'speed_kmh':body.speed_kmh},
+    )
+    if result.get('status')=='unavailable':
+        raise HTTPException(503,result.get('detail','Custom emulator unavailable'))
+    return {**result,'dispatcher_id':body.dispatcher_id}
+
+@app.delete('/api/debug/custom-emulator/speed/{tr_id}',**operation('debug_speed'))
+async def clear_debug_speed(tr_id:int, body:EmulatorControl):
+    if get_dispatcher(body.dispatcher_id) is None:
+        raise HTTPException(403,'Valid dispatcher profile required')
+    if tr_id < CUSTOM_TR_ID_OFFSET:
+        raise HTTPException(409,'Debug speed is available only for custom-emulator vehicles')
+    result=await custom_emulator_call(f'/debug/vehicles/{tr_id}/speed','DELETE')
+    if result.get('status')=='unavailable':
+        raise HTTPException(503,result.get('detail','Custom emulator unavailable'))
+    return {**result,'dispatcher_id':body.dispatcher_id}
 
 async def execute_simulation(run):
     run['status']='running';run['started_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)

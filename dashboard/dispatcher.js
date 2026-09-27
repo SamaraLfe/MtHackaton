@@ -54,14 +54,33 @@
   let lastRuntime = {};
   let commandFeedback = null;
   let commandDraft = null;
+  const CUSTOM_TR_ID_OFFSET = 1000000;
+  const debugSpeedOverrides = new Map();
+  let debugSpeedDraft = null;
+  let debugSpeedFeedback = null;
 
   /*
    * Состояние раскрытых блоков карточки.
-   * renderDetail() пересоздаёт HTML каждые 5 секунд,
+   * Фоновое обновление карточки пересоздаёт часть HTML,
    * поэтому эти значения храним отдельно.
    */
   let explanationOpen = false;
   let commandHistoryOpen = false;
+
+  /*
+   * Опрос запускается и после первого выбора профиля, и после перезагрузки.
+   * Один цикл намеренно ждёт завершения refresh() перед следующим запросом.
+   */
+  const REFRESH_INTERVAL_MS = 2000;
+  let refreshTimer = null;
+  let pollingActive = false;
+  let pollingGeneration = 0;
+  let refreshPromise = null;
+
+  /* Данные, которые не должны мигать при каждом обновлении карты. */
+  const DETAIL_CACHE_TTL_MS = 10000;
+  const detailSupplementCache = new Map();
+  let detailRenderVersion = 0;
 
   function resetCommandDraft() {
     commandDraft = null;
@@ -99,6 +118,38 @@
       : '';
     const detail = feedback.detail ? `<small>${esc(feedback.detail)}</small>` : '';
     return `<span>${esc(feedback.message)}</span>${simulate}${detail}`;
+  }
+
+  const isCustomEmulatorVehicle = vehicle =>
+    Number(vehicle?.tr_id) >= CUSTOM_TR_ID_OFFSET;
+
+  function debugSpeedControlHtml(vehicle) {
+    const supported = isCustomEmulatorVehicle(vehicle);
+    const override = debugSpeedOverrides.get(vehicle.tr_id);
+    const draft = debugSpeedDraft?.trId === vehicle.tr_id
+      ? debugSpeedDraft.value
+      : (override?.speed ?? Math.round(Number(vehicle.features?.speed_last) || 0));
+    const feedback = debugSpeedFeedback?.trId === vehicle.tr_id
+      ? debugSpeedFeedback.message
+      : '';
+
+    if (!supported) {
+      return `<section class="action-section debug-speed-section">
+        <p class="eyebrow">DEBUG · СКОРОСТЬ ТС</p>
+        <p>Для этого ТС источник — оригинальный NDTP-эмулятор. Скорость можно задавать только у отдельной копии из custom-emulator, чтобы не вмешиваться в внешний источник.</p>
+      </section>`;
+    }
+
+    return `<section class="action-section debug-speed-section">
+      <p class="eyebrow">DEBUG · СКОРОСТЬ ТС</p>
+      <p>Временный оверлей custom-emulator: ТС продолжает двигаться по той же плановой траектории. Расписание, модель и правила диспетчера не изменяются.</p>
+      <div class="debug-speed-controls">
+        <label>Скорость, км/ч<input id="debug-speed-value" type="number" min="0" max="130" step="1" value="${esc(draft)}" inputmode="decimal"></label>
+        <button type="button" class="secondary" id="debug-speed-apply">Применить</button>
+        <button type="button" class="secondary" id="debug-speed-reset" ${override ? '' : 'disabled'}>Вернуть темп</button>
+      </div>
+      <small id="debug-speed-status">${esc(feedback || (override ? `Активен debug-оверлей: ${override.speed} км/ч.` : 'Оверлей не активен.'))}</small>
+    </section>`;
   }
 
 
@@ -1293,12 +1344,83 @@
     );
   }
 
+  const detailCacheKey = (vehicleId, dispatcherId = profileId) =>
+    `${dispatcherId}:${vehicleId}`;
+
+  const commandHistoryHtml = items =>
+    items.length
+      ? items.map(item =>
+          `<li>
+            <b>${esc(item.dispatcher?.name || 'Диспетчер')}</b>:
+            ${esc(item.action_title)}
+            <small>${time(item.created_at)} · ${esc(commandStatuses[item.status] || item.status || 'статус не указан')}</small>
+          </li>`
+        ).join('')
+      : '<li>Указаний пока нет.</li>';
+
+  const actionPlanHtml = plan =>
+    `<b>Польза действий · ${esc(plan.model)}</b>${plan.options.map(option => {
+      const utility = option.utility || {};
+      const score = Number(utility.score);
+      const scoreText = Number.isFinite(score) ? `${Math.round(score)}/100` : '—';
+      const effect = Number(utility.expected_saved_delay_s || 0);
+      const allowed = option.decision?.allowed === true;
+      const label = allowed ? scoreText : 'заблокировано';
+      return `<button type="button" class="action-plan-option ${option.action === plan.recommended_action ? 'is-recommended' : ''} ${allowed ? '' : 'is-blocked'}" data-plan-action="${esc(option.action)}" ${allowed ? '' : 'disabled aria-disabled="true"'}>
+        <span><b>${esc(option.title)}</b><small>${esc(utility.rationale || 'Нет пояснения')}</small></span>
+        <strong>${label}${effect > 0 ? ` · −${duration(effect)}` : ''}</strong>
+      </button>`;
+    }).join('')}<small class="action-plan-note">Это proxy benefit-v1: расчёт пользы, а не подтверждённый фактический эффект.</small>`;
+
+  function bindActionPlanOptions(actionPlan, draft) {
+    actionPlan?.querySelectorAll('[data-plan-action]').forEach(button => {
+      button.onclick = () => {
+        if (button.disabled) return;
+        const target = button.dataset.planAction;
+        if (!actionText[target]) return;
+        draft.action = target;
+        draft.message = actionText[target];
+        commandFeedback = null;
+        renderDetail();
+      };
+    });
+  }
+
+  function loadDetailSupplement(vehicleId, dispatcherId = profileId) {
+    const key = detailCacheKey(vehicleId, dispatcherId);
+    const cached = detailSupplementCache.get(key) || {loadedAt: 0, promise: null};
+    detailSupplementCache.set(key, cached);
+
+    if (cached.promise || Date.now() - cached.loadedAt < DETAIL_CACHE_TTL_MS) {
+      return cached.promise || Promise.resolve(cached);
+    }
+
+    cached.promise = Promise.all([
+      commandHistory(vehicleId),
+      api(`/api/action-plan?tr_id=${vehicleId}&dispatcher_id=${encodeURIComponent(dispatcherId)}`).catch(() => null)
+    ]).then(([items, plan]) => {
+      cached.items = items;
+      cached.plan = plan;
+      cached.loadedAt = Date.now();
+      return cached;
+    }).finally(() => {
+      cached.promise = null;
+    });
+
+    return cached.promise;
+  }
+
+  function invalidateDetailSupplement(vehicleId, dispatcherId = profileId) {
+    detailSupplementCache.delete(detailCacheKey(vehicleId, dispatcherId));
+  }
+
 
   /* =======================================================
      DETAIL
      ======================================================= */
 
   async function renderDetail() {
+    const renderVersion = ++detailRenderVersion;
     const vehicle =
       vehicles.find(
         item =>
@@ -1448,6 +1570,16 @@
     const initialAction = actionText[recommendation.action] ? recommendation.action : 'contact';
     const expectedImpact = expectedDelaySeconds(vehicle);
     const draft = commandState(vehicle, initialAction);
+    const supplementKey = detailCacheKey(vehicle.tr_id);
+    const supplement = detailSupplementCache.get(supplementKey);
+    const decisionKey = [
+      vehicle.tr_id,
+      recommendation.title || 'Продолжать наблюдение',
+      recommendation.reason || 'Недостаточно данных для рекомендации.',
+      expectedImpact ?? ''
+    ].join('\u001f');
+    const previousDecisionPanel =
+      $('vehicle-detail').querySelector('.decision-panel');
     const activeCommand = document.activeElement?.id === 'command-text'
       ? {
           start: $('command-text').selectionStart,
@@ -1481,12 +1613,12 @@
         </dl>
       </details>
 
-      <section class="decision-panel">
+      <section class="decision-panel" data-decision-key="${esc(decisionKey)}">
         <p class="eyebrow">ЛОГИКА РЕАГИРОВАНИЯ</p>
         <h3>${esc(recommendation.title || 'Продолжать наблюдение')}</h3>
         <p>${esc(recommendation.reason || 'Недостаточно данных для рекомендации.')}</p>
         <small>${expectedImpact != null ? `Ожидаемое воздействие: ${duration(expectedImpact)} · ` : ''}следующая проверка после действия определяется по горизонту прогноза.</small>
-        <div class="action-plan" id="action-plan"><small>Сравниваю пользу допустимых действий…</small></div>
+        <div class="action-plan" id="action-plan">${supplement?.plan?.options?.length ? actionPlanHtml(supplement.plan) : '<small>Сравниваю пользу допустимых действий…</small>'}</div>
       </section>
 
       <section class="action-section">
@@ -1567,13 +1699,24 @@
         <ul
           class="command-history"
           id="command-history"
-        >
-          <li>
-            Загрузка…
-          </li>
-        </ul>
+        >${Array.isArray(supplement?.items) ? commandHistoryHtml(supplement.items) : '<li>Загрузка…</li>'}</ul>
 
-      </details>`;
+      </details>
+
+      ${debugSpeedControlHtml(vehicle)}`;
+
+    /*
+     * Решение и варианты действий меняются заметно реже телеметрии.
+     * Переносим уже готовую секцию в новую карточку, чтобы она не мигала
+     * на каждом фоновом обновлении координат.
+     */
+    const currentDecisionPanel = $('vehicle-detail').querySelector('.decision-panel');
+    if (
+      previousDecisionPanel?.dataset.decisionKey === decisionKey &&
+      currentDecisionPanel
+    ) {
+      currentDecisionPanel.replaceWith(previousDecisionPanel);
+    }
 
 
     /*
@@ -1650,120 +1793,98 @@
     $('send-command').onclick =
       sendCommand;
 
+    const debugSpeedInput = $('debug-speed-value');
+    if (debugSpeedInput) {
+      debugSpeedInput.oninput = event => {
+        debugSpeedDraft = {trId: vehicle.tr_id, value: event.target.value};
+      };
+    }
+    $('debug-speed-apply')?.addEventListener('click', () => setDebugSpeed(vehicle.tr_id));
+    $('debug-speed-reset')?.addEventListener('click', () => clearDebugSpeed(vehicle.tr_id));
+
     const simulateButton = $('simulate-command');
     if (simulateButton && commandFeedback?.commandId) {
       simulateButton.onclick = () => simulateCommand(commandFeedback.commandId);
     }
 
 
+    const actionPlan = $('action-plan');
+    bindActionPlanOptions(actionPlan, draft);
+
     /*
-     * Загружаем журнал.
-     * Проверяем selectedId после await,
-     * чтобы не записать журнал старого ТС,
-     * если пользователь успел выбрать другое.
+     * Карточка получает быстрый кэш сразу, а ответ запроса применяем только
+     * к тому же экземпляру карточки. Так старый ответ не может перерисовать
+     * уже обновлённый или выбранный пользователем другой рейс.
      */
-    const requestedVehicleId =
-      vehicle.tr_id;
+    loadDetailSupplement(vehicle.tr_id, profileId)
+      .then(data => {
+        if (renderVersion !== detailRenderVersion || selectedId !== vehicle.tr_id) return;
 
-    try {
-      const [items, plan] = await Promise.all([
-        commandHistory(requestedVehicleId),
-        api(`/api/action-plan?tr_id=${requestedVehicleId}&dispatcher_id=${encodeURIComponent(profileId)}`).catch(() => null)
-      ]);
+        const list = $('command-history');
+        if (list) list.innerHTML = commandHistoryHtml(data.items || []);
 
-      if (
-        selectedId !==
-        requestedVehicleId
-      ) {
-        return;
-      }
-
-      const list =
-        $('command-history');
-
-      if (!list) return;
-
-      list.innerHTML =
-        items.length
-          ? items
-              .map(
-                item =>
-                  `<li>
-                    <b>
-                      ${esc(
-                        item.dispatcher
-                          ?.name ||
-                        'Диспетчер'
-                      )}
-                    </b>:
-                    ${esc(
-                      item.action_title
-                    )}
-                    <small>
-                      ${time(
-                        item.created_at
-                      )} · ${esc(commandStatuses[item.status] || item.status || 'статус не указан')}
-                    </small>
-                  </li>`
-              )
-              .join('')
-          : (
-              '<li>' +
-              'Указаний пока нет.' +
-              '</li>'
-            );
-
-      const actionPlan = $('action-plan');
-      if (actionPlan && plan?.options?.length) {
-        actionPlan.innerHTML = `<b>Польза действий · ${esc(plan.model)}</b>${plan.options.map(option => {
-          const utility = option.utility || {};
-          const score = Number(utility.score);
-          const scoreText = Number.isFinite(score) ? `${Math.round(score)}/100` : '—';
-          const effect = Number(utility.expected_saved_delay_s || 0);
-          const allowed = option.decision?.allowed === true;
-          const label = allowed ? scoreText : 'заблокировано';
-          return `<button type="button" class="action-plan-option ${option.action === plan.recommended_action ? 'is-recommended' : ''} ${allowed ? '' : 'is-blocked'}" data-plan-action="${esc(option.action)}" ${allowed ? '' : 'disabled aria-disabled="true"'}>
-            <span><b>${esc(option.title)}</b><small>${esc(utility.rationale || 'Нет пояснения')}</small></span>
-            <strong>${label}${effect > 0 ? ` · −${duration(effect)}` : ''}</strong>
-          </button>`;
-        }).join('')}<small class="action-plan-note">Это proxy benefit-v1: расчёт пользы, а не подтверждённый фактический эффект.</small>`;
-        actionPlan.querySelectorAll('[data-plan-action]').forEach(button => {
-          button.onclick = () => {
-            if (button.disabled) return;
-            const target = button.dataset.planAction;
-            if (!actionText[target]) return;
-            draft.action = target;
-            draft.message = actionText[target];
-            commandFeedback = null;
-            renderDetail();
-          };
-        });
-      }
-
-    } catch (error) {
-      if (
-        selectedId !==
-        requestedVehicleId
-      ) {
-        return;
-      }
-
-      const list =
-        $('command-history');
-
-      if (list) {
-        list.innerHTML =
-          '<li>' +
-          'Журнал временно недоступен.' +
-          '</li>';
-      }
-    }
+        const plan = $('action-plan');
+        if (plan && data.plan?.options?.length) {
+          const html = actionPlanHtml(data.plan);
+          if (plan.innerHTML !== html) plan.innerHTML = html;
+          bindActionPlanOptions(plan, draft);
+        }
+      })
+      .catch(() => {
+        if (renderVersion !== detailRenderVersion || selectedId !== vehicle.tr_id) return;
+        const list = $('command-history');
+        if (list) list.innerHTML = '<li>Журнал временно недоступен.</li>';
+      });
   }
 
 
   /* =======================================================
      SEND COMMAND
      ======================================================= */
+
+  async function setDebugSpeed(vehicleId) {
+    const input = $('debug-speed-value');
+    const speed = Number(input?.value);
+    if (!Number.isFinite(speed) || speed < 0 || speed > 130) {
+      debugSpeedFeedback = {trId: vehicleId, message: 'Введите скорость от 0 до 130 км/ч.'};
+      await renderDetail();
+      return;
+    }
+
+    debugSpeedFeedback = {trId: vehicleId, message: 'Применяю debug-оверлей…'};
+    try {
+      const result = await api('/api/debug/custom-emulator/speed', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: profileId, tr_id: vehicleId, speed_kmh: speed})
+      });
+      debugSpeedOverrides.set(vehicleId, {speed: result.speed_kmh});
+      debugSpeedDraft = null;
+      debugSpeedFeedback = {trId: vehicleId, message: `Активен debug-оверлей: ${result.speed_kmh} км/ч.`};
+      await refresh();
+    } catch (error) {
+      debugSpeedFeedback = {trId: vehicleId, message: `Не удалось применить оверлей: ${error.message}`};
+    }
+    if (selectedId === vehicleId) await renderDetail();
+  }
+
+  async function clearDebugSpeed(vehicleId) {
+    debugSpeedFeedback = {trId: vehicleId, message: 'Возвращаю штатный темп…'};
+    try {
+      await api(`/api/debug/custom-emulator/speed/${encodeURIComponent(vehicleId)}`, {
+        method: 'DELETE',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: profileId})
+      });
+      debugSpeedOverrides.delete(vehicleId);
+      debugSpeedDraft = null;
+      debugSpeedFeedback = {trId: vehicleId, message: 'Возвращён штатный темп custom-emulator.'};
+      await refresh();
+    } catch (error) {
+      debugSpeedFeedback = {trId: vehicleId, message: `Не удалось вернуть темп: ${error.message}`};
+    }
+    if (selectedId === vehicleId) await renderDetail();
+  }
 
   async function sendCommand() {
     const vehicle =
@@ -1841,6 +1962,7 @@
             detail: 'Это терминальный результат guardrail: он остаётся в журнале, но не попадает в очередь открытых действий.',
             simulatable: false,
           };
+      invalidateDetailSupplement(vehicle.tr_id);
     } catch (error) {
       commandFeedback = {
         tr_id: vehicle.tr_id,
@@ -1873,6 +1995,7 @@
         checkAt: next.check_at,
         expectedSavedDelayS: projection.expected_saved_delay_s,
       };
+      invalidateDetailSupplement(selectedId);
       await refresh();
     } catch (error) {
       if (button) button.disabled = false;
@@ -1891,7 +2014,27 @@
      REFRESH
      ======================================================= */
 
-  async function refresh() {
+  function refresh() {
+    const requestedProfileId = profileId;
+
+    if (refreshPromise) {
+      if (refreshPromise.profileId === requestedProfileId) {
+        return refreshPromise.promise;
+      }
+      return refreshPromise.promise
+        .catch(() => undefined)
+        .then(() => refresh());
+    }
+
+    const promise = refreshForProfile(requestedProfileId)
+      .finally(() => {
+        if (refreshPromise?.promise === promise) refreshPromise = null;
+      });
+    refreshPromise = {profileId: requestedProfileId, promise};
+    return promise;
+  }
+
+  async function refreshForProfile(requestedProfileId) {
     try {
       const [
         state,
@@ -1901,7 +2044,7 @@
         await Promise.all([
           api(
             `/api/state?dispatcher_id=${encodeURIComponent(
-              profileId
+              requestedProfileId
             )}`
           ),
 
@@ -1909,10 +2052,13 @@
 
           api(
             `/api/action-center?dispatcher_id=${encodeURIComponent(
-              profileId
+              requestedProfileId
             )}`
           ).catch(() => ({ items: [] }))
         ]);
+
+      /* Пользователь мог успеть сменить профиль во время запроса. */
+      if (profileId !== requestedProfileId) return;
 
       actionCenter = actionData.items || [];
       actionCenterSummary = actionData.summary || {};
@@ -1945,11 +2091,38 @@
       }
 
     } catch (error) {
+      if (profileId !== requestedProfileId) return;
       $('attention-list').innerHTML =
         `<p class="empty">
           Не удалось загрузить данные:
           ${esc(error.message)}
         </p>`;
+    }
+  }
+
+  function startRefreshLoop() {
+    if (pollingActive) return;
+    pollingActive = true;
+    const generation = ++pollingGeneration;
+
+    const schedule = () => {
+      if (!pollingActive || generation !== pollingGeneration) return;
+      refreshTimer = window.setTimeout(async () => {
+        refreshTimer = null;
+        await refresh();
+        schedule();
+      }, REFRESH_INTERVAL_MS);
+    };
+
+    schedule();
+  }
+
+  function stopRefreshLoop() {
+    pollingActive = false;
+    pollingGeneration += 1;
+    if (refreshTimer !== null) {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = null;
     }
   }
 
@@ -2058,7 +2231,7 @@
 
 
   $('profile-save').onclick =
-    event => {
+    async event => {
       event.preventDefault();
 
       const selectedProfile = profiles.find(profile => profile.id === $('profile-select').value);
@@ -2067,6 +2240,9 @@
         if (previous) localStorage.setItem(PREVIOUS_PROFILE_KEY, previous.id);
       }
       profileId = $('profile-select').value;
+
+      /* Новый профиль не должен делить цикл со старым. */
+      stopRefreshLoop();
 
       updateProfile();
       sessionStorage.setItem(AUTH_KEY, '1');
@@ -2091,7 +2267,8 @@
       explanationOpen = false;
       commandHistoryOpen = false;
 
-      refresh();
+      await refresh();
+      startRefreshLoop();
     };
 
 
@@ -2107,11 +2284,7 @@
         return;
       }
       await refresh();
-
-      setInterval(
-        refresh,
-        2000
-      );
+      startRefreshLoop();
     }
   )().catch(
     error =>

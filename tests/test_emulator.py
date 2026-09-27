@@ -5,6 +5,7 @@ from backend.ndtp import decode
 from emulator.service import (
     advance_vehicle,
     build_nav00_frame,
+    debug_speed_overrides,
     haversine_m,
     initial_vehicle_state,
     load_vehicles,
@@ -53,6 +54,21 @@ def test_emulator_advances_vehicle_smoothly_along_its_planned_path():
         assert 1 <= distance_m <= 45
         assert abs(speed - previous_speed) <= 2
         previous_lon, previous_lat, previous_speed = lon, lat, speed
+
+
+def test_debug_speed_overlay_changes_only_the_custom_vehicle_motion():
+    vehicle = load_vehicles('dataset')[0]
+    state = initial_vehicle_state(vehicle)
+    initial_position = (state['lon'], state['lat'])
+
+    debug_speed_overrides[vehicle['tr_id']] = 0
+    try:
+        lon, lat, speed = advance_vehicle(vehicle, state, elapsed_s=3)
+    finally:
+        debug_speed_overrides.pop(vehicle['tr_id'], None)
+
+    assert (lon, lat) == initial_position
+    assert speed == 0
 
 
 def test_compose_runs_the_multi_vehicle_emulator_against_backend():

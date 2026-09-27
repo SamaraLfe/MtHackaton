@@ -1463,6 +1463,61 @@ body.drawer-open .topbar {
   line-height: 1.35;
 }
 
+.debug-speed-section {
+  border-color: #eadfbd;
+  background: #fffdf6;
+}
+
+.debug-speed-section .eyebrow {
+  color: var(--amber);
+}
+
+.debug-speed-section > p:not(.eyebrow) {
+  margin: 5px 0 10px;
+  color: #5d5a4d;
+  font-size: 12px;
+}
+
+.debug-speed-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 7px;
+  align-items: end;
+}
+
+.debug-speed-controls label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.debug-speed-controls input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid #d8c99c;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+}
+
+.debug-speed-controls button {
+  padding: 8px 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.debug-speed-section > small {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 
 /* ---------------------------------------------------------
    DETAILS / ACTIONS

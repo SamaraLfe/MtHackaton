@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.ndtp import crc16
 
@@ -59,6 +60,15 @@ runtime = {
     "last_sent_at": None,
     "last_error": None,
 }
+
+# Ephemeral debug overlay.  It lives only in the custom emulator process and
+# changes neither the schedule nor the backend/ML calculations themselves.
+debug_speed_overrides: dict[int, float] = {}
+custom_vehicle_ids: set[int] = set()
+
+
+class DebugSpeed(BaseModel):
+    speed_kmh: float = Field(ge=0, le=130)
 
 
 def build_nav00_frame(
@@ -397,8 +407,22 @@ def advance_vehicle(
         # Follow the planned stop clock instead of traversing the entire day
         # at a fixed road speed.  This is still a synthetic source, but its
         # points now stay on the same segment the backend forecasts.
-        state["elapsed_route_s"] += elapsed_s * state.get("pace_factor", 1.0)
         route_duration = max(1.0, timings[-1])
+        elapsed_before = state["elapsed_route_s"]
+        index_before = max(0, min(len(path) - 2, bisect.bisect_right(timings, elapsed_before) - 1))
+        while index_before < len(path) - 2 and timings[index_before + 1] <= timings[index_before]:
+            index_before += 1
+        planned_before = haversine_m(*path[index_before], *path[index_before + 1]) / max(
+            1.0,
+            timings[index_before + 1] - timings[index_before],
+        ) * 3.6
+        debug_speed = debug_speed_overrides.get(vehicle["tr_id"])
+        pace_factor = (
+            debug_speed / max(1.0, planned_before)
+            if debug_speed is not None
+            else state.get("pace_factor", 1.0)
+        )
+        state["elapsed_route_s"] += elapsed_s * pace_factor
         if state["elapsed_route_s"] > route_duration:
             state["elapsed_route_s"] %= route_duration
         elapsed = state["elapsed_route_s"]
@@ -417,11 +441,21 @@ def advance_vehicle(
         # Nav00 speed is decoded into the backend's 0..130 km/h telemetry
         # contract. A few plan rows contain unrealistically short gaps; keep
         # those synthetic packets valid while preserving the route geometry.
-        target_speed = min(130.0, max(1.0, planned_speed * state.get("pace_factor", 1.0)))
-        state["speed_kmh"] += max(-1.5, min(1.5, target_speed - state["speed_kmh"]))
+        target_speed = (
+            debug_speed
+            if debug_speed is not None
+            else min(130.0, max(1.0, planned_speed * state.get("pace_factor", 1.0)))
+        )
+        # A debug value takes effect on the very next Nav00 packet.  In the
+        # normal path retain a natural-looking gradual speed adjustment.
+        if debug_speed is not None:
+            state["speed_kmh"] = target_speed
+        else:
+            state["speed_kmh"] += max(-1.5, min(1.5, target_speed - state["speed_kmh"]))
         return state["lon"], state["lat"], round(state["speed_kmh"])
 
-    target_speed = (
+    debug_speed = debug_speed_overrides.get(vehicle["tr_id"])
+    target_speed = debug_speed if debug_speed is not None else (
         24
         + (
             vehicle["tr_id"]
@@ -433,16 +467,19 @@ def advance_vehicle(
         % 12
     )
 
-    state["speed_kmh"] += max(
-        -1.5,
-        min(
-            1.5,
-            target_speed
-            - state[
-                "speed_kmh"
-            ],
-        ),
-    )
+    if debug_speed is not None:
+        state["speed_kmh"] = target_speed
+    else:
+        state["speed_kmh"] += max(
+            -1.5,
+            min(
+                1.5,
+                target_speed
+                - state[
+                    "speed_kmh"
+                ],
+            ),
+        )
 
     remaining_m = (
         state["speed_kmh"]
@@ -612,6 +649,8 @@ async def publish_forever() -> None:
     runtime["vehicles"] = len(
         vehicles
     )
+    custom_vehicle_ids.clear()
+    custom_vehicle_ids.update(vehicle["tr_id"] for vehicle in vehicles)
 
     states = {
         vehicle["tr_id"]:
@@ -826,6 +865,32 @@ async def resume():
     return {
         "status": "running",
         **runtime,
+    }
+
+
+@app.post("/debug/vehicles/{tr_id}/speed")
+async def set_debug_speed(tr_id: int, body: DebugSpeed):
+    """Apply an in-memory speed overlay to one custom-emulator vehicle."""
+    if tr_id not in custom_vehicle_ids:
+        raise HTTPException(404, "Custom emulator vehicle not found")
+    debug_speed_overrides[tr_id] = body.speed_kmh
+    return {
+        "tr_id": tr_id,
+        "speed_kmh": body.speed_kmh,
+        "debug": True,
+        "persistent": False,
+    }
+
+
+@app.delete("/debug/vehicles/{tr_id}/speed")
+async def clear_debug_speed(tr_id: int):
+    if tr_id not in custom_vehicle_ids:
+        raise HTTPException(404, "Custom emulator vehicle not found")
+    debug_speed_overrides.pop(tr_id, None)
+    return {
+        "tr_id": tr_id,
+        "debug": False,
+        "persistent": False,
     }
 
 
