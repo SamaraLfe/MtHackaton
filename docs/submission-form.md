@@ -1,4 +1,4 @@
-# Готовые поля формы сдачи
+# Паспорт решения «Такт»
 
 Ветка prototype. Ссылки ведут на исходники; localhost доступен после запуска
 у жюри. Публичное размещение веб-системы не заявляется.
@@ -28,6 +28,9 @@ OpenAPI http://127.0.0.1:8000/openapi.json . Готовый Sphinx HTML такж
 
 ## 4. Производительность и дополнительные возможности
 
+Полное текстовое описание:
+https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/capabilities.md
+
 https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/performance.md
 
 Сохранённый чистый CatBoost batch-инференс: 6,93 мс на 353 строки.
@@ -46,11 +49,3 @@ debug-скорость выбранного ТС без подмены ML; causa
 audit-outbox; guardrails; what-if и подтверждение резерва без изменения
 основного прогноза; синхронизация выбора резерва и карточки; тёмная тема;
 readiness, observability, OpenAPI/Swagger и автоматически собираемый Sphinx.
-
-## Перед отправкой
-
-- Проверить доступ жюри и актуальный commit в prototype.
-- Запустить Compose и проверить readiness, dashboard, Swagger и Sphinx.
-- Проверить тесты Python/Node и строгую сборку документации.
-- На свободном стенде выполнить runtime-проверку.
-- При необходимости приложить ZIP по [delivery.md](delivery.md).

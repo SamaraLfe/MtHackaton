@@ -125,15 +125,14 @@ score    = max(0, min(1, (mae_zero − MAE) / (mae_zero − MAE_TARGET)))   ∈ 
 `sample_submission.csv` — это baseline «прогноз = `cur_dev_s`»; он даёт **≈ 0.40**. Это «пол»,
 который нужно превзойти обученной моделью (нулевой прогноз даёт `score = 0`).
 
-## 6. Как работать
+## 6. Обработка данных в решении
 
-1. Соберите обучающую таблицу: соедините `labels/labels_train.csv` с признаками из
-   `train/traffic.csv` (только `event_time ≤ T`!) и, при желании, из `train/schedule.csv`.
-2. Обучите модель (CatBoost / бустинг / PyTorch — на ваш выбор), проверьте её на
-   `labels/labels_test.csv`.
-3. Для validate постройте те же признаки из `validate/traffic.csv` и `validate/points.csv`
-   (момент `T`, `cur_dev_s`), предскажите задержку.
-4. Возьмите `sample_submission.csv`, впишите свои прогнозы в `prediction`, отправьте на платформу.
+Обучающая таблица связывает labels/labels_train.csv с причинными признаками
+train/traffic.csv: используются только строки event_time ≤ T. Рабочая модель
+CatBoost напрямую предсказывает target_delay_s. Для validate признаки строятся
+из validate/traffic.csv, validate/points.csv и планового расписания.
+Результат сохранён в artifacts/submission.csv полной ветки prototype:
+151 строка с колонками sample_id;prediction без пропусков и дубликатов.
 
 ## 7. Особенности данных
 

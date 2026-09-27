@@ -1,6 +1,6 @@
 # Производительность и качество: что именно измерено
 
-Не смешиваем скорость CatBoost, задержку HTTP pipeline и частоту обновления UI.
+Оценка разделяет скорость CatBoost, задержку HTTP pipeline и частоту обновления UI.
 Нагрузочный предел, число одновременных пользователей и production SLA не измерены.
 
 ## Сохранённые результаты
@@ -27,12 +27,11 @@ CPU/RAM и число повторов исходного замера не со
 В [verification.json](../artifacts/verification.json) сохранён **local**, не
 Docker, прогон: 151 точка, p50 33,8965 мс, p95 50,4439 мс, max 152,6421 мс.
 Он проверяет весь replay HTTP-запрос, строгий горизонт, submission и NDTP/CRC.
-Новый Docker-отчёт следует получать отдельно по инструкции ниже, а не
-переименовывать старый результат в Docker-бенчмарк.
+Docker-замер приведён отдельно: окружение и границы измерения отличаются.
 
 ## Проверка текущей версии в Docker
 
-Свежая проверка 27.09.2026 текущего локального кода перед публикацией:
+Проверка реализации от 27.09.2026:
 [verification-docker.json](../artifacts/verification-docker.json).
 Docker Compose, запросы из backend-контейнера к localhost, один последовательный
 прогон 151 точки: **p50 16,2818 мс; p95 20,2324 мс; max 148,9764 мс**.
@@ -71,7 +70,7 @@ docker compose exec -e VERIFICATION_OUTPUT=/app/state/verification-docker.json b
 docker compose exec backend python -c "from pathlib import Path; print(Path('state/verification-docker.json').read_text())"
 ```
 
-Сохраните вместе с результатом commit, ОС/архитектуру, CPU, RAM, лимиты Docker
-и наличие параллельной нагрузки. /api/observability показывает runtime-счётчики
+Сопоставимость замеров зависит от commit, ОС/архитектуры, CPU, RAM, лимитов Docker
+и параллельной нагрузки. /api/observability показывает runtime-счётчики
 и задержки текущего процесса; /api/metrics — качество модели. Ни один из этих
 endpoint не доказывает точность прогноза на ещё не размеченном live-потоке.
