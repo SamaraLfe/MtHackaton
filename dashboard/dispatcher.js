@@ -44,11 +44,32 @@
 
   /*
    * Состояние раскрытых блоков карточки.
-   * renderDetail() пересоздаёт HTML каждые 5 секунд,
+   * renderDetail() пересоздаёт HTML каждые 2 секунды,
    * поэтому эти значения храним отдельно.
    */
   let explanationOpen = false;
   let commandHistoryOpen = false;
+
+  /* Карточка перерисовывается при обновлении потока. Состояние действия
+     хранится отдельно от DOM и очищается только при смене или закрытии рейса. */
+  let commandDraft = null;
+
+  function resetCommandDraft() {
+    commandDraft = null;
+  }
+
+  function commandState(vehicle) {
+    if (commandDraft?.trId !== vehicle.tr_id) {
+      commandDraft = {
+        trId: vehicle.tr_id,
+        action: 'contact',
+        message: actionText.contact,
+        result: '',
+        sending: false
+      };
+    }
+    return commandDraft;
+  }
 
 
   /* =======================================================
@@ -1015,6 +1036,7 @@
     if (selectedId !== id) {
       explanationOpen = false;
       commandHistoryOpen = false;
+      resetCommandDraft();
     }
 
     selectedId = id;
@@ -1100,6 +1122,10 @@
     document.body
       .classList
       .remove('drawer-open');
+
+    explanationOpen = false;
+    commandHistoryOpen = false;
+    resetCommandDraft();
   }
 
 
@@ -1132,6 +1158,15 @@
       );
 
     if (!vehicle) return;
+
+    const draft = commandState(vehicle);
+    const activeCommand =
+      document.activeElement?.id === 'command-text'
+        ? {
+            start: $('command-text').selectionStart,
+            end: $('command-text').selectionEnd
+          }
+        : null;
 
 
     /* -----------------------------------------------------
@@ -1308,6 +1343,7 @@
           <button
             type="button"
             data-action="contact"
+            aria-pressed="${draft.action === 'contact'}"
           >
             Связаться и уточнить
           </button>
@@ -1315,6 +1351,7 @@
           <button
             type="button"
             data-action="accelerate_safely"
+            aria-pressed="${draft.action === 'accelerate_safely'}"
           >
             Предложить безопасно
             сократить отставание
@@ -1323,6 +1360,7 @@
           <button
             type="button"
             data-action="maintain"
+            aria-pressed="${draft.action === 'maintain'}"
           >
             Согласовать выдерживание
             интервала
@@ -1334,15 +1372,14 @@
         <textarea
           class="command-text"
           id="command-text"
-        >${esc(
-          actionText.contact
-        )}</textarea>
+        >${esc(draft.message)}</textarea>
 
 
         <button
           class="send-command"
           id="send-command"
-          data-action="contact"
+          data-action="${esc(draft.action)}"
+          ${draft.sending ? 'disabled' : ''}
         >
           Зарегистрировать указание
         </button>
@@ -1351,7 +1388,7 @@
         <div
           class="command-result"
           id="command-result"
-        ></div>
+        >${esc(draft.result)}</div>
 
       </section>
 
@@ -1426,23 +1463,30 @@
       .forEach(
         button => {
           button.onclick = () => {
-            $('command-text').value =
-              actionText[
-                button.dataset.action
-              ];
-
-            $('send-command')
-              .dataset
-              .action =
-              button.dataset.action;
-
-            $('send-command')
-              .textContent =
-              button.textContent
-                .trim();
+            draft.action = button.dataset.action;
+            draft.message = actionText[draft.action];
+            draft.result = '';
+            renderDetail();
           };
         }
       );
+
+
+    $('command-text').addEventListener(
+      'input',
+      event => {
+        draft.message = event.target.value;
+      }
+    );
+
+    if (activeCommand) {
+      const input = $('command-text');
+      input.focus();
+      input.setSelectionRange(
+        Math.min(activeCommand.start, input.value.length),
+        Math.min(activeCommand.end, input.value.length)
+      );
+    }
 
 
     $('send-command').onclick =
@@ -1538,13 +1582,8 @@
           item.tr_id === selectedId
       );
 
-    const button =
-      $('send-command');
-
-    const message =
-      $('command-text')
-        .value
-        .trim();
+    const draft = commandState(vehicle || {tr_id: null});
+    const message = draft.message.trim();
 
     if (
       !vehicle ||
@@ -1553,7 +1592,9 @@
       return;
     }
 
-    button.disabled = true;
+    draft.sending = true;
+    draft.result = '';
+    await renderDetail();
 
     try {
       const data =
@@ -1578,9 +1619,7 @@
                 vehicle.tr_id,
 
               action:
-                button
-                  .dataset
-                  .action,
+                draft.action,
 
               message
             })
@@ -1593,29 +1632,24 @@
        */
       commandHistoryOpen = true;
 
-      const result =
-        $('command-result');
-
-      if (result) {
-        result.textContent =
+      if (commandDraft?.trId === vehicle.tr_id) {
+        draft.result =
           `Указание зарегистрировано: ` +
           `${data.action_title}.`;
       }
 
-      await renderDetail();
-
     } catch (error) {
-      const result =
-        $('command-result');
-
-      if (result) {
-        result.textContent =
+      if (commandDraft?.trId === vehicle.tr_id) {
+        draft.result =
           `Не удалось зарегистрировать: ` +
           `${error.message}`;
       }
 
     } finally {
-      button.disabled = false;
+      if (commandDraft?.trId === vehicle.tr_id) {
+        draft.sending = false;
+        await renderDetail();
+      }
     }
   }
 

@@ -1336,6 +1336,12 @@ body.drawer-open .topbar {
   background: #eef6fb;
 }
 
+.action-buttons button[aria-pressed="true"] {
+  border-color: #155b8d;
+  background: #e5f2fa;
+  box-shadow: inset 3px 0 0 #155b8d;
+}
+
 
 /* ---------------------------------------------------------
    COMMAND
