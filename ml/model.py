@@ -47,6 +47,8 @@ class Predictor:
         """Predict V5 from raw prediction points and causal NDTP histories."""
         if self.kind!='v5':
             raise ValueError('Loaded artifact is not a V5 model; retrain with python -m ml.train')
+        if not points or not (len(points)==len(histories)==len(schedules)):
+            raise ValueError('points, histories and schedules must be non-empty and have equal length')
         rows=[build_v5_row(point, history, schedule) for point,history,schedule in zip(points,histories,schedules)]
         values=pd.concat([row[self.v5_features] for row in rows],ignore_index=True)
         prediction=np.asarray(self.model.predict(values),dtype=float)

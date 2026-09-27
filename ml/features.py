@@ -9,7 +9,8 @@ FEATURES = ['cur_dev_s', 'horizon_s', 'hour_sin', 'hour_cos', 'speed_last',
 
 def timestamp(value):
     """Naive dataset times match UTC Unix suffixes of sample_id; display Moscow."""
-    t = pd.Timestamp(value)
+    # Numeric callers pass Unix seconds (time.time()), not pandas nanoseconds.
+    t = pd.Timestamp(value, unit='s', tz='UTC') if isinstance(value,(int,float,np.integer,np.floating)) else pd.Timestamp(value)
     return t.tz_localize('UTC').tz_convert('Europe/Moscow') if t.tzinfo is None else t.tz_convert('Europe/Moscow')
 
 def epoch(value):
