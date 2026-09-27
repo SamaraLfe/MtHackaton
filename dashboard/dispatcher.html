@@ -6,7 +6,7 @@
   <title>ТАКТ · Рабочее место диспетчера</title>
   <script>try { if (localStorage.getItem('takt-dispatcher-theme') === 'dark') document.documentElement.classList.add('theme-dark'); } catch (_) {}</script>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=theme-15">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=dispatcher-theme-15">
 </head>
 <body>
   <header class="topbar">
@@ -71,7 +71,7 @@
     </section>
 
     <section class="reserve-card card is-hidden" id="reserve-card" aria-labelledby="reserve-title">
-      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Backend выбирает текущий плановый сегмент выбранной линии, рассчитывает ожидаемое снижение задержки и строит путь резерва до целевой остановки. Live-расписание не меняется.</p></div>
+      <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Покажем ожидаемое снижение задержки и путь резерва до целевой остановки. Расписание останется без изменений.</p></div>
       <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><span class="reserve-mode">Сценарий: +1 ТС на выбранной плановой траектории</span><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
       <div class="reserve-result" id="reserve-result" aria-live="polite"><span>Выберите линию: резерв будет показан на её маршруте и в таблице.</span></div>
     </section>
@@ -91,6 +91,6 @@
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
   <script src="/static/map.js?v=action-results-12"></script>
-  <script src="/static/dispatcher.js?v=theme-15"></script>
+  <script src="/static/dispatcher.js?v=dispatcher-theme-15"></script>
 </body>
 </html>
