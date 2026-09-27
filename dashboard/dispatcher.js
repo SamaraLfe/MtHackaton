@@ -6,12 +6,21 @@
   const PROFILE_KEY = 'takt-dispatcher-profile';
   const PREVIOUS_PROFILE_KEY = 'takt-dispatcher-previous-profile';
   const AUTH_KEY = 'takt-dispatcher-auth';
+  const THEME_KEY = 'takt-dispatcher-theme';
 
   const labels = {
     low: 'В графике',
     medium: 'Нужно проверить',
     high: 'Риск опоздания',
     unknown: 'Нет оценки'
+  };
+  const commandStatuses = {
+    queued_for_integration: 'отправляем водителю',
+    executing: 'исполняется',
+    completed: 'закрыто · ТС вышло из зоны риска',
+    blocked_by_guardrail: 'не отправлено',
+    integration_timeout: 'не доставлено',
+    simulated_completed: 'выполнено'
   };
 
   const actionText = {
@@ -22,13 +31,36 @@
       'При возможности сократите отставание без нарушения ПДД, скоростного режима и требований безопасности.',
 
     maintain:
-      'Подтвердите возможность выдерживать интервал движения и следовать графику безопасно.'
+      'Подтвердите возможность выдерживать интервал движения и следовать графику безопасно.',
+
+    slow_down_safely:
+      'Согласуйте мягкое снижение темпа, чтобы вернуть интервал к плану без резкого торможения.'
   };
+
+  function actionBenefitReason(option) {
+    const action = option?.action;
+    const effect = Number(option?.utility?.expected_saved_delay_s || 0);
+    if (action === 'contact') {
+      return 'Поможет уточнить причину отклонения и выбрать следующий шаг.';
+    }
+    if (action === 'accelerate_safely') {
+      return effect > 0
+        ? `Может безопасно сократить ожидаемое отставание примерно на ${duration(effect)}.`
+        : 'Подходит только при подтверждённом отставании и достаточном запасе времени.';
+    }
+    if (action === 'slow_down_safely') {
+      return 'Поможет убрать опережение и выровнять интервал движения.';
+    }
+    return 'Сохраняет текущий режим движения; дополнительного эффекта не ожидается.';
+  }
 
   let vehicles = [];
   let baseVehicles = [];
   let archivedVehicles = [];
   let paths = [];
+  let actionCenter = [];
+  let actionCenterSummary = {};
+  let actionCenterExpiryTimer = null;
 
   let selectedId = null;
 
@@ -39,16 +71,150 @@
   const isAuthenticated = () =>
     sessionStorage.getItem(AUTH_KEY) === '1' && Boolean(profileId);
 
+  function applyTheme(theme) {
+    const dark = theme === 'dark';
+    document.documentElement.classList.toggle('theme-dark', dark);
+    const toggle = $('theme-toggle');
+    const label = $('theme-toggle-label');
+    if (toggle) {
+      toggle.setAttribute('aria-pressed', String(dark));
+      toggle.setAttribute('aria-label', dark ? 'Включить светлую тему' : 'Включить тёмную тему');
+      toggle.title = dark ? 'Переключить на светлую тему' : 'Переключить на тёмную тему';
+    }
+    if (label) label.textContent = dark ? 'Светлая' : 'Тёмная';
+  }
+
+  function toggleTheme() {
+    const next = document.documentElement.classList.contains('theme-dark')
+      ? 'light'
+      : 'dark';
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch (_) {
+      // The UI still switches when local storage is unavailable.
+    }
+    applyTheme(next);
+  }
+
   let reserveScenario = null;
   let lastRuntime = {};
+  let commandFeedback = null;
+  let commandDraft = null;
+  const CUSTOM_TR_ID_OFFSET = 1000000;
+  const debugSpeedOverrides = new Map();
+  let debugSpeedDraft = null;
+  let debugSpeedFeedback = null;
 
   /*
    * Состояние раскрытых блоков карточки.
-   * renderDetail() пересоздаёт HTML каждые 5 секунд,
+   * Фоновое обновление карточки пересоздаёт часть HTML,
    * поэтому эти значения храним отдельно.
    */
   let explanationOpen = false;
   let commandHistoryOpen = false;
+
+  /*
+   * Опрос запускается и после первого выбора профиля, и после перезагрузки.
+   * Один цикл намеренно ждёт завершения refresh() перед следующим запросом.
+   */
+  const REFRESH_INTERVAL_MS = 1000;
+  let refreshTimer = null;
+  let pollingActive = false;
+  let pollingGeneration = 0;
+  let refreshPromise = null;
+  let networkCache = null;
+  let networkLoadedAt = 0;
+
+  /* Данные, которые не должны мигать при каждом обновлении карты. */
+  const DETAIL_CACHE_TTL_MS = 3000;
+  const detailSupplementCache = new Map();
+  let detailRenderVersion = 0;
+
+  function resetCommandDraft() {
+    commandDraft = null;
+    commandFeedback = null;
+  }
+
+  function commandState(vehicle, initialAction = 'contact') {
+    if (commandDraft?.trId !== vehicle.tr_id) {
+      const action = actionText[initialAction] ? initialAction : 'contact';
+      commandDraft = {
+        trId: vehicle.tr_id,
+        action,
+        message: actionText[action],
+        sending: false,
+        touched: false
+      };
+    }
+    return commandDraft;
+  }
+
+  function commandFeedbackHtml(vehicleId) {
+    let feedback = commandFeedback?.tr_id === vehicleId ? commandFeedback : null;
+    const ticket = actionCenter.find(item => item.tr_id === vehicleId && item.kind === 'driver_command');
+    if (ticket?.status === 'pending' && feedback?.kind !== 'error' && feedback?.kind !== 'blocked') {
+      feedback = {tr_id: vehicleId, message: 'Отправляем водителю. Ожидаем подтверждение приёма.',
+        commandId: ticket.attempt_id, simulatable: true};
+    } else if (ticket?.status === 'executing') {
+      feedback = {tr_id: vehicleId, kind: 'simulation', commandId: ticket.attempt_id,
+        response: feedback?.response || 'Водитель подтвердил приём команды.'};
+    } else if (ticket?.status === 'not_delivered') {
+      feedback = {tr_id: vehicleId, kind: 'error', message: ticket.result_detail || 'Приём команды не подтверждён.'};
+    } else if (ticket?.tone === 'success') {
+      return '<span>Закрыт · ТС вышло из зоны риска. Зелёный тикет будет удалён через 15 секунд после закрытия.</span>';
+    }
+    const journal = detailSupplementCache.get(detailCacheKey(vehicleId))?.items || [];
+    if (!ticket && journal.some(item => item.id === feedback?.commandId && item.status === 'completed')) {
+      return '<span>ТС вышло из зоны риска. Тикет закрыт и удалён.</span>';
+    }
+    if (!feedback || feedback.tr_id !== vehicleId) return '';
+    if (feedback.kind === 'simulation') {
+      return `<b>Исполняется · водитель принял указание</b><span>${esc(feedback.response || 'Водитель подтвердил указание.')}</span><small>Тикет закроется после выхода ТС из зоны риска по новой телеметрии.</small>`;
+    }
+    if (feedback.kind === 'error') {
+      return `<span class="reserve-blocked">${esc(feedback.message)}</span>`;
+    }
+    const simulate = feedback.simulatable
+      ? `<button type="button" class="secondary simulate-command" id="simulate-command" data-command-id="${esc(feedback.commandId)}">Показать реакцию водителя (демо)</button>`
+      : '';
+    const detail = feedback.detail ? `<small>${esc(feedback.detail)}</small>` : '';
+    const demoHint = feedback.simulatable
+      ? `<small>${vehicleId >= CUSTOM_TR_ID_OFFSET ? 'Демо подтвердит приём и повысит debug-скорость этого custom-ТС. Оверлей можно сбросить внизу карточки.' : 'У оригинального потока демо подтвердит только приём; debug-ускорение доступно у custom-ТС.'}</small>`
+      : '';
+    return `<span>${esc(feedback.message)}</span>${simulate}${demoHint}${detail}`;
+  }
+
+  const isCustomEmulatorVehicle = vehicle =>
+    Number(vehicle?.tr_id) >= CUSTOM_TR_ID_OFFSET;
+
+  function debugSpeedControlHtml(vehicle) {
+    const supported = isCustomEmulatorVehicle(vehicle);
+    const override = debugSpeedOverrides.get(vehicle.tr_id);
+    const draft = debugSpeedDraft?.trId === vehicle.tr_id
+      ? debugSpeedDraft.value
+      : (override?.speed ?? Math.round(Number(vehicle.features?.speed_last) || 0));
+    const feedback = debugSpeedFeedback?.trId === vehicle.tr_id
+      ? debugSpeedFeedback.message
+      : '';
+
+    if (!supported) {
+      return `<section class="action-section debug-speed-section">
+        <p class="eyebrow">DEBUG · СКОРОСТЬ ТС</p>
+        <p>Для этого ТС источник — оригинальный NDTP-эмулятор. Скорость можно задавать только у отдельной копии из custom-emulator, чтобы не вмешиваться в внешний источник.</p>
+      </section>`;
+    }
+
+    return `<section class="action-section debug-speed-section">
+      <p class="eyebrow">DEBUG · СКОРОСТЬ ТС</p>
+      <p>Временный оверлей custom-emulator: ТС продолжает двигаться по той же плановой траектории. Расписание, модель и правила диспетчера не изменяются.</p>
+      <div class="debug-speed-controls">
+        <label>Скорость, км/ч<input id="debug-speed-value" type="number" min="0" max="130" step="1" value="${esc(draft)}" inputmode="decimal"></label>
+        <button type="button" class="secondary" id="debug-speed-apply">Применить</button>
+        <button type="button" class="secondary" id="debug-speed-reset">Вернуть темп</button>
+      </div>
+      <small id="debug-speed-status">${esc(feedback || (override ? `Активен debug-оверлей: ${override.speed} км/ч.` : '«Вернуть темп» сбросит любой debug-оверлей этого ТС, включая демо-ускорение.'))}</small>
+    </section>`;
+  }
 
 
   /* =======================================================
@@ -75,7 +241,8 @@
           {
             timeZone: 'Europe/Moscow',
             hour: '2-digit',
-            minute: '2-digit'
+            minute: '2-digit',
+            second: '2-digit'
           }
         )
       : '—';
@@ -86,9 +253,22 @@
     return seconds < 60 ? `${seconds} с` : `${Math.floor(seconds / 60)} мин${seconds % 60 ? ` ${seconds % 60} с` : ''}`;
   };
   const delay = value => !Number.isFinite(value) ? '—' : `${value < 0 ? '−' : '+'}${duration(value)}`;
+  const expectedDelaySeconds = vehicle => {
+    if (vehicle.stale || vehicle.degraded || !Number.isFinite(vehicle.prediction_s) || !Number.isFinite(vehicle.late_probability)) return null;
+    return Math.max(0, vehicle.prediction_s) * Math.min(1, Math.max(0, vehicle.late_probability));
+  };
+  const businessFromVehicles = items => {
+    const active = items.filter(vehicle => vehicle.trip_status !== 'completed' && vehicle.trip_status !== 'not_started' && vehicle.on_route !== false);
+    const forecasted = active.filter(vehicle => expectedDelaySeconds(vehicle) != null);
+    const expected = forecasted.reduce((sum, vehicle) => sum + expectedDelaySeconds(vehicle), 0);
+    return {
+      coverage_pct: active.length ? (forecasted.length / active.length) * 100 : null,
+      expected_delay_minutes: expected / 60
+    };
+  };
   const predictionText = vehicle => {
     if (vehicle.trip_status === 'completed') return 'Рейс завершён';
-    if (!Number.isFinite(vehicle.prediction_s) || vehicle.stale) return vehicle.status_label || 'Нет актуального прогноза';
+    if (!Number.isFinite(vehicle.prediction_s) || vehicle.stale || vehicle.degraded) return vehicle.status_label || 'Нет актуального прогноза';
     if (Math.round(vehicle.prediction_s) === 0) return 'По расписанию';
     return `${vehicle.prediction_s > 0 ? 'Опоздание' : 'Раньше плана'} на ${duration(vehicle.prediction_s)}`;
   };
@@ -158,7 +338,7 @@
   ) => {
     const response = await fetch(
       url,
-      options
+      {cache: 'no-store', ...options}
     );
 
     const data = await response
@@ -168,8 +348,11 @@
       }));
 
     if (!response.ok) {
+      const detail = typeof data.detail === 'string'
+        ? data.detail
+        : data.detail?.message || JSON.stringify(data.detail || `HTTP ${response.status}`);
       throw Error(
-        data.detail ||
+        detail ||
         `HTTP ${response.status}`
       );
     }
@@ -252,7 +435,7 @@
       const [data, runtime] = await Promise.all([api('/api/admin/emulators'), api('/api/state')]);
       const archiveView = runtime.state?.mode !== 'live';
       const canControl = Boolean(currentProfile()?.id);
-      const sourceStatus = status => ({running: 'Работает', paused: 'Пауза', unavailable: 'Недоступен', not_configured: 'Не настроен'}[status] || status || 'Неизвестно');
+      const sourceStatus = status => ({running: 'Работает', paused: 'Пауза', unavailable: 'Недоступен', not_configured: 'Не настроен', unknown: 'Неизвестно'}[status] || 'Неизвестно');
       box.innerHTML = (data.sources || []).map(source => `
         <div class="source-status-row">
           <span><b>${esc(source.label)}${archiveView ? ' (архив)' : ''}</b><small>${archiveView ? 'Источник не участвует в архивном отображении' : source.id === 'custom-emulator' ? 'Собственная NDTP Nav00' : 'Оригинальный NDTP-образ'}</small></span>
@@ -321,8 +504,8 @@
     if (!select) return;
 
     const previous =
-      reserveScenario?.routeId ||
-      select.value;
+      select.value ||
+      reserveScenario?.routeId;
 
     const sorted = [
       ...baseVehicles
@@ -389,9 +572,7 @@
         Number(route.tr_id)
       );
 
-    // The reserve is placed on the selected vehicle's current position so it
-    // remains on the same planned line instead of appearing as an arbitrary
-    // offset marker beside the map geometry.
+    // The backend chooses a stop near half of the remaining route distance.
     const lon = Number(placement?.lon ?? route.position_match?.projected_lon ?? route.lon);
     const lat = Number(placement?.lat ?? route.position_match?.projected_lat ?? route.lat);
 
@@ -415,16 +596,13 @@
           ?.projected_late_probability ??
         null,
 
-      // What-if uses the backend's bounded placement estimate; a risk
-      // probability delta must not be presented as seconds of delay.
+      // A reserve has no independent ML forecast.
       prediction_s:
-        placement?.after_prediction_s ??
-        route.prediction_s ??
+        placement?.reserve_prediction_s ??
         null,
 
       current_deviation_s:
-        placement?.after_current_deviation_s ??
-        route.current_deviation_s ??
+        placement?.reserve_current_deviation_s ??
         null,
 
       deviation_estimated: true,
@@ -528,7 +706,7 @@
         const after =
           before == null
             ? null
-            : before * 0.85;
+            : before;
 
         const level =
           after == null
@@ -564,6 +742,7 @@
         headway,
         before,
         after,
+        decision: data.decision || {},
 
         vehicle:
           scenarioVehicle(
@@ -598,13 +777,24 @@
           : 'риск не рассчитан';
 
       const placement = data.placement || {};
+      const savedExpectedDelay = Number(data.impact?.expected_stop_compensation_minutes);
+      const impactText = Number.isFinite(savedExpectedDelay)
+        ? `Ожидаемая компенсация по остановкам: ${savedExpectedDelay.toFixed(1)} мин.`
+        : 'Компенсация не рассчитана.';
+      const decision = data.decision || {};
+      const blockers = (decision.blockers || []).join('; ');
+      const releaseControl = decision.allowed
+        ? `<button type="button" class="primary" id="reserve-release">Зарегистрировать выпуск</button>`
+        : `<span class="reserve-blocked">Выпуск заблокирован: ${esc(blockers || 'недостаточно подтверждений')}</span>`;
       result.innerHTML =
-        `<b>Резерв размещён на плановом сегменте</b>
+        `<b>Резерв мгновенно размещён около середины оставшегося пути</b>
          <span>
-           Основное ТС ${routeId}: риск ${change}; прогноз ${delay(placement.before_prediction_s)} → ${delay(placement.after_prediction_s)}.
-           Следующая точка: ${esc(placement.next_stop_address || 'не определена')}.
-           Пунктир показывает путь резерва до цели.
+           Основное ТС ${routeId}: прогноз ${delay(placement.before_prediction_s)} (без изменения). ${impactText}
+           Остановка размещения: ${esc(placement.next_stop_address || 'не определена')}. Компенсировано остановок: ${placement.compensation?.compensated_stops || 0}. Сценарная вероятность пользы: ${Math.round((placement.compensation?.benefit_probability || 0) * 100)}%.
+           Пунктир показывает оставшийся путь резерва.
          </span>
+         <span>ETA резерва ${duration(placement.reserve_eta_s)} · запас ${placement.slack_s >= 0 ? '+' : '−'}${duration(Math.abs(placement.slack_s || 0))} · уверенность ${Math.round((placement.confidence || 0) * 100)}%.</span>
+         ${releaseControl}
          <button
            type="button"
            class="link-button"
@@ -615,6 +805,7 @@
 
       $('reserve-clear').onclick =
         clearReserveScenario;
+      if (decision.allowed) $('reserve-release').onclick = releaseReserve;
 
       openVehicle(
         reserveScenario
@@ -630,6 +821,55 @@
         </span>`;
     } finally {
       button.disabled = false;
+    }
+  }
+
+
+  async function releaseReserve() {
+    if (!reserveScenario) return;
+    const result = $('reserve-result');
+    const button = $('reserve-release');
+    if (button) button.disabled = true;
+    try {
+      const action = await api('/api/reserve-dispatches', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: profileId, tr_id: reserveScenario.routeId})
+      });
+      reserveScenario.release = action;
+      const saved = Number(action.decision?.expected_effect?.saved_expected_delay_s);
+      result.innerHTML =
+        `<b>Выпуск резерва зарегистрирован</b>
+         <span>Заявка ${esc(action.id)} ожидает подтверждения флота. ${Number.isFinite(saved) ? `Ожидаемое снижение задержки: ${saved.toFixed(1)} с.` : ''}</span>
+         <button type="button" class="primary" id="reserve-simulate">Показать подтверждение флота (демо)</button>
+         <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
+      $('reserve-simulate').onclick = () => simulateReserve(action.id);
+      $('reserve-clear').onclick = clearReserveScenario;
+      await refresh();
+    } catch (error) {
+      if (button) button.disabled = false;
+      result.innerHTML += `<span class="reserve-blocked">Заявка не зарегистрирована: ${esc(error.message)}</span>`;
+    }
+  }
+
+  async function simulateReserve(actionId) {
+    const button = $('reserve-simulate');
+    if (button) button.disabled = true;
+    try {
+      const action = await api(`/api/reserve-dispatches/${encodeURIComponent(actionId)}/simulate`, {method: 'POST'});
+      const response = action.simulated_response || {};
+      const projection = response.projection || {};
+      const before = projection.prediction_before_s;
+      const after = projection.prediction_after_s;
+      $('reserve-result').innerHTML =
+        `<b>Флот подтвердил выпуск резерва</b>
+         <span>${esc(response.response || 'Подтверждение получено.')} Прогноз основного ТС: ${delay(before)} (без изменения). Ожидаемая компенсация по остановкам: ${(Number(projection.expected_saved_delay_s || 0) / 60).toFixed(1)} мин.</span>
+         <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
+      $('reserve-clear').onclick = clearReserveScenario;
+      await refresh();
+    } catch (error) {
+      if (button) button.disabled = false;
+      $('reserve-result').insertAdjacentHTML('beforeend', `<span class="reserve-blocked">Подтверждение не получено: ${esc(error.message)}</span>`);
     }
   }
 
@@ -657,7 +897,8 @@
      ======================================================= */
 
   function render(
-    runtime = {}
+    runtime = {},
+    { refreshDetail = true } = {}
   ) {
     lastRuntime = runtime;
 
@@ -671,6 +912,7 @@
     vehicles.sort(
       (a, b) =>
         Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical') ||
+        (expectedDelaySeconds(b) ?? -1) - (expectedDelaySeconds(a) ?? -1) ||
         (
           priority[a.level] ?? 9
         ) -
@@ -700,6 +942,8 @@
     const counters =
       runtime.counters || {};
 
+    const business = runtime.business || businessFromVehicles(baseVehicles);
+
     const live =
       runtime.state
         ?.mode === 'live';
@@ -726,24 +970,30 @@
 
     $('kpi-predictions').textContent = baseVehicles.filter(v => v.source === 'live' && !v.stale && !v.degraded && Number.isFinite(v.prediction_s)).length;
 
+    const processingMs = Number(counters.last_inference_ms);
+    $('kpi-processing').textContent = Number.isFinite(processingMs) ? `${processingMs} мс` : '—';
+    $('kpi-coverage').textContent = Number.isFinite(business.coverage_pct)
+      ? `${Math.round(Number(business.coverage_pct))}%`
+      : '—';
+
     /* stream status */
 
     $('stream-title').textContent =
       live
         ? (
             counters.ndtp_packets
-              ? 'NDTP-поток активен'
-              : 'Ожидание NDTP-потока'
+              ? 'Поток данных активен'
+              : 'Ожидание данных'
           )
-        : 'Исторический replay (архив)';
-    $('source-control-open').textContent = live ? 'Источники данных · live' : 'Источники данных · архив';
+        : 'Исторические данные';
+    $('source-control-open').textContent = live ? 'Источники данных · сейчас' : 'Источники данных · архив';
 
     $('archive-time').textContent =
       live
         ? (
             `${counters.ndtp_packets || 0} пакетов · ` +
-            `${liveForecasts} live-прогнозов` +
-            (archivedVehicles.length ? ` · ${archivedVehicles.length} архивных без live скрыто` : '')
+            `${liveForecasts} актуальных прогнозов` +
+            (archivedVehicles.length ? ` · ${archivedVehicles.length} архивных рейсов скрыто` : '')
           )
         : (
             baseVehicles[0]?.T
@@ -773,6 +1023,7 @@
 
     renderReserveOptions();
     renderAttention();
+    renderActionCenter();
     renderTable();
 
     window.TransitMap.render(
@@ -787,6 +1038,7 @@
      * но сохраняем состояние details.
      */
     if (
+      refreshDetail &&
       $('drawer')
         .classList
         .contains('open')
@@ -802,18 +1054,17 @@
 
   function renderAttention() {
     const attention =
-      [...baseVehicles].sort((a,b) => Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical'))
+      [...baseVehicles]
         .filter(
           vehicle =>
             vehicle.level === 'high' ||
             vehicle.level === 'medium'
         )
-        .concat(
-          baseVehicles.filter(
-            vehicle =>
-              vehicle.level === 'low'
-          )
-        )
+        .sort((a,b) =>
+        Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical') ||
+        (expectedDelaySeconds(b) ?? -1) - (expectedDelaySeconds(a) ?? -1) ||
+        ({high:0, medium:1, low:2, unknown:3}[a.level] ?? 9) - ({high:0, medium:1, low:2, unknown:3}[b.level] ?? 9)
+      )
         .slice(
           0,
           6
@@ -841,7 +1092,7 @@
                       ${esc(
                         vehicle.position_match?.next_stop_address ||
                         vehicle.stop_address
-                      )}
+                      )}${expectedDelaySeconds(vehicle) > 0 ? ` · эффект ${duration(expectedDelaySeconds(vehicle))}` : ''}
                     </small>
                   </span>
 
@@ -864,7 +1115,7 @@
             .join('')
         : (
             '<p class="empty">' +
-            'Нет рейсов для отображения' +
+            'Нет рейсов, требующих вмешательства' +
             '</p>'
           );
 
@@ -882,6 +1133,72 @@
             );
         }
       );
+  }
+
+
+  /* =======================================================
+     ACTION CENTER
+     ======================================================= */
+
+  function renderActionCenter() {
+    const list = $('action-center-list');
+    const summary = $('action-center-summary');
+    if (!list) return;
+
+    if (actionCenterExpiryTimer) {
+      clearTimeout(actionCenterExpiryTimer);
+      actionCenterExpiryTimer = null;
+    }
+    const now = Date.now();
+    actionCenter = actionCenter.filter(item =>
+      item.tone !== 'success' || !item.visible_until || new Date(item.visible_until).getTime() > now
+    );
+    const expiries = actionCenter
+      .filter(item => item.tone === 'success' && item.visible_until)
+      .map(item => new Date(item.visible_until).getTime())
+      .filter(value => Number.isFinite(value) && value > now);
+    if (expiries.length) {
+      actionCenterExpiryTimer = setTimeout(renderActionCenter, Math.max(50, Math.min(...expiries) - now + 20));
+    }
+
+    if (summary) {
+      const attention = actionCenter.filter(item => ['worsened', 'no_result', 'not_delivered'].includes(item.tone)).length;
+      const pending = actionCenter.filter(item => item.status === 'pending').length;
+      const executing = actionCenter.filter(item => item.status === 'executing').length;
+      const success = actionCenter.filter(item => item.tone === 'success').length;
+      summary.textContent = [
+        attention ? `${attention} требуют решения` : '',
+        pending ? `${pending} ожидают ответа` : '',
+        executing ? `${executing} исполняются` : '',
+        success ? `${success} успешно` : ''
+      ].filter(Boolean).join(' · ') || 'Нет активных результатов';
+    }
+
+    if (!actionCenter.length) {
+      list.innerHTML = '<p class="empty">Ваших активных действий пока нет. Выберите ТС и отправьте указание или выпустите резерв.</p>';
+      return;
+    }
+
+    list.innerHTML = actionCenter.slice(0, 8).map(item => {
+      const tone = ['success', 'no_result', 'not_delivered', 'worsened', 'pending', 'executing'].includes(item.tone)
+        ? item.tone
+        : 'pending';
+      const icons = {success: '✓', no_result: '!', not_delivered: '↛', worsened: '↑', pending: '…', executing: '▶'};
+      const attempt = Number(item.revision || 1);
+      return `<button class="action-center-item is-${tone}" data-id="${item.tr_id}" data-case-id="${esc(item.id)}" type="button" aria-label="ТС ${item.tr_id}: ${esc(item.status_label)}">
+        <span class="action-center-mark" aria-hidden="true">${icons[tone]}</span>
+        <span class="action-center-copy">
+          <b>ТС ${item.tr_id} · ${esc(item.action_title)}</b>
+          <small>${esc(item.result_detail || '')}</small>
+          <small class="action-center-meta">Ваше действие · попытка ${attempt} · ${time(item.updated_at)}</small>
+        </span>
+        <span class="action-center-status">${esc(item.status_label)}</span>
+      </button>`;
+    }).join('');
+
+    document.querySelectorAll('#action-center-list .action-center-item').forEach(item => {
+      item.onclick = () => openVehicle(Number(item.dataset.id));
+    });
   }
 
 
@@ -1012,6 +1329,7 @@
     if (selectedId !== id) {
       explanationOpen = false;
       commandHistoryOpen = false;
+      resetCommandDraft();
     }
 
     selectedId = id;
@@ -1097,6 +1415,10 @@
     document.body
       .classList
       .remove('drawer-open');
+
+    explanationOpen = false;
+    commandHistoryOpen = false;
+    resetCommandDraft();
   }
 
 
@@ -1116,12 +1438,98 @@
     );
   }
 
+  const detailCacheKey = (vehicleId, dispatcherId = profileId) =>
+    `${dispatcherId}:${vehicleId}`;
+
+  const commandHistoryHtml = items =>
+    items.length
+      ? items.map(item =>
+          `<li>
+            <b>${esc(item.dispatcher?.name || 'Диспетчер')}</b>:
+            ${esc(item.action_title)}
+            <small>${time(item.created_at)} · ${esc(commandStatuses[item.status] || item.status || 'статус не указан')}</small>
+          </li>`
+        ).join('')
+      : '<li>Указаний пока нет.</li>';
+
+  function syncRecommendedAction(plan, draft) {
+    const allowedOptions = plan?.options?.filter(option => option.decision?.allowed === true) || [];
+    const recommended = allowedOptions.find(option => option.action === plan.recommended_action);
+    if (!draft.touched && recommended && actionText[recommended.action]) {
+      draft.action = recommended.action;
+      draft.message = actionText[recommended.action];
+    }
+    return allowedOptions;
+  }
+
+  function actionPlanHtml(plan, draft) {
+    const allowedOptions = syncRecommendedAction(plan, draft);
+    if (!allowedOptions.length) {
+      const blocker = plan?.options?.flatMap(option => option.decision?.blockers || [])[0];
+      return `<p class="action-unavailable">Сейчас безопасное действие не определено.${blocker ? ` ${esc(blocker)}.` : ''}</p>`;
+    }
+    return allowedOptions.map(option => {
+      const score = Number(option.utility?.score);
+      const scoreText = Number.isFinite(score) ? `${Math.round(score)}% пользы` : 'Польза не рассчитана';
+      const recommended = option.action === plan.recommended_action;
+      const selected = option.action === draft.action;
+      return `<button type="button" class="action-plan-option ${recommended ? 'is-recommended' : ''} ${selected ? 'is-selected' : ''}" data-plan-action="${esc(option.action)}" aria-pressed="${selected}">
+        <span><span class="action-plan-title"><b>${esc(option.title)}</b>${recommended ? '<em>Лучший вариант</em>' : ''}</span><small>${esc(actionBenefitReason(option))}</small></span>
+        <strong>${scoreText}</strong>
+      </button>`;
+    }).join('');
+  }
+
+  function bindActionPlanOptions(actionPlan, draft) {
+    actionPlan?.querySelectorAll('[data-plan-action]').forEach(button => {
+      button.onclick = () => {
+        if (button.disabled) return;
+        const target = button.dataset.planAction;
+        if (!actionText[target]) return;
+        draft.action = target;
+        draft.message = actionText[target];
+        draft.touched = true;
+        commandFeedback = null;
+        renderDetail();
+      };
+    });
+  }
+
+  function loadDetailSupplement(vehicleId, dispatcherId = profileId) {
+    const key = detailCacheKey(vehicleId, dispatcherId);
+    const cached = detailSupplementCache.get(key) || {loadedAt: 0, promise: null};
+    detailSupplementCache.set(key, cached);
+
+    if (cached.promise || Date.now() - cached.loadedAt < DETAIL_CACHE_TTL_MS) {
+      return cached.promise || Promise.resolve(cached);
+    }
+
+    cached.promise = Promise.all([
+      commandHistory(vehicleId),
+      api(`/api/action-plan?tr_id=${vehicleId}&dispatcher_id=${encodeURIComponent(dispatcherId)}`).catch(() => null)
+    ]).then(([items, plan]) => {
+      cached.items = items;
+      cached.plan = plan;
+      cached.loadedAt = Date.now();
+      return cached;
+    }).finally(() => {
+      cached.promise = null;
+    });
+
+    return cached.promise;
+  }
+
+  function invalidateDetailSupplement(vehicleId, dispatcherId = profileId) {
+    detailSupplementCache.delete(detailCacheKey(vehicleId, dispatcherId));
+  }
+
 
   /* =======================================================
      DETAIL
      ======================================================= */
 
   async function renderDetail() {
+    const renderVersion = ++detailRenderVersion;
     const vehicle =
       vehicles.find(
         item =>
@@ -1180,7 +1588,7 @@
           </span>
 
           <b>
-            Риск ${change}
+            Сценарная вероятность пользы ${Math.round((vehicle.scenario_placement?.compensation?.benefit_probability || 0) * 100)}%
           </b>
         </div>
 
@@ -1263,10 +1671,26 @@
        NORMAL VEHICLE
        ----------------------------------------------------- */
 
-    const expectedArrival = Number.isFinite(vehicle.prediction_s) && vehicle.target_time_begin && !vehicle.stale
+    const expectedArrival = Number.isFinite(vehicle.prediction_s) && vehicle.target_time_begin && !vehicle.stale && !vehicle.degraded
       ? new Date(new Date(vehicle.target_time_begin).getTime() + vehicle.prediction_s * 1000).toISOString() : null;
     const risk = Number.isFinite(vehicle.late_probability) && !vehicle.stale
       ? `${Math.round(vehicle.late_probability * 100)}%` : '—';
+    const recommendation = vehicle.dispatcher_recommendation || {};
+    const initialAction = actionText[recommendation.action] ? recommendation.action : 'contact';
+    const draft = commandState(vehicle, initialAction);
+    const supplementKey = detailCacheKey(vehicle.tr_id);
+    const supplement = detailSupplementCache.get(supplementKey);
+    const initialActionPlan = supplement?.plan?.options?.length
+      ? actionPlanHtml(supplement.plan, draft)
+      : '<small>Сравниваю доступные действия…</small>';
+    const activeCommand = document.activeElement?.id === 'command-text'
+      ? {
+          start: $('command-text').selectionStart,
+          end: $('command-text').selectionEnd
+        }
+      : null;
+    const activeDebugSpeed = document.activeElement?.id === 'debug-speed-value';
+    const previousActionPlan = $('action-plan')?.dataset.cacheKey === supplementKey ? $('action-plan') : null;
     $('vehicle-detail').innerHTML =
       `<div class="vehicle-title"><p class="eyebrow">РЕЙС</p><h2>ТС ${vehicle.tr_id}</h2><p>${esc(vehicle.route_start_stop || '—')} → ${esc(vehicle.route_end_stop || '—')}</p></div>
       <div class="detail-status"><span class="tag ${vehicle.level}">${esc(vehicle.status_label || labels[vehicle.level])}</span></div>
@@ -1295,51 +1719,22 @@
       </details>
 
       <section class="action-section">
-
-        <h3>
-          Действие диспетчера
-        </h3>
-
-        <div class="action-buttons">
-
-          <button
-            type="button"
-            data-action="contact"
-          >
-            Связаться и уточнить
-          </button>
-
-          <button
-            type="button"
-            data-action="accelerate_safely"
-          >
-            Предложить безопасно
-            сократить отставание
-          </button>
-
-          <button
-            type="button"
-            data-action="maintain"
-          >
-            Согласовать выдерживание
-            интервала
-          </button>
-
-        </div>
+        <p class="eyebrow">РЕАГИРОВАНИЕ ДИСПЕТЧЕРА</p>
+        <h3>Какое действие выбрать</h3>
+        <div class="action-plan" id="action-plan">${initialActionPlan}</div>
 
 
+        <label class="command-label" for="command-text">Сообщение водителю</label>
         <textarea
           class="command-text"
           id="command-text"
-        >${esc(
-          actionText.contact
-        )}</textarea>
+        >${esc(draft.message)}</textarea>
 
 
         <button
           class="send-command"
           id="send-command"
-          data-action="contact"
+          ${draft.sending ? 'disabled' : ''}
         >
           Зарегистрировать указание
         </button>
@@ -1348,7 +1743,8 @@
         <div
           class="command-result"
           id="command-result"
-        ></div>
+          aria-live="polite"
+        >${commandFeedbackHtml(vehicle.tr_id)}</div>
 
       </section>
 
@@ -1369,14 +1765,16 @@
         <ul
           class="command-history"
           id="command-history"
-        >
-          <li>
-            Загрузка…
-          </li>
-        </ul>
+        >${Array.isArray(supplement?.items) ? commandHistoryHtml(supplement.items) : '<li>Загрузка…</li>'}</ul>
 
-      </details>`;
+      </details>
 
+      ${debugSpeedControlHtml(vehicle)}`;
+
+    // Keep the reaction node itself between frequent metric redraws. This
+    // preserves hover/focus and prevents CSS transitions from restarting.
+    if (previousActionPlan) $('action-plan').replaceWith(previousActionPlan);
+    $('action-plan').dataset.cacheKey = supplementKey;
 
     /*
      * Состояние details обновляем
@@ -1413,120 +1811,129 @@
       );
     }
 
+    $('command-text').addEventListener(
+      'input',
+      event => {
+        draft.message = event.target.value;
+        draft.touched = true;
+      }
+    );
 
-    /* command buttons */
-
-    document
-      .querySelectorAll(
-        '[data-action]'
-      )
-      .forEach(
-        button => {
-          button.onclick = () => {
-            $('command-text').value =
-              actionText[
-                button.dataset.action
-              ];
-
-            $('send-command')
-              .dataset
-              .action =
-              button.dataset.action;
-
-            $('send-command')
-              .textContent =
-              button.textContent
-                .trim();
-          };
-        }
+    if (activeCommand) {
+      const input = $('command-text');
+      input.focus();
+      input.setSelectionRange(
+        Math.min(activeCommand.start, input.value.length),
+        Math.min(activeCommand.end, input.value.length)
       );
+    }
 
 
     $('send-command').onclick =
       sendCommand;
 
+    const debugSpeedInput = $('debug-speed-value');
+    if (debugSpeedInput) {
+      if (activeDebugSpeed) debugSpeedInput.focus({preventScroll: true});
+      debugSpeedInput.oninput = event => {
+        debugSpeedDraft = {trId: vehicle.tr_id, value: event.target.value};
+      };
+    }
+    $('debug-speed-apply')?.addEventListener('click', () => setDebugSpeed(vehicle.tr_id));
+    $('debug-speed-reset')?.addEventListener('click', () => clearDebugSpeed(vehicle.tr_id));
+
+    const simulateButton = $('simulate-command');
+    if (simulateButton?.dataset.commandId) {
+      simulateButton.onclick = () => simulateCommand(simulateButton.dataset.commandId);
+    }
+
+
+    const actionPlan = $('action-plan');
+    bindActionPlanOptions(actionPlan, draft);
 
     /*
-     * Загружаем журнал.
-     * Проверяем selectedId после await,
-     * чтобы не записать журнал старого ТС,
-     * если пользователь успел выбрать другое.
+     * Карточка получает быстрый кэш сразу, а ответ запроса применяем только
+     * к тому же экземпляру карточки. Так старый ответ не может перерисовать
+     * уже обновлённый или выбранный пользователем другой рейс.
      */
-    const requestedVehicleId =
-      vehicle.tr_id;
+    loadDetailSupplement(vehicle.tr_id, profileId)
+      .then(data => {
+        if (renderVersion !== detailRenderVersion || selectedId !== vehicle.tr_id) return;
 
-    try {
-      const items =
-        await commandHistory(
-          requestedVehicleId
-        );
+        const list = $('command-history');
+        if (list) list.innerHTML = commandHistoryHtml(data.items || []);
 
-      if (
-        selectedId !==
-        requestedVehicleId
-      ) {
-        return;
-      }
-
-      const list =
-        $('command-history');
-
-      if (!list) return;
-
-      list.innerHTML =
-        items.length
-          ? items
-              .map(
-                item =>
-                  `<li>
-                    <b>
-                      ${esc(
-                        item.dispatcher
-                          ?.name ||
-                        'Диспетчер'
-                      )}
-                    </b>:
-                    ${esc(
-                      item.action_title
-                    )}
-                    <small>
-                      ${time(
-                        item.created_at
-                      )}
-                    </small>
-                  </li>`
-              )
-              .join('')
-          : (
-              '<li>' +
-              'Указаний пока нет.' +
-              '</li>'
-            );
-
-    } catch (error) {
-      if (
-        selectedId !==
-        requestedVehicleId
-      ) {
-        return;
-      }
-
-      const list =
-        $('command-history');
-
-      if (list) {
-        list.innerHTML =
-          '<li>' +
-          'Журнал временно недоступен.' +
-          '</li>';
-      }
-    }
+        const plan = $('action-plan');
+        if (plan && data.plan?.options?.length) {
+          const previousAction = draft.action;
+          const html = actionPlanHtml(data.plan, draft);
+          if (plan.innerHTML !== html) plan.innerHTML = html;
+          if (draft.action !== previousAction) {
+            const commandInput = $('command-text');
+            if (commandInput) commandInput.value = draft.message;
+          }
+          bindActionPlanOptions(plan, draft);
+        } else if (plan) {
+          plan.innerHTML = '<p class="action-unavailable">Не удалось сравнить пользу действий. Обновите данные рейса.</p>';
+        }
+      })
+      .catch(() => {
+        if (renderVersion !== detailRenderVersion || selectedId !== vehicle.tr_id) return;
+        const list = $('command-history');
+        if (list) list.innerHTML = '<li>Журнал временно недоступен.</li>';
+        const plan = $('action-plan');
+        if (plan) plan.innerHTML = '<p class="action-unavailable">Не удалось сравнить пользу действий. Обновите данные рейса.</p>';
+      });
   }
 
 
   /* =======================================================
      SEND COMMAND
      ======================================================= */
+
+  async function setDebugSpeed(vehicleId) {
+    const input = $('debug-speed-value');
+    const speed = Number(input?.value);
+    if (!Number.isFinite(speed) || speed < 0 || speed > 130) {
+      debugSpeedFeedback = {trId: vehicleId, message: 'Введите скорость от 0 до 130 км/ч.'};
+      await renderDetail();
+      return;
+    }
+
+    debugSpeedFeedback = {trId: vehicleId, message: 'Применяю debug-оверлей…'};
+    try {
+      const result = await api('/api/debug/custom-emulator/speed', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: profileId, tr_id: vehicleId, speed_kmh: speed})
+      });
+      debugSpeedOverrides.set(vehicleId, {speed: result.speed_kmh});
+      debugSpeedDraft = null;
+      debugSpeedFeedback = {trId: vehicleId, message: `Активен debug-оверлей: ${result.speed_kmh} км/ч.`};
+      await refresh();
+    } catch (error) {
+      debugSpeedFeedback = {trId: vehicleId, message: `Не удалось применить оверлей: ${error.message}`};
+    }
+    if (selectedId === vehicleId) await renderDetail();
+  }
+
+  async function clearDebugSpeed(vehicleId) {
+    debugSpeedFeedback = {trId: vehicleId, message: 'Возвращаю штатный темп…'};
+    try {
+      await api(`/api/debug/custom-emulator/speed/${encodeURIComponent(vehicleId)}`, {
+        method: 'DELETE',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: profileId})
+      });
+      debugSpeedOverrides.delete(vehicleId);
+      debugSpeedDraft = null;
+      debugSpeedFeedback = {trId: vehicleId, message: 'Возвращён штатный темп custom-emulator.'};
+      await refresh();
+    } catch (error) {
+      debugSpeedFeedback = {trId: vehicleId, message: `Не удалось вернуть темп: ${error.message}`};
+    }
+    if (selectedId === vehicleId) await renderDetail();
+  }
 
   async function sendCommand() {
     const vehicle =
@@ -1535,13 +1942,8 @@
           item.tr_id === selectedId
       );
 
-    const button =
-      $('send-command');
-
-    const message =
-      $('command-text')
-        .value
-        .trim();
+    const draft = commandState(vehicle || {tr_id: null});
+    const message = draft.message.trim();
 
     if (
       !vehicle ||
@@ -1550,7 +1952,9 @@
       return;
     }
 
-    button.disabled = true;
+    draft.sending = true;
+    commandFeedback = null;
+    await renderDetail();
 
     try {
       const data =
@@ -1575,9 +1979,7 @@
                 vehicle.tr_id,
 
               action:
-                button
-                  .dataset
-                  .action,
+                draft.action,
 
               message
             })
@@ -1590,29 +1992,76 @@
        */
       commandHistoryOpen = true;
 
-      const result =
-        $('command-result');
-
-      if (result) {
-        result.textContent =
-          `Указание зарегистрировано: ` +
-          `${data.action_title}.`;
-      }
-
-      await renderDetail();
-
+      const decision = data.decision || {};
+      const commandMessage = decision.allowed
+        ? `Указание зарегистрировано и прошло проверку. Следующая проверка: ${time(decision.next_check_at)}.`
+        : `Указание сохранено как заблокированное: ${(decision.blockers || []).join('; ') || 'недостаточно данных'}.`;
+      commandFeedback = decision.allowed
+        ? {
+            tr_id: vehicle.tr_id,
+            kind: 'queued',
+            message: commandMessage,
+            commandId: data.id,
+            simulatable: true,
+          }
+        : {
+            tr_id: vehicle.tr_id,
+            kind: 'blocked',
+            message: commandMessage,
+            detail: 'Указание сохранено в журнале и не отправлено водителю.',
+            simulatable: false,
+          };
+      invalidateDetailSupplement(vehicle.tr_id);
     } catch (error) {
-      const result =
-        $('command-result');
-
-      if (result) {
-        result.textContent =
-          `Не удалось зарегистрировать: ` +
-          `${error.message}`;
-      }
-
+      commandFeedback = {
+        tr_id: vehicle.tr_id,
+        kind: 'error',
+        message: `Не удалось зарегистрировать: ${error.message}`,
+      };
     } finally {
-      button.disabled = false;
+      if (commandDraft?.trId === vehicle.tr_id) {
+        draft.sending = false;
+        await renderDetail();
+      }
+    }
+  }
+
+  async function simulateCommand(commandId) {
+    const requestedVehicleId = selectedId;
+    const button = $('simulate-command');
+    if (button) button.disabled = true;
+    try {
+      const data = await api(`/api/driver-commands/${encodeURIComponent(commandId)}/simulate`, {method: 'POST'});
+      commandHistoryOpen = true;
+      const response = data.simulated_response || {};
+      if (response.debug_speed) {
+        debugSpeedOverrides.set(data.tr_id, {speed: response.debug_speed.speed_kmh});
+        if (debugSpeedDraft?.trId === data.tr_id) debugSpeedDraft = null;
+        debugSpeedFeedback = {trId: data.tr_id, message: `Демо-реакция водителя: debug-скорость ${response.debug_speed.speed_kmh} км/ч. Можно вернуть штатный темп.`};
+      }
+      const projection = response.projection || {};
+      const next = response.next_step || {};
+      commandFeedback = {
+        tr_id: data.tr_id,
+        commandId: data.id,
+        kind: 'simulation',
+        response: response.response,
+        note: response.note || 'Локальная симуляция, live-контур не изменён.',
+        reason: next.reason || '',
+        checkAt: next.check_at,
+        expectedSavedDelayS: projection.expected_saved_delay_s,
+      };
+      invalidateDetailSupplement(data.tr_id);
+      await refresh();
+    } catch (error) {
+      if (button) button.disabled = false;
+      commandFeedback = {
+        tr_id: requestedVehicleId,
+        kind: 'error',
+        message: `Симуляция не выполнена: ${error.message}`,
+      };
+      const result = $('command-result');
+      if (result && selectedId === requestedVehicleId) result.innerHTML = `<span class="reserve-blocked">Симуляция не выполнена: ${esc(error.message)}</span>`;
     }
   }
 
@@ -1621,21 +2070,60 @@
      REFRESH
      ======================================================= */
 
-  async function refresh() {
+  function refresh() {
+    const requestedProfileId = profileId;
+
+    if (refreshPromise) {
+      if (refreshPromise.profileId === requestedProfileId) {
+        return refreshPromise.promise;
+      }
+      return refreshPromise.promise
+        .catch(() => undefined)
+        .then(() => refresh());
+    }
+
+    const promise = refreshForProfile(requestedProfileId)
+      .finally(() => {
+        if (refreshPromise?.promise === promise) refreshPromise = null;
+      });
+    refreshPromise = {profileId: requestedProfileId, promise};
+    return promise;
+  }
+
+  async function refreshForProfile(requestedProfileId) {
     try {
       const [
         state,
-        network
+        network,
+        actionData
       ] =
         await Promise.all([
           api(
             `/api/state?dispatcher_id=${encodeURIComponent(
-              profileId
+              requestedProfileId
             )}`
           ),
 
-          api('/api/network')
+          networkCache && Date.now() - networkLoadedAt < 60000
+            ? Promise.resolve(networkCache)
+            : api('/api/network').then(network => {
+                networkCache = network;
+                networkLoadedAt = Date.now();
+                return network;
+              }),
+
+          api(
+            `/api/action-center?dispatcher_id=${encodeURIComponent(
+              requestedProfileId
+            )}`
+          ).catch(() => ({ items: [] }))
         ]);
+
+      /* Пользователь мог успеть сменить профиль во время запроса. */
+      if (profileId !== requestedProfileId) return;
+
+      actionCenter = actionData.items || [];
+      actionCenterSummary = actionData.summary || {};
 
       const allVehicles = state.vehicles || [];
       const liveMode = state.state?.mode === 'live';
@@ -1659,9 +2147,13 @@
       paths =
         network.paths || [];
 
-      render(state);
+      render(state, { refreshDetail: false });
+      if ($('drawer')?.classList.contains('open')) {
+        await renderDetail();
+      }
 
     } catch (error) {
+      if (profileId !== requestedProfileId) return;
       $('attention-list').innerHTML =
         `<p class="empty">
           Не удалось загрузить данные:
@@ -1670,10 +2162,43 @@
     }
   }
 
+  function startRefreshLoop() {
+    if (pollingActive) return;
+    pollingActive = true;
+    const generation = ++pollingGeneration;
+
+    const schedule = () => {
+      if (!pollingActive || generation !== pollingGeneration) return;
+      refreshTimer = window.setTimeout(async () => {
+        refreshTimer = null;
+        await refresh();
+        schedule();
+      }, REFRESH_INTERVAL_MS);
+    };
+
+    schedule();
+  }
+
+  function stopRefreshLoop() {
+    pollingActive = false;
+    pollingGeneration += 1;
+    if (refreshTimer !== null) {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
 
   /* =======================================================
      EVENTS
      ======================================================= */
+
+  applyTheme(
+    document.documentElement.classList.contains('theme-dark')
+      ? 'dark'
+      : 'light'
+  );
+  $('theme-toggle')?.addEventListener('click', toggleTheme);
 
   window.TransitMap.mount(
     id =>
@@ -1695,12 +2220,36 @@
   $('reserve-run').onclick =
     runReserveScenario;
 
+  function selectReserveVehicle(event) {
+    const vehicleId = Number(event.target.value);
+    if (baseVehicles.some(vehicle => vehicle.tr_id === vehicleId)) openVehicle(vehicleId);
+  }
+  $('reserve-route')?.addEventListener('change', selectReserveVehicle);
+
   $('source-control-open')?.addEventListener('click', async () => {
     $('source-dialog')?.showModal();
     await refreshSourceStatus();
   });
 
   $('source-close')?.addEventListener('click', () => $('source-dialog')?.close());
+  function bindSourceDialogDismiss(dialog) {
+    if (!dialog) return;
+    let backdropPressed = false;
+    const outside = event => {
+      const bounds = dialog.getBoundingClientRect();
+      return event.target === dialog &&
+        (event.clientX < bounds.left || event.clientX > bounds.right ||
+         event.clientY < bounds.top || event.clientY > bounds.bottom);
+    };
+    dialog.addEventListener('pointerdown', event => { backdropPressed = outside(event); });
+    dialog.addEventListener('pointerup', event => {
+      if (backdropPressed && outside(event)) dialog.close();
+      backdropPressed = false;
+    });
+    dialog.addEventListener('pointercancel', () => { backdropPressed = false; });
+    dialog.addEventListener('close', () => { backdropPressed = false; });
+  }
+  bindSourceDialogDismiss($('source-dialog'));
   $('source-pause-all')?.addEventListener('click', () => controlSources('pause'));
   $('source-resume-all')?.addEventListener('click', () => controlSources('resume'));
 
@@ -1775,7 +2324,7 @@
 
 
   $('profile-save').onclick =
-    event => {
+    async event => {
       event.preventDefault();
 
       const selectedProfile = profiles.find(profile => profile.id === $('profile-select').value);
@@ -1785,6 +2334,9 @@
       }
       profileId = $('profile-select').value;
 
+      /* Новый профиль не должен делить цикл со старым. */
+      stopRefreshLoop();
+
       updateProfile();
       sessionStorage.setItem(AUTH_KEY, '1');
 
@@ -1792,7 +2344,7 @@
         .close();
 
       if (currentProfile()?.role === 'Администратор') {
-        window.location.href = '/admin';
+        window.open('/admin', '_blank', 'noopener,noreferrer');
         return;
       }
 
@@ -1808,7 +2360,8 @@
       explanationOpen = false;
       commandHistoryOpen = false;
 
-      refresh();
+      await refresh();
+      startRefreshLoop();
     };
 
 
@@ -1824,11 +2377,7 @@
         return;
       }
       await refresh();
-
-      setInterval(
-        refresh,
-        2000
-      );
+      startRefreshLoop();
     }
   )().catch(
     error =>
