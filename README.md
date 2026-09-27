@@ -1,95 +1,47 @@
 # Данные «Такт»
 
-Ветка `data` содержит только датасет задания и документацию по его форматам.
-Здесь нет backend, ML-кода, dashboard, Docker Compose или готового runtime.
+Ветка содержит только README и dataset/: исходные таблицы задания,
+описание форматов и спецификацию NDTP. Исходный код, модели и runtime
+сюда не входят. Состав dataset синхронизирован с полной веткой prototype.
 
-## Что предсказывается
+## Прогнозируемая величина
 
-Для прогнозной точки `(tr_id, T)` нужно оценить задержку на первой плановой
-остановке, для которой выполняется:
+Для (tr_id, T) оценивается отклонение фактического прибытия от планового
+на первой остановке, где 600 < target_time_begin - T <= 900 секунд.
+Положительное значение — опоздание, отрицательное — опережение.
+Используются только наблюдения event_time <= T. Отсутствие контрольной точки
+не разрешает расширять горизонт или подставлять другую остановку.
 
-```text
-T + 10 минут < target_time_begin <= T + 15 минут
-```
+## Состав
 
-`prediction = факт − план`: положительное значение означает опоздание,
-отрицательное — опережение. Для точки `T` разрешены только телеметрия с
-`event_time <= T`, план и известное на этот момент `cur_dev_s`.
-Если в окне нет плановой остановки, цель нельзя заменять ближайшей точкой за
-пределами 15 минут или искусственно повторять маршрут.
+- train/traffic.csv и train/schedule.csv — обучение и расписание.
+- test/traffic.csv и test/schedule.csv — диагностическая test-часть.
+- labels/labels_train.csv и labels/labels_test.csv — целевые значения.
+- validate/traffic.csv, validate/points.csv, validate/schedule_plan.csv — replay.
+- sample_submission.csv — формат sample_id;prediction.
+- [dataset/README.md](dataset/README.md) — колонки и правила причинности.
+- [Спецификация NDTP](dataset/docs/Emulator-and-Telematic-Packets-Specification.md).
 
-## Состав ветки
+Рабочая модель использует 4434 обучающие, 353 test и 151 validate-точку.
+Число прогнозных точек не равно числу GPS-сообщений. CSV — UTF-8;
+данные разделены запятой, submission — точкой с запятой.
 
-| Путь | Назначение |
-|---|---|
-| `dataset/train/traffic.csv` | размеченная обучающая телеметрия |
-| `dataset/train/schedule.csv` | план и факт прибытия для train |
-| `dataset/test/traffic.csv` | локальный тестовый поток |
-| `dataset/test/schedule.csv` | план и факт прибытия для test |
-| `dataset/labels/labels_train.csv` | точки train с `target_delay_s` |
-| `dataset/labels/labels_test.csv` | точки test с `target_delay_s` |
-| `dataset/validate/traffic.csv` | входная телеметрия без target |
-| `dataset/validate/schedule_plan.csv` | только план validate, без `time_fact_begin` |
-| `dataset/validate/points.csv` | точки прогноза validate |
-| `dataset/sample_submission.csv` | шаблон `sample_id;prediction` |
-| `dataset/README.md` | подробная спецификация колонок и анти-утечки |
-| `dataset/docs/Emulator-and-Telematic-Packets-Specification.md` | внешний NDTP-эмулятор и бинарный формат |
+## Ограничения
 
-Фактический размер текущей раздачи:
+Test и validate телеметрия совпадают и встречаются в train. Оценка на test
+не является независимым backtest будущего дня. Причины задержек, дорожный
+граф, пассажиропоток и подтверждённые статусы дверей не предоставлены.
+Система строит плановую геометрию по остановкам, а диагностические причины
+показывает как гипотезы. Распространение датасета определяется условиями
+организаторов задания.
 
-```text
-train/traffic.csv:   287 849 строк
-test/traffic.csv:    105 945 строк
-validate/traffic.csv:105 945 строк
-labels_train.csv:      4 434 точки
-labels_test.csv:         353 точки
-validate/points.csv:     151 точки
-```
+## Документация полного решения
 
-В `validate/traffic.csv` присутствуют 30 `tr_id` как телеметрический контекст,
-но `validate/schedule_plan.csv` содержит плановые траектории 13 ТС, а
-`validate/points.csv` — задачи для 11 ТС. Поэтому live-эмулятор маршрутов
-настраивается по пересечению телеметрии с 13 расписанными ТС, а не по всем 30
-идентификаторам из traffic.
+- [Запуск трёх модулей в Docker](https://github.com/SamaraLfe/MtHackaton/tree/prototype).
+- [Инструкция для жюри](https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/jury-guide.md).
+- [OpenAPI/Swagger и Sphinx](https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/README.md).
+- [Производительность и дополнительные возможности](https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/capabilities.md).
 
-В train есть синтетические транспортные записи для объёма; тестовые и validate
-точки используются как отдельные контрольные периоды. Фактические задержки
-validate не входят в ветку и не восстанавливаются из других файлов.
-
-## Формат результата
-
-Нужен CSV UTF-8 с разделителем `;`, ровно с двумя колонками:
-
-```text
-sample_id;prediction
-131672_1767670500;120.0
-```
-
-В `prediction` должны присутствовать все 151 `sample_id` из
-`dataset/validate/points.csv`, без дублей и пропусков. Значение измеряется в секундах,
-знак сохраняется.
-
-## Проверки набора
-
-- CSV с данными используют `,`, submission — `;`;
-- времена CSV и Unix-время NDTP трактуются как UTC;
-- `schedule.csv` train/test содержит `time_fact_begin`, но validate содержит
-  только план;
-- `target_delay_s` и `target_class` есть только в labels;
-- нельзя читать строки телеметрии после `T`;
-- `tr_id` и `target_stop_id` — идентификаторы, а не обучающие признаки сами по
-  себе.
-
-## NDTP-эмулятор
-
-CSV — уже декодированная телеметрия и достаточен для офлайн-обучения. Официальный
-NDTP-образ нужен только для интеграционного live-контура и в этой ветке не
-хранится. Его REST/TCP-конфиг и соответствие полей описаны в
-`dataset/docs/Emulator-and-Telematic-Packets-Specification.md`.
-
-Для запуска live-контура образ загружается отдельно из выданного архива
-`ndtp-telemetry-emulator.tar`; отсутствие этого архива не является ошибкой
-датасета.
-
-Модель, API и интеграционные сценарии описаны в README веток `ml`, `backend` и
-`integration` соответственно.
+Команды запуска выполняются из полного checkout ветки prototype, а не из
+этой компонентной ветки. Компонентные ветки сохраняют разделение исходников
+и не являются самостоятельной Docker-поставкой.

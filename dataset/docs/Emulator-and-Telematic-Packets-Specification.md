@@ -34,7 +34,7 @@
 ## 1. Запуск из Docker-образа
 
 ```bash
-docker load -i <path-to>/ndtp-telemetry-emulator.tar
+docker load -i ndtp-telemetry-emulator.tar
 docker run --rm -p 18080:18080 --name ndtp-emu ndtp-telemetry-emulator:1.0
 ```
 

@@ -12,7 +12,7 @@
 
 * `train/` и `test/` даны **с разметкой** (папка `labels/`) — на них вы обучаете и проверяете модель.
 * Для периода `validate/` даны только **входные данные** (телеметрия + плановое расписание без
-  факта) и `sample_submission.csv`. **Фактических задержек по validate нет и не будет.**
+  факта) и `submission_template.csv`. **Фактических задержек по validate нет и не будет.**
 * Проверка идёт по скрытому эталону (`ground_truth`) на стороне платформы. Вы **предсказываете**
   задержки по validate и загружаете `submission.csv`.
 
@@ -51,10 +51,8 @@
 | `validate/points.csv` | Прогнозные точки validate: `sample_id`, `tr_id`, **`T`**, `target_stop_id`, `target_time_begin`, `cur_dev_s` |
 | `sample_submission.csv` | **Готовый файл для отправки** (2 колонки `sample_id;prediction`) — замените `prediction` своими значениями |
 | `docs/Emulator-and-Telematic-Packets-Specification.md` | Спецификация формата NDTP и эмулятора телеметрии |
+| `ndtp-telemetry-emulator.tar` | Docker-образ эмулятора: живой поток NDTP для real-time части (см. §8) |
 | `README.md` | Этот файл |
-
-Архив `ndtp-telemetry-emulator.tar` в ветку данных не входит: это внешний
-интеграционный артефакт для live-проверки, а не часть офлайн-датасета.
 
 > **Где момент прогноза?** В `validate/points.csv` для каждой точки указан момент **`T`** (когда
 > строится прогноз) и `target_time_begin` (плановое прибытие на целевую остановку). Вы берёте
@@ -127,15 +125,14 @@ score    = max(0, min(1, (mae_zero − MAE) / (mae_zero − MAE_TARGET)))   ∈ 
 `sample_submission.csv` — это baseline «прогноз = `cur_dev_s`»; он даёт **≈ 0.40**. Это «пол»,
 который нужно превзойти обученной моделью (нулевой прогноз даёт `score = 0`).
 
-## 6. Как работать
+## 6. Обработка данных в решении
 
-1. Соберите обучающую таблицу: соедините `labels/labels_train.csv` с признаками из
-   `train/traffic.csv` (только `event_time ≤ T`!) и, при желании, из `train/schedule.csv`.
-2. Обучите модель (CatBoost / бустинг / PyTorch — на ваш выбор), проверьте её на
-   `labels/labels_test.csv`.
-3. Для validate постройте те же признаки из `validate/traffic.csv` и `validate/points.csv`
-   (момент `T`, `cur_dev_s`), предскажите задержку.
-4. Возьмите `sample_submission.csv`, впишите свои прогнозы в `prediction`, отправьте на платформу.
+Обучающая таблица связывает labels/labels_train.csv с причинными признаками
+train/traffic.csv: используются только строки event_time ≤ T. Рабочая модель
+CatBoost напрямую предсказывает target_delay_s. Для validate признаки строятся
+из validate/traffic.csv, validate/points.csv и планового расписания.
+Результат сохранён в artifacts/submission.csv полной ветки prototype:
+151 строка с колонками sample_id;prediction без пропусков и дубликатов.
 
 ## 7. Особенности данных
 
@@ -143,10 +140,6 @@ score    = max(0, min(1, (mae_zero − MAE) / (mae_zero − MAE_TARGET)))   ∈ 
 * Реальные задержки невелики (медиана ~25 c, максимум ~11 мин) — задача про точность в секундах.
 * Не все ТС в `traffic.csv` имеют прогнозные точки: часть дана как дополнительный контекст
   (телеметрия без разметки) — можно использовать для self-supervised/калибровки.
-* В validate телеметрия содержит 30 `tr_id`, план — 13 `tr_id`, а прогнозные
-  точки — 11 `tr_id`. Для маршрута и live-эмуляции можно использовать только ТС,
-  для которых есть плановая последовательность; остальные не должны получать
-  вымышленные остановки.
 * В `train` добавлены синтетические ТС (для объёма); `test`/`validate` — полностью реальные.
 * Формат сабмита проверяется строго: колонки `sample_id;prediction`, без пропусков/дублей,
   полное покрытие всех `sample_id`.
@@ -162,7 +155,7 @@ CSV-файлы — это **уже раскодированная** телеме
 **Запуск** (подробности и REST-API — в `docs/Emulator-and-Telematic-Packets-Specification.md`):
 
 ```bash
-docker load -i <path-to>/ndtp-telemetry-emulator.tar
+docker load -i ndtp-telemetry-emulator.tar
 docker run --rm -p 18080:18080 --add-host=host.docker.internal:host-gateway \
   --name ndtp-emu ndtp-telemetry-emulator:1.0
 ```
