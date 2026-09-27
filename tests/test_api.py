@@ -435,6 +435,25 @@ def test_dispatcher_keeps_operational_reserve_what_if_workflow_visible():
     assert 'scenarioVehicle' in source and 'scenario-marker' in map_source
 
 
+def test_dispatcher_reaction_panel_is_compact_and_user_facing():
+    page=(Path('dashboard')/'dispatcher.html').read_text(encoding='utf-8')
+    source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
+    styles=(Path('dashboard')/'dispatcher.css').read_text(encoding='utf-8')
+    assert 'РЕАГИРОВАНИЕ ДИСПЕТЧЕРА' in source
+    assert '% пользы' in source
+    assert 'Лучший вариант' in source
+    assert 'actionBenefitReason' in source
+    assert 'syncRecommendedAction' in source
+    assert 'draft.touched = true' in source
+    assert 'proxy' not in page.lower()
+    assert 'benefit-v1' not in source
+    assert 'NDTP-поток активен' not in source
+    assert 'Backend выбирает' not in page
+    assert 'action-buttons' not in source
+    assert 'decision-panel' not in source
+    assert '.decision-panel' not in styles
+
+
 def test_attention_queue_does_not_label_on_time_vehicles_as_interventions():
     source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
     attention=source[source.index('function renderAttention()'):source.index('function renderActionCenter()')]

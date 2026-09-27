@@ -14,10 +14,10 @@
     unknown: 'Нет оценки'
   };
   const commandStatuses = {
-    queued_for_integration: 'в очереди интеграции',
-    blocked_by_guardrail: 'заблокировано правилами · терминальный результат',
-    integration_timeout: 'интеграция истекла · канал не подтвердил',
-    simulated_completed: 'ответ симулятора получен'
+    queued_for_integration: 'ожидает ответа',
+    blocked_by_guardrail: 'не отправлено',
+    integration_timeout: 'не доставлено',
+    simulated_completed: 'выполнено'
   };
 
   const actionText = {
@@ -33,6 +33,23 @@
     slow_down_safely:
       'Согласуйте мягкое снижение темпа, чтобы вернуть интервал к плану без резкого торможения.'
   };
+
+  function actionBenefitReason(option) {
+    const action = option?.action;
+    const effect = Number(option?.utility?.expected_saved_delay_s || 0);
+    if (action === 'contact') {
+      return 'Поможет уточнить причину отклонения и выбрать следующий шаг.';
+    }
+    if (action === 'accelerate_safely') {
+      return effect > 0
+        ? `Может безопасно сократить ожидаемое отставание примерно на ${duration(effect)}.`
+        : 'Подходит только при подтверждённом отставании и достаточном запасе времени.';
+    }
+    if (action === 'slow_down_safely') {
+      return 'Поможет убрать опережение и выровнять интервал движения.';
+    }
+    return 'Сохраняет текущий режим движения; дополнительного эффекта не ожидается.';
+  }
 
   let vehicles = [];
   let baseVehicles = [];
@@ -95,7 +112,8 @@
         trId: vehicle.tr_id,
         action,
         message: actionText[action],
-        sending: false
+        sending: false,
+        touched: false
       };
     }
     return commandDraft;
@@ -109,13 +127,13 @@
       const saving = Number.isFinite(saved) && saved > 0
         ? `Ожидаемое сохранение воздействия: −${duration(saved)}.`
         : '';
-      return `<b>Ответ симулятора получен</b><span>${esc(feedback.response || 'Водитель подтвердил указание.')} ${esc(saving)}</span><small>${esc(feedback.note || '')} ${esc(feedback.reason || '')} ${esc(feedback.checkAt ? `Следующая проверка: ${time(feedback.checkAt)}.` : '')}</small>`;
+      return `<b>Ответ водителя получен</b><span>${esc(feedback.response || 'Водитель подтвердил указание.')} ${esc(saving)}</span><small>${esc(feedback.checkAt ? `Следующая проверка: ${time(feedback.checkAt)}.` : '')}</small>`;
     }
     if (feedback.kind === 'error') {
       return `<span class="reserve-blocked">${esc(feedback.message)}</span>`;
     }
     const simulate = feedback.simulatable
-      ? '<button type="button" class="secondary simulate-command" id="simulate-command">Смоделировать ответ водителя</button>'
+      ? '<button type="button" class="secondary simulate-command" id="simulate-command">Показать реакцию водителя (демо)</button>'
       : '';
     const detail = feedback.detail ? `<small>${esc(feedback.detail)}</small>` : '';
     return `<span>${esc(feedback.message)}</span>${simulate}${detail}`;
@@ -781,8 +799,8 @@
       const saved = Number(action.decision?.expected_effect?.saved_expected_delay_s);
       result.innerHTML =
         `<b>Выпуск резерва зарегистрирован</b>
-         <span>Заявка ${esc(action.id)} добавлена в локальный integration outbox. ${Number.isFinite(saved) ? `Ожидаемое снижение воздействия: ${saved.toFixed(1)} с.` : ''} Внешняя передача флоту пока не подключена.</span>
-         <button type="button" class="primary" id="reserve-simulate">Эмулировать подтверждение флота</button>
+         <span>Заявка ${esc(action.id)} ожидает подтверждения флота. ${Number.isFinite(saved) ? `Ожидаемое снижение задержки: ${saved.toFixed(1)} с.` : ''}</span>
+         <button type="button" class="primary" id="reserve-simulate">Показать подтверждение флота (демо)</button>
          <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
       $('reserve-simulate').onclick = () => simulateReserve(action.id);
       $('reserve-clear').onclick = clearReserveScenario;
@@ -805,7 +823,6 @@
       $('reserve-result').innerHTML =
         `<b>Флот подтвердил выпуск резерва</b>
          <span>${esc(response.response || 'Подтверждение получено.')} Прогноз отклонения: ${delay(before)} → ${delay(after)}.</span>
-         <span>${esc(response.note || '')}</span>
          <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
       $('reserve-clear').onclick = clearReserveScenario;
       await refresh();
@@ -927,18 +944,18 @@
       live
         ? (
             counters.ndtp_packets
-              ? 'NDTP-поток активен'
-              : 'Ожидание NDTP-потока'
+              ? 'Поток данных активен'
+              : 'Ожидание данных'
           )
-        : 'Исторический replay (архив)';
-    $('source-control-open').textContent = live ? 'Источники данных · live' : 'Источники данных · архив';
+        : 'Исторические данные';
+    $('source-control-open').textContent = live ? 'Источники данных · сейчас' : 'Источники данных · архив';
 
     $('archive-time').textContent =
       live
         ? (
             `${counters.ndtp_packets || 0} пакетов · ` +
-            `${liveForecasts} live-прогнозов` +
-            (archivedVehicles.length ? ` · ${archivedVehicles.length} архивных без live скрыто` : '')
+            `${liveForecasts} актуальных прогнозов` +
+            (archivedVehicles.length ? ` · ${archivedVehicles.length} архивных рейсов скрыто` : '')
           )
         : (
             baseVehicles[0]?.T
@@ -1395,19 +1412,33 @@
         ).join('')
       : '<li>Указаний пока нет.</li>';
 
-  const actionPlanHtml = plan =>
-    `<b>Польза действий · ${esc(plan.model)}</b>${plan.options.map(option => {
-      const utility = option.utility || {};
-      const score = Number(utility.score);
-      const scoreText = Number.isFinite(score) ? `${Math.round(score)}/100` : '—';
-      const effect = Number(utility.expected_saved_delay_s || 0);
-      const allowed = option.decision?.allowed === true;
-      const label = allowed ? scoreText : 'заблокировано';
-      return `<button type="button" class="action-plan-option ${option.action === plan.recommended_action ? 'is-recommended' : ''} ${allowed ? '' : 'is-blocked'}" data-plan-action="${esc(option.action)}" ${allowed ? '' : 'disabled aria-disabled="true"'}>
-        <span><b>${esc(option.title)}</b><small>${esc(utility.rationale || 'Нет пояснения')}</small></span>
-        <strong>${label}${effect > 0 ? ` · −${duration(effect)}` : ''}</strong>
+  function syncRecommendedAction(plan, draft) {
+    const allowedOptions = plan?.options?.filter(option => option.decision?.allowed === true) || [];
+    const recommended = allowedOptions.find(option => option.action === plan.recommended_action);
+    if (!draft.touched && recommended && actionText[recommended.action]) {
+      draft.action = recommended.action;
+      draft.message = actionText[recommended.action];
+    }
+    return allowedOptions;
+  }
+
+  function actionPlanHtml(plan, draft) {
+    const allowedOptions = syncRecommendedAction(plan, draft);
+    if (!allowedOptions.length) {
+      const blocker = plan?.options?.flatMap(option => option.decision?.blockers || [])[0];
+      return `<p class="action-unavailable">Сейчас безопасное действие не определено.${blocker ? ` ${esc(blocker)}.` : ''}</p>`;
+    }
+    return allowedOptions.map(option => {
+      const score = Number(option.utility?.score);
+      const scoreText = Number.isFinite(score) ? `${Math.round(score)}% пользы` : 'Польза не рассчитана';
+      const recommended = option.action === plan.recommended_action;
+      const selected = option.action === draft.action;
+      return `<button type="button" class="action-plan-option ${recommended ? 'is-recommended' : ''} ${selected ? 'is-selected' : ''}" data-plan-action="${esc(option.action)}" aria-pressed="${selected}">
+        <span><span class="action-plan-title"><b>${esc(option.title)}</b>${recommended ? '<em>Лучший вариант</em>' : ''}</span><small>${esc(actionBenefitReason(option))}</small></span>
+        <strong>${scoreText}</strong>
       </button>`;
-    }).join('')}<small class="action-plan-note">Это proxy benefit-v1: расчёт пользы, а не подтверждённый фактический эффект.</small>`;
+    }).join('');
+  }
 
   function bindActionPlanOptions(actionPlan, draft) {
     actionPlan?.querySelectorAll('[data-plan-action]').forEach(button => {
@@ -1417,6 +1448,7 @@
         if (!actionText[target]) return;
         draft.action = target;
         draft.message = actionText[target];
+        draft.touched = true;
         commandFeedback = null;
         renderDetail();
       };
@@ -1605,18 +1637,12 @@
       ? `${Math.round(vehicle.late_probability * 100)}%` : '—';
     const recommendation = vehicle.dispatcher_recommendation || {};
     const initialAction = actionText[recommendation.action] ? recommendation.action : 'contact';
-    const expectedImpact = expectedDelaySeconds(vehicle);
     const draft = commandState(vehicle, initialAction);
     const supplementKey = detailCacheKey(vehicle.tr_id);
     const supplement = detailSupplementCache.get(supplementKey);
-    const decisionKey = [
-      vehicle.tr_id,
-      recommendation.title || 'Продолжать наблюдение',
-      recommendation.reason || 'Недостаточно данных для рекомендации.',
-      expectedImpact ?? ''
-    ].join('\u001f');
-    const previousDecisionPanel =
-      $('vehicle-detail').querySelector('.decision-panel');
+    const initialActionPlan = supplement?.plan?.options?.length
+      ? actionPlanHtml(supplement.plan, draft)
+      : '<small>Сравниваю доступные действия…</small>';
     const activeCommand = document.activeElement?.id === 'command-text'
       ? {
           start: $('command-text').selectionStart,
@@ -1650,51 +1676,13 @@
         </dl>
       </details>
 
-      <section class="decision-panel" data-decision-key="${esc(decisionKey)}">
-        <p class="eyebrow">ЛОГИКА РЕАГИРОВАНИЯ</p>
-        <h3>${esc(recommendation.title || 'Продолжать наблюдение')}</h3>
-        <p>${esc(recommendation.reason || 'Недостаточно данных для рекомендации.')}</p>
-        <small>${expectedImpact != null ? `Ожидаемое воздействие: ${duration(expectedImpact)} · ` : ''}следующая проверка после действия определяется по горизонту прогноза.</small>
-        <div class="action-plan" id="action-plan">${supplement?.plan?.options?.length ? actionPlanHtml(supplement.plan) : '<small>Сравниваю пользу допустимых действий…</small>'}</div>
-      </section>
-
       <section class="action-section">
-
-        <h3>
-          Действие диспетчера
-        </h3>
-
-        <div class="action-buttons">
-
-          <button
-            type="button"
-            data-action="contact"
-            aria-pressed="${draft.action === 'contact'}"
-          >
-            Связаться и уточнить
-          </button>
-
-          <button
-            type="button"
-            data-action="accelerate_safely"
-            aria-pressed="${draft.action === 'accelerate_safely'}"
-          >
-            Предложить безопасно
-            сократить отставание
-          </button>
-
-          <button
-            type="button"
-            data-action="maintain"
-            aria-pressed="${draft.action === 'maintain'}"
-          >
-            Согласовать выдерживание
-            интервала
-          </button>
-
-        </div>
+        <p class="eyebrow">РЕАГИРОВАНИЕ ДИСПЕТЧЕРА</p>
+        <h3>Какое действие выбрать</h3>
+        <div class="action-plan" id="action-plan">${initialActionPlan}</div>
 
 
+        <label class="command-label" for="command-text">Сообщение водителю</label>
         <textarea
           class="command-text"
           id="command-text"
@@ -1704,7 +1692,6 @@
         <button
           class="send-command"
           id="send-command"
-          data-action="${esc(draft.action)}"
           ${draft.sending ? 'disabled' : ''}
         >
           Зарегистрировать указание
@@ -1743,20 +1730,6 @@
       ${debugSpeedControlHtml(vehicle)}`;
 
     /*
-     * Решение и варианты действий меняются заметно реже телеметрии.
-     * Переносим уже готовую секцию в новую карточку, чтобы она не мигала
-     * на каждом фоновом обновлении координат.
-     */
-    const currentDecisionPanel = $('vehicle-detail').querySelector('.decision-panel');
-    if (
-      previousDecisionPanel?.dataset.decisionKey === decisionKey &&
-      currentDecisionPanel
-    ) {
-      currentDecisionPanel.replaceWith(previousDecisionPanel);
-    }
-
-
-    /*
      * Состояние details обновляем
      * сразу по пользовательскому toggle.
      */
@@ -1791,29 +1764,11 @@
       );
     }
 
-
-    /* command buttons */
-
-    document
-      .querySelectorAll(
-        '[data-action]'
-      )
-      .forEach(
-        button => {
-          button.onclick = () => {
-            draft.action = button.dataset.action;
-            draft.message = actionText[draft.action];
-            commandFeedback = null;
-            renderDetail();
-          };
-        }
-      );
-
-
     $('command-text').addEventListener(
       'input',
       event => {
         draft.message = event.target.value;
+        draft.touched = true;
       }
     );
 
@@ -1862,15 +1817,24 @@
 
         const plan = $('action-plan');
         if (plan && data.plan?.options?.length) {
-          const html = actionPlanHtml(data.plan);
+          const previousAction = draft.action;
+          const html = actionPlanHtml(data.plan, draft);
           if (plan.innerHTML !== html) plan.innerHTML = html;
+          if (draft.action !== previousAction) {
+            const commandInput = $('command-text');
+            if (commandInput) commandInput.value = draft.message;
+          }
           bindActionPlanOptions(plan, draft);
+        } else if (plan) {
+          plan.innerHTML = '<p class="action-unavailable">Не удалось сравнить пользу действий. Обновите данные рейса.</p>';
         }
       })
       .catch(() => {
         if (renderVersion !== detailRenderVersion || selectedId !== vehicle.tr_id) return;
         const list = $('command-history');
         if (list) list.innerHTML = '<li>Журнал временно недоступен.</li>';
+        const plan = $('action-plan');
+        if (plan) plan.innerHTML = '<p class="action-unavailable">Не удалось сравнить пользу действий. Обновите данные рейса.</p>';
       });
   }
 
@@ -1996,7 +1960,7 @@
             tr_id: vehicle.tr_id,
             kind: 'blocked',
             message: commandMessage,
-            detail: 'Это терминальный результат guardrail: он остаётся в журнале, но не попадает в очередь открытых действий.',
+            detail: 'Указание сохранено в журнале и не отправлено водителю.',
             simulatable: false,
           };
       invalidateDetailSupplement(vehicle.tr_id);
