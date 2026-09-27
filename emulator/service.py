@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import random
 import struct
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -46,6 +47,8 @@ CUSTOM_UNIT_ID_OFFSET = int(
 )
 
 runtime = {
+    "chaos_enabled": os.getenv('EMULATOR_CHAOS','1')=='1',
+    "chaos_seed": int(os.getenv('EMULATOR_CHAOS_SEED','42')),
     "paused": (
         os.getenv(
             "EMULATOR_START_PAUSED",
@@ -361,6 +364,8 @@ def haversine_m(
 
 def initial_vehicle_state(
     vehicle: dict,
+    *, chaos_enabled: bool | None = None,
+    seed: int | None = None,
 ) -> dict:
     lon, lat = (
         vehicle["path"][0]
@@ -379,7 +384,7 @@ def initial_vehicle_state(
         pace_factor = 1.0
         initial_speed = float(22 + vehicle["tr_id"] % 13)
 
-    return {
+    state = {
         "segment_index": 0,
         "segment_progress_m": 0.0,
         "lon": lon,
@@ -388,6 +393,41 @@ def initial_vehicle_state(
         "elapsed_route_s": 0.0,
         "pace_factor": pace_factor,
     }
+    state['chaos_enabled'] = runtime['chaos_enabled'] if chaos_enabled is None else chaos_enabled
+    rng=random.Random((runtime['chaos_seed'] if seed is None else seed)+int(vehicle.get('base_tr_id',vehicle['tr_id'])))
+    state.update(chaos_rng=rng,chaos_phase='normal',chaos_pace=pace_factor,
+                 chaos_remaining_s=rng.uniform(20,55))
+    return state
+
+
+def chaotic_motion(state: dict, elapsed_s: float) -> tuple[float,float]:
+    """Integrate planned-clock progress through independent incident phases.
+
+    Returns clock seconds travelled and end-of-step pace. Randomness is local
+    and seeded; packets stay valid/on route, no forecast/risk is manipulated.
+    """
+    if not state.get('chaos_enabled'):
+        pace=state.get('pace_factor',1.0)
+        return max(0.0,elapsed_s)*pace,pace
+    remaining=max(0.0,elapsed_s);progress=0.0;rng=state['chaos_rng']
+    while remaining>0:
+        dt=min(remaining,state['chaos_remaining_s'])
+        progress+=dt*state['chaos_pace']
+        remaining-=dt;state['chaos_remaining_s']-=dt
+        if state['chaos_remaining_s']<=1e-9:
+            phase=state['chaos_phase']
+            if phase=='normal':
+                stop=rng.random()<.5
+                state.update(chaos_phase='stop' if stop else 'slow',
+                             chaos_pace=0.0 if stop else rng.uniform(.15,.55),
+                             chaos_remaining_s=rng.uniform(75,210))
+            elif phase in {'slow','stop'}:
+                state.update(chaos_phase='recovery',chaos_pace=rng.uniform(1.2,1.75),
+                             chaos_remaining_s=rng.uniform(90,210))
+            else:
+                state.update(chaos_phase='normal',chaos_pace=rng.uniform(.85,1.1),
+                             chaos_remaining_s=rng.uniform(30,100))
+    return progress,state['chaos_pace']
 
 
 def debug_route_clock(vehicle: dict, elapsed: float, elapsed_s: float, speed_kmh: float) -> float:
@@ -442,8 +482,10 @@ def advance_vehicle(
         debug_speed = debug_speed_overrides.get(vehicle["tr_id"])
         if debug_speed is not None:
             state['elapsed_route_s'] = debug_route_clock(vehicle,state['elapsed_route_s'],elapsed_s,debug_speed)
+            motion_pace=state.get('pace_factor',1.0)
         else:
-            state["elapsed_route_s"] += elapsed_s * state.get("pace_factor", 1.0)
+            progress,motion_pace=chaotic_motion(state,elapsed_s)
+            state["elapsed_route_s"] += progress
         if state["elapsed_route_s"] > route_duration:
             state["elapsed_route_s"] %= route_duration
         elapsed = state["elapsed_route_s"]
@@ -465,12 +507,14 @@ def advance_vehicle(
         target_speed = (
             debug_speed
             if debug_speed is not None
-            else min(130.0, max(1.0, planned_speed * state.get("pace_factor", 1.0)))
+            else min(130.0, max(0.0, planned_speed * motion_pace))
         )
         # A debug value takes effect on the very next Nav00 packet.  In the
         # normal path retain a natural-looking gradual speed adjustment.
         if debug_speed is not None:
             state["speed_kmh"] = target_speed
+        elif motion_pace==0:
+            state['speed_kmh']=0.0
         else:
             state["speed_kmh"] += max(-1.5, min(1.5, target_speed - state["speed_kmh"]))
         return state["lon"], state["lat"], round(state["speed_kmh"])
@@ -785,6 +829,8 @@ async def publish_forever() -> None:
                 ] = (
                     sent_at.isoformat()
                 )
+                runtime['motion_phases']={phase:sum(s.get('chaos_phase')==phase for s in states.values())
+                                          for phase in ('normal','slow','stop','recovery')}
 
                 await asyncio.sleep(
                     interval_s
@@ -864,29 +910,25 @@ async def health():
 
 @app.get("/status")
 async def status():
-    return dict(
-        runtime
-    )
+    # Like the official source, status describes whether generation is enabled.
+    # The independent `connected` field exposes the NDTP connection state,
+    # including the brief reconnect window immediately after resume.
+    return {**runtime, "status": "paused" if runtime["paused"] else "running",
+            "debug_speed_overrides": {str(tr):speed for tr,speed in debug_speed_overrides.items()}}
 
 
 @app.post("/pause")
 async def pause():
     runtime["paused"] = True
 
-    return {
-        "status": "paused",
-        **runtime,
-    }
+    return await status()
 
 
 @app.post("/resume")
 async def resume():
     runtime["paused"] = False
 
-    return {
-        "status": "running",
-        **runtime,
-    }
+    return await status()
 
 
 @app.post("/debug/vehicles/{tr_id}/speed")

@@ -6,7 +6,7 @@
   <title>ТАКТ · Рабочее место диспетчера</title>
   <script>try { if (localStorage.getItem('takt-dispatcher-theme') === 'dark') document.documentElement.classList.add('theme-dark'); } catch (_) {}</script>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=dispatcher-theme-15">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=ticket-session-17">
 </head>
 <body>
   <header class="topbar">
@@ -86,11 +86,19 @@
 
   <dialog id="profile-dialog" aria-labelledby="profile-dialog-title"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ВХОД В ТАКТ</p><h2 id="profile-dialog-title">Выберите рабочее место</h2><p>Диспетчер открывает рабочую картину, администратор — управление источниками и назначениями.</p></div><button value="cancel" class="close" type="button" id="profile-close" aria-label="Закрыть">×</button></div><label class="profile-select">Профиль<select id="profile-select"></select></label><div class="dialog-actions"><button class="secondary" id="profile-cancel" type="button">Отмена</button><button class="primary" id="profile-save" type="submit">Продолжить</button></div><p class="dialog-note">Это локальный вход прототипа без пароля и SSO.</p></form></dialog>
 
-  <dialog id="source-dialog"><form method="dialog"><div class="dialog-head"><div><p class="eyebrow">ИСТОЧНИКИ ДАННЫХ</p><h2>Потоки телеметрии</h2><p>Пауза останавливает новые события. Управлять потоком может любой вошедший диспетчер.</p></div><button value="cancel" class="close" type="button" id="source-close" aria-label="Закрыть">×</button></div><div id="source-status" class="source-status"></div><div class="dialog-actions"><button class="secondary" type="button" id="source-pause-all">Пауза всех</button><button class="primary" type="button" id="source-resume-all">Возобновить все</button></div><p class="dialog-note">custom-emulator — собственная NDTP Nav00-эмуляция; оригинальный NDTP восстанавливает последний сохранённый конфиг.</p></form></dialog>
+  <dialog id="source-dialog" aria-labelledby="source-dialog-title">
+    <form method="dialog">
+      <button class="close" type="button" id="source-close" aria-label="Закрыть">×</button>
+      <div class="dialog-head"><div><p class="eyebrow">ИСТОЧНИКИ ДАННЫХ</p><h2 id="source-dialog-title">Потоки телеметрии</h2><p>Пауза останавливает новые события. Управлять потоком может любой вошедший диспетчер.</p></div></div>
+      <div id="source-status" class="source-status"></div>
+      <div class="dialog-actions"><button class="secondary" type="button" id="source-pause-all">Пауза всех</button><button class="primary" type="button" id="source-resume-all">Возобновить все</button></div>
+      <p class="dialog-note">custom-emulator — собственная NDTP Nav00-эмуляция; оригинальный NDTP восстанавливает последний сохранённый конфиг.</p>
+    </form>
+  </dialog>
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
   <script src="/static/map.js?v=action-results-12"></script>
-  <script src="/static/dispatcher.js?v=dispatcher-theme-15"></script>
+  <script src="/static/dispatcher.js?v=ticket-session-17"></script>
 </body>
 </html>

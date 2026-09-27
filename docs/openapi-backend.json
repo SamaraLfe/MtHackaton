@@ -632,7 +632,7 @@
           "Риски и what-if"
         ],
         "summary": "Рассчитать размещение резервного ТС",
-        "description": "Без изменения live-состояния выбирает текущую плановую позицию выбранного ТС, строит виртуальный путь резерва до следующей контрольной точки и возвращает влияние на исходное ТС и резерв. Вероятность и секунды — operational what-if эвристика, а не новый ML-прогноз.",
+        "description": "При задержке от 180 секунд резерв мгновенно появляется на остановке около середины оставшегося пути. Возвращает компенсацию по остановкам, сценарную вероятность пользы и решение по порогам policy. Прогноз основного ТС и показатели остальных маршрутов неизменны. Это эвристика, не новый ML-прогноз.",
         "operationId": "what_if_api_what_if_post",
         "requestBody": {
           "content": {
@@ -751,8 +751,8 @@
         "tags": [
           "Указания водителю"
         ],
-        "summary": "Прочитать локальную очередь",
-        "description": "Необязательный `tr_id` фильтрует максимум 200 сохранённых в SQLite записей от новых к старым. В ответе `external_delivery: false`: канал связи с водителем не подключён, но запись не теряется при перезапуске backend. `simulated_completed` означает, что для демонстрации получен отдельный локальный ответ симулятора.",
+        "summary": "Прочитать журнал команд",
+        "description": "Необязательный `tr_id` фильтрует максимум 200 сохранённых в SQLite записей от новых к старым. `queued_for_integration` — ожидает приёма, `executing` — водитель подтвердил, `completed` — свежая live-телеметрия подтвердила выход из зоны риска. Командный audit-журнал сохраняется отдельно от удаляемых тикетов. Демо не означает внешнюю доставку.",
         "operationId": "get_driver_commands_api_driver_commands_get",
         "parameters": [
           {
@@ -886,8 +886,8 @@
         "tags": [
           "Указания водителю"
         ],
-        "summary": "Смоделировать реакцию водителя",
-        "description": "Запускает локальный детерминированный симулятор подтверждения указания. Он возвращает текст ответа, статус применения, прогнозный эффект и следующий момент проверки, но не меняет live-телеметрию, ML-прогноз или внешний парк.",
+        "summary": "Смоделировать приём и ускорение custom-ТС",
+        "description": "Идемпотентно подтверждает приём активного указания и переводит его в `executing`. Только для выбранного custom-ТС повышает скорость через существующий debug-оверлей: min(130, max(30, speed×1.5, speed+15)) км/ч с учётом ручного оверлея. Повторное подтверждение не ускоряет ещё раз. Для оригинального потока подтверждает только приём. Прогноз напрямую не меняется: успех определяется последующей свежей live-телеметрией. При недоступном/paused custom-потоке не подтверждает команду.",
         "operationId": "simulate_driver_command_api_driver_commands__command_id__simulate_post",
         "parameters": [
           {
@@ -913,10 +913,53 @@
             "description": "Указание не найдено."
           },
           "409": {
-            "description": "Указание заблокировано guardrail, просрочено внешним каналом или уже недоступно для локальной симуляции."
+            "description": "Указание заблокировано, заменено, локальная симуляция недоступна или custom-поток приостановлен."
           },
           "422": {
-            "description": "ТС больше недоступно для расчёта реакции."
+            "description": "ТС больше недоступно."
+          },
+          "503": {
+            "description": "Debug-оверлей custom-эмулятора недоступен; команда не подтверждена."
+          }
+        }
+      }
+    },
+    "/api/driver-commands/{command_id}/acknowledge": {
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Подтвердить принятие команды водителем",
+        "description": "Внутренний callback приёма: идемпотентно переводит активное указание в `executing` без изменения прогноза. Не подтверждает успех и не воскрешает удалённые тикеты. В production необходимо подключить настоящий канал водителя и защитить callback аутентификацией.",
+        "operationId": "driver_command_acknowledgement_api_driver_commands__command_id__acknowledge_post",
+        "parameters": [
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Указание не найдено."
+          },
+          "409": {
+            "description": "Указание заблокировано, заменено или недоступно для подтверждения."
+          },
+          "422": {
+            "description": "ТС больше недоступно."
           }
         }
       }
@@ -1056,7 +1099,7 @@
           "Указания водителю"
         ],
         "summary": "Получить персональный центр действий",
-        "description": "Возвращает только действия, созданные указанным `dispatcher_id`. Для пары диспетчер+ТС хранится одна стабильная карточка: новая попытка обновляет её и увеличивает `revision`. Статусы: `pending`, `completed_success` (зелёный, виден 3 секунды), `completed_no_result` (жёлтый), `not_delivered` (серый), `worsened` (красный) и `improved_independently`. Негативный результат сохраняется до новой попытки или более свежего улучшившегося прогноза.",
+        "description": "Возвращает только действия указанного `dispatcher_id`, один текущий тикет на ТС. Тикеты хранятся только в памяти и исчезают при перезапуске backend; F5 и другие вкладки разделяют текущую сессию диспетчера. Цикл: серый `pending` → синий `executing` → зелёный `completed_success` (Закрыт). Свежий live-прогноз после приёма должен подтвердить выход из ранее наблюдавшейся зоны риска: `level=low`, вероятность <35%. Тикет остаётся зелёным 15 секунд от времени этого прогноза, затем полностью удаляется. Новый риск и опрос не продлевают срок. Отдельный audit-журнал сохраняет `completed` и доказательство закрытия. Архив, устаревшие данные и демо-приём не закрывают тикет. Для успешного выпуска резерва также действует 15-секундное отображение.",
         "operationId": "get_action_center_api_action_center_get",
         "parameters": [
           {
@@ -1237,6 +1280,115 @@
           },
           "404": {
             "description": "Неизвестный источник или действие."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/custom-emulator/speed": {
+      "post": {
+        "tags": [
+          "Отладка"
+        ],
+        "summary": "Временно задать скорость ТС",
+        "description": "Только для копии ТС из `custom-emulator`. Значение меняет темп генерации следующей телеметрии вдоль той же плановой траектории; расписание, ML-модель и диспетчерские правила не меняются. Оверлей хранится только в памяти эмулятора и сбрасывается отдельным DELETE или его перезапуском.",
+        "operationId": "set_debug_speed_api_debug_custom_emulator_speed_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DebugSpeedOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Нужен существующий профиль."
+          },
+          "409": {
+            "description": "Исходное ТС официального эмулятора не поддерживает debug-оверлей."
+          },
+          "503": {
+            "description": "Собственный эмулятор недоступен."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/custom-emulator/speed/{tr_id}": {
+      "delete": {
+        "tags": [
+          "Отладка"
+        ],
+        "summary": "Временно задать скорость ТС",
+        "description": "Только для копии ТС из `custom-emulator`. Значение меняет темп генерации следующей телеметрии вдоль той же плановой траектории; расписание, ML-модель и диспетчерские правила не меняются. Оверлей хранится только в памяти эмулятора и сбрасывается отдельным DELETE или его перезапуском.",
+        "operationId": "clear_debug_speed_api_debug_custom_emulator_speed__tr_id__delete",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Tr Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmulatorControl"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Нужен существующий профиль."
+          },
+          "409": {
+            "description": "Исходное ТС официального эмулятора не поддерживает debug-оверлей."
+          },
+          "503": {
+            "description": "Собственный эмулятор недоступен."
           },
           "422": {
             "description": "Validation Error",
@@ -1597,6 +1749,40 @@
         "title": "AssignmentUpdate",
         "description": "Complete replacement for one profile's assigned vehicles."
       },
+      "DebugSpeedOverride": {
+        "properties": {
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^(admin|dispatcher)-[a-z0-9-]{2,40}$",
+            "title": "Dispatcher Id",
+            "description": "Существующий рабочий профиль, управляющий источниками эмуляции.",
+            "examples": [
+              "dispatcher-01"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "ТС собственного эмулятора."
+          },
+          "speed_kmh": {
+            "type": "number",
+            "maximum": 130.0,
+            "minimum": 0.0,
+            "title": "Speed Kmh",
+            "description": "Искусственная скорость, км/ч."
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id",
+          "tr_id",
+          "speed_kmh"
+        ],
+        "title": "DebugSpeedOverride",
+        "description": "Ephemeral debug-only speed overlay for a custom-emulator vehicle."
+      },
       "DispatcherCreate": {
         "properties": {
           "name": {
@@ -1848,6 +2034,9 @@
       },
       "ReserveDispatch": {
         "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ReservePolicy"
+          },
           "dispatcher_id": {
             "type": "string",
             "pattern": "^(admin|dispatcher)-[a-z0-9-]{2,40}$",
@@ -1874,6 +2063,45 @@
         ],
         "title": "ReserveDispatch",
         "description": "Request to register a reserve release after data-driven validation."
+      },
+      "ReservePolicy": {
+        "properties": {
+          "min_delay_s": {
+            "type": "number",
+            "minimum": 180.0,
+            "title": "Min Delay S",
+            "default": 180
+          },
+          "min_benefit_probability": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Benefit Probability",
+            "default": 0.35
+          },
+          "min_compensated_stops": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Min Compensated Stops",
+            "default": 1
+          },
+          "min_expected_compensation_s": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Min Expected Compensation S",
+            "default": 60
+          },
+          "min_confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Confidence",
+            "default": 0.25
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReservePolicy"
       },
       "SimulationCancel": {
         "properties": {
@@ -2056,6 +2284,9 @@
       },
       "WhatIf": {
         "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ReservePolicy"
+          },
           "tr_id": {
             "anyOf": [
               {

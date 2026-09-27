@@ -10,3 +10,4 @@ ml/artifacts/
 state/
 tmp/
 .idea/
+dist/

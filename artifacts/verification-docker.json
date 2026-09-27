@@ -1,0 +1,15 @@
+{
+  "readiness_ready": true,
+  "observability_available": true,
+  "observability_samples": 8,
+  "execution_target": "docker",
+  "replay_points": 151,
+  "submission_rows": 151,
+  "submission_schema_valid": true,
+  "replay_horizon_all_valid": true,
+  "replay_request_p50_ms": 16.281834003166296,
+  "replay_request_p95_ms": 20.23243750591064,
+  "replay_request_max_ms": 148.97641699644737,
+  "ndtp_fragmented_frame": true,
+  "ndtp_bad_crc_rejected": true
+}

@@ -165,6 +165,9 @@ def init_store():
     global db, seed_dispatcher_02_all_routes
     DB_PATH.parent.mkdir(parents=True,exist_ok=True)
     db=sqlite3.connect(DB_PATH,check_same_thread=False);db.row_factory=sqlite3.Row
+    db.execute('PRAGMA temp_store=MEMORY')
+    legacy_tickets=db.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='dispatcher_action_cases'").fetchone()
+    removed_tickets=db.execute('SELECT COUNT(*) FROM main.dispatcher_action_cases').fetchone()[0] if legacy_tickets else 0
     db.executescript('''
         CREATE TABLE IF NOT EXISTS dispatchers (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, login TEXT NOT NULL UNIQUE,
@@ -178,12 +181,14 @@ def init_store():
           id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reserve_actions (
           id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS dispatcher_action_cases (
+        DROP TABLE IF EXISTS main.dispatcher_action_cases;
+        CREATE TEMP TABLE dispatcher_action_cases (
           id TEXT PRIMARY KEY, dispatcher_id TEXT NOT NULL, tr_id INTEGER NOT NULL,
           payload TEXT NOT NULL, updated_at TEXT NOT NULL,
           UNIQUE(dispatcher_id,tr_id));
         CREATE TABLE IF NOT EXISTS app_meta (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE INDEX temp.action_cases_vehicle ON dispatcher_action_cases(tr_id);
     ''')
     seeds=[('admin-01','Администратор','admin','Администратор'),('dispatcher-01','Диспетчер №01','dispatcher01','Маршрутный диспетчер'),('dispatcher-02','Диспетчер №2 (все ТС)','dispatcher02','Старший диспетчер')]
     for account in seeds:
@@ -196,6 +201,9 @@ def init_store():
         'SELECT 1 FROM app_meta WHERE key=?',('dispatcher_02_all_routes_v1',)
     ).fetchone() is None
     db.commit()
+
+    if removed_tickets:
+        logger.info('Removed %s legacy persisted tickets; tickets now live only in memory, command audit preserved',removed_tickets)
 
 def get_dispatcher(dispatcher_id):
     row=db.execute('SELECT * FROM dispatchers WHERE id=?',(dispatcher_id,)).fetchone()
@@ -327,15 +335,16 @@ def expire_stale_reserve_actions(now=None,ttl_s=900):
     return expired
 
 ACTION_CASE_STATUSES={
-    'pending':('Ожидает выполнения','pending'),
-    'completed_success':('Выполнено успешно','success'),
+    'pending':('Отправляем водителю','pending'),
+    'executing':('Исполняется','executing'),
+    'completed_success':('Закрыт','success'),
     'completed_no_result':('Выполнено без результата','no_result'),
     'not_delivered':('Не дошло до водителя','not_delivered'),
     'worsened':('Ситуация ухудшилась','worsened'),
     'improved_independently':('Ситуация улучшилась','success'),
 }
 ACTION_RESULT_THRESHOLD_S=15.0
-ACTION_SUCCESS_VISIBLE_S=3
+ACTION_SUCCESS_VISIBLE_S=15
 
 def _moscow_time(value=None):
     stamp=pd.Timestamp.now(tz='Europe/Moscow') if value is None else (
@@ -360,7 +369,7 @@ def stored_action_cases(dispatcher_id,limit=200):
     ).fetchall()
     return [json.loads(row['payload']) for row in rows]
 
-def save_action_case(case):
+def create_action_case(case):
     """Upsert one stable dispatcher+vehicle case without changing its identity."""
     payload=json.dumps(clean(case),ensure_ascii=False)
     db.execute('''
@@ -370,6 +379,72 @@ def save_action_case(case):
           payload=excluded.payload, updated_at=excluded.updated_at
     ''',(case['id'],case['dispatcher_id'],int(case['tr_id']),payload,case['updated_at']))
     db.commit()
+
+def save_action_case(case):
+    """Update only the same existing attempt; a deleted ticket cannot revive."""
+    cursor=db.execute('''UPDATE dispatcher_action_cases SET payload=?,updated_at=?
+        WHERE dispatcher_id=? AND tr_id=? AND json_extract(payload,'$.attempt_id') IS ?
+        AND json_extract(payload,'$.closed_at') IS NULL''',
+        (json.dumps(clean(case),ensure_ascii=False),case['updated_at'],case['dispatcher_id'],
+         int(case['tr_id']),case.get('attempt_id')))
+    db.commit()
+    return cursor.rowcount>0
+
+def delete_action_case(case):
+    """Delete exactly this ticket attempt, never a newer command for the same TS."""
+    cursor=db.execute('''DELETE FROM dispatcher_action_cases WHERE dispatcher_id=?
+        AND tr_id=? AND json_extract(payload,'$.attempt_id') IS ?''',
+        (case['dispatcher_id'],int(case['tr_id']),case.get('attempt_id')))
+    db.commit()
+    return cursor.rowcount>0
+
+def close_driver_case(case,observed,vehicle):
+    """Atomically close the command and retain a green ticket for exactly 15s."""
+    with db:
+        current=stored_action_case(case['dispatcher_id'],case['tr_id'])
+        if not current or current.get('attempt_id')!=case.get('attempt_id') or current.get('closed_at'):
+            return False
+        case.update(status='completed_success',status_label='Закрыт',tone='success',
+                    closed_at=observed.isoformat(),updated_at=observed.isoformat(),
+                    visible_until=(observed+pd.Timedelta(seconds=ACTION_SUCCESS_VISIBLE_S)).isoformat(),
+                    last_observation_at=observed.isoformat(),latest_prediction_s=vehicle.get('prediction_s'),
+                    outcome_source='vehicle_telemetry',result_detail='ТС вышло из зоны риска. Тикет закрыт; будет удалён через 15 секунд.')
+        closed=db.execute('''UPDATE dispatcher_action_cases SET payload=?,updated_at=? WHERE dispatcher_id=?
+            AND tr_id=? AND json_extract(payload,'$.attempt_id') IS ? AND json_extract(payload,'$.closed_at') IS NULL''',
+            (json.dumps(clean(case),ensure_ascii=False),case['updated_at'],case['dispatcher_id'],int(case['tr_id']),case.get('attempt_id')))
+        if not closed.rowcount:return False
+        command=stored_driver_command(case['attempt_id'])
+        if command:
+            command.update(status='completed',simulation_available=False,resolved_at=observed.isoformat(),
+                           terminal_reason='Свежий прогноз подтвердил выход ТС из зоны риска.',
+                           completion_evidence={'T':vehicle['T'],'level':vehicle['level'],
+                                                'late_probability':vehicle['late_probability']})
+            db.execute('UPDATE driver_commands SET payload=? WHERE id=?',
+                       (json.dumps(clean(command),ensure_ascii=False),command['id']))
+    return True
+
+def retain_closed_case(case,now):
+    """A terminal ticket cannot regress or restart its expiry on later packets."""
+    if not case.get('visible_until') or _moscow_time(case['visible_until'])<=now:
+        delete_action_case(case)
+        return None
+    return case
+
+def purge_expired_action_cases(now=None):
+    if db is None:return 0
+    now=_moscow_time(now);removed=0
+    rows=db.execute("SELECT payload FROM dispatcher_action_cases WHERE json_extract(payload,'$.tone')='success'").fetchall()
+    for row in rows:
+        case=json.loads(row['payload'])
+        if not case.get('visible_until') or _moscow_time(case['visible_until'])<=now:
+            removed+=int(delete_action_case(case))
+    return removed
+
+async def maintain_action_cases():
+    """One lifecycle-owned sweeper, also when the browser/telemetry is paused."""
+    while True:
+        purge_expired_action_cases()
+        await asyncio.sleep(.25)
 
 def register_action_case(record,kind,now=None):
     """Start or replace the current attempt in the same dispatcher+vehicle case."""
@@ -386,6 +461,8 @@ def register_action_case(record,kind,now=None):
         vehicle=action_vehicle(record['tr_id'])
         baseline=vehicle.get('prediction_s') if vehicle else None
     status_label,tone=ACTION_CASE_STATUSES['pending']
+    if kind=='reserve_release':status_label='Отправляем флоту'
+    probability=(decision.get('evidence') or {}).get('late_probability')
     case={
         'id':previous['id'] if previous else f"case-{dispatcher_id}-{int(record['tr_id'])}",
         'dispatcher_id':dispatcher_id,'dispatcher':record.get('dispatcher') or {'id':dispatcher_id},
@@ -393,14 +470,15 @@ def register_action_case(record,kind,now=None):
         'attempt_id':record['id'],'kind':kind,'action':record.get('action'),
         'action_title':record.get('action_title') or ('Выпуск резервного ТС' if kind=='reserve_release' else 'Оперативное действие'),
         'status':'pending','status_label':status_label,'tone':tone,
-        'result_detail':'Действие зарегистрировано. Ожидаем подтверждение исполнения и новый результат по ТС.',
+        'result_detail':'Указание отправляется. Ожидаем подтверждение приёма водителем.' if kind=='driver_command' else 'Заявка отправляется флоту. Ожидаем подтверждение выпуска.',
         'created_at':(previous or {}).get('created_at') or now.isoformat(),
         'action_started_at':now.isoformat(),'updated_at':now.isoformat(),'visible_until':None,
         'delivery_confirmed':False,'outcome_source':'outbox',
         'baseline_prediction_s':baseline,'latest_prediction_s':baseline,
         'last_observation_at':now.isoformat(),
+        'risk_observed':probability is not None and float(probability)>=.35,
     }
-    save_action_case(case)
+    create_action_case(case)
     return case
 
 def classify_action_outcome(before,after,delivered=True):
@@ -424,10 +502,11 @@ def apply_action_case_outcome(case,status,detail,now=None,after=None,source='tel
         latest_prediction_s=after if after is not None else case.get('latest_prediction_s'),
     )
     if tone=='success':
-        # Start the three-second acknowledgement only on a real transition;
+        # Start the fifteen-second acknowledgement only on a real transition;
         # repeated polling must not keep a green card alive indefinitely.
         if changed or not case.get('visible_until'):
             case['visible_until']=(now+pd.to_timedelta(ACTION_SUCCESS_VISIBLE_S,unit='s')).isoformat()
+        case['closed_at']=case.get('closed_at') or now.isoformat()
     else:
         case['visible_until']=None
     save_action_case(case)
@@ -445,6 +524,16 @@ def update_action_case_from_delivery(record,kind,now=None):
     if record.get('status')=='integration_timeout':
         target='Не получено подтверждение внешнего канала. Действие не считается доставленным или выполненным.'
         return apply_action_case_outcome(case,'not_delivered',target,now,source='integration_timeout')
+    if kind=='driver_command' and record.get('status')=='executing':
+        if case.get('delivery_confirmed') and case.get('status')=='executing':return case
+        vehicle=action_vehicle(case['tr_id']) or {}
+        case.update(delivery_confirmed=True,acknowledged_at=record['acknowledged_at'],
+                    execution_started_at=record['acknowledged_at'],
+                    last_observation_at=record['acknowledged_at'],
+                    risk_observed=bool(case.get('risk_observed')) or vehicle.get('level') in {'medium','high'})
+        return apply_action_case_outcome(case,'executing',
+            'Водитель принял указание. Ждём выхода ТС из зоны риска по новой телеметрии.',
+            record['acknowledged_at'],source=record.get('delivery_mode','driver_acknowledgement'))
     if record.get('status')!='simulated_completed':
         return case
     response=record.get('simulated_response') or {}
@@ -468,11 +557,14 @@ def update_action_case_from_delivery(record,kind,now=None):
 
 def reconcile_action_case(case,now=None):
     """Let a newer vehicle forecast improve or worsen a persistent result."""
+    now=_moscow_time(now)
+    if case.get('tone')=='success':return retain_closed_case(case,now)
     if case.get('reserve_compensation') is not None:
         # A primary vehicle's later forecast cannot measure reserve service.
         return case
-    now=_moscow_time(now)
     vehicle=action_vehicle(case['tr_id'])
+    if case.get('kind')=='driver_command':
+        return reconcile_driver_case(case,vehicle,now)
     if not vehicle or vehicle.get('prediction_s') is None or vehicle.get('stale') or vehicle.get('degraded'):
         return case
     observed_at=vehicle.get('T') or vehicle.get('position_time')
@@ -505,6 +597,61 @@ def reconcile_action_case(case,now=None):
     }
     return apply_action_case_outcome(case,status,details[status],observed,after,source='vehicle_telemetry')
 
+def reconcile_driver_case(case,vehicle,now):
+    """Receipt starts execution; only a newer, fresh live green state closes it."""
+    if case.get('tone')=='success':return retain_closed_case(case,now)
+    if case.get('delivery_confirmed') and case.get('status') in {'completed_no_result','worsened'}:
+        # Compatibility with already accepted tickets from the old simulator.
+        command=stored_driver_command(case['attempt_id'])
+        probability=((command or {}).get('decision',{}).get('evidence') or {}).get('late_probability')
+        accepted_at=((command or {}).get('simulated_response') or {}).get('simulated_at') or case.get('updated_at')
+        case.update(status='executing',status_label='Исполняется',tone='executing',visible_until=None,
+                    acknowledged_at=case.get('acknowledged_at') or accepted_at,
+                    risk_observed=bool(case.get('risk_observed')) or (probability is not None and float(probability)>=.35),
+                    result_detail='Водитель принял указание. Ждём выхода ТС из зоны риска по новой телеметрии.')
+        if command and command.get('status')=='simulated_completed':
+            command.update(status='executing',acknowledged_at=accepted_at,execution_started_at=accepted_at,simulation_available=False)
+            update_driver_command(command)
+        save_action_case(case)
+    if case.get('status')=='pending' and not case.get('delivery_confirmed'):
+        case.update(status_label='Отправляем водителю',
+                    result_detail='Указание отправляется. Ожидаем подтверждение приёма водителем.')
+    if not vehicle or vehicle.get('stale') or vehicle.get('degraded'):
+        return case
+    if (vehicle.get('source')!='live' or vehicle.get('connection_state')!='live'
+        or vehicle.get('trip_status')!='active' or vehicle.get('on_route') is False):
+        return case
+    probability=vehicle.get('late_probability')
+    prediction=vehicle.get('prediction_s')
+    if (not vehicle.get('T') or probability is None or not np.isfinite(float(probability))
+        or prediction is None or not np.isfinite(float(prediction))):
+        return case
+    if vehicle.get('current_deviation_s') is None:return case
+    observed=_moscow_time(vehicle['T'])
+    if observed>now or (now-observed).total_seconds()>LIVE_STALE_S:
+        return case
+    previous=_moscow_time(case.get('last_observation_at') or case['action_started_at'])
+    if observed<=previous:return case
+    risky=vehicle.get('level') in {'medium','high'} and float(probability)>=.35
+    case['risk_observed']=bool(case.get('risk_observed')) or risky
+    case.update(last_observation_at=observed.isoformat(),latest_prediction_s=vehicle.get('prediction_s'))
+    if (case.get('status')=='executing' and case.get('delivery_confirmed')
+        and case.get('risk_observed') and vehicle.get('level')=='low' and 0<=float(probability)<.35):
+        close_driver_case(case,observed,vehicle)
+        return case
+    save_action_case(case)
+    return case
+
+def reconcile_driver_tickets(tr_id):
+    """Resolve tickets when a new forecast arrives, even with no browser open."""
+    if db is None:return
+    rows=db.execute('SELECT payload FROM dispatcher_action_cases WHERE tr_id=?',(int(tr_id),)).fetchall()
+    if not rows:return
+    vehicle=action_vehicle(tr_id);now=_moscow_time()
+    for row in rows:
+        case=json.loads(row['payload'])
+        if case.get('kind')=='driver_command':reconcile_driver_case(case,vehicle,now)
+
 def action_center_items(dispatcher_id,now=None):
     """Return only the current dispatcher's stable per-vehicle action cases."""
     now=pd.Timestamp.now(tz='Europe/Moscow') if now is None else pd.Timestamp(now)
@@ -516,14 +663,16 @@ def action_center_items(dispatcher_id,now=None):
     items=[]
     for original in stored_action_cases(dispatcher_id):
         case=reconcile_action_case(dict(original),now)
+        if case is None:continue
         if case.get('tone')=='success' and case.get('visible_until'):
             try:
                 if _moscow_time(case['visible_until'])<=now:
+                    delete_action_case(case)
                     continue
             except (TypeError,ValueError):
                 continue
         items.append(clean(case))
-    tone_rank={'worsened':0,'no_result':1,'not_delivered':2,'pending':3,'success':4}
+    tone_rank={'worsened':0,'no_result':1,'not_delivered':2,'pending':3,'executing':4,'success':5}
     items.sort(key=lambda item:(tone_rank.get(item.get('tone'),9),item.get('updated_at','')))
     return items
 
@@ -1277,6 +1426,7 @@ async def ingest(event):
         result.update(current_deviation_s=None,deviation_estimated=False,
                       reason=f"{result['reason']}; текущее отклонение не удалось оценить по положению")
         vehicles[tr]=clean(result)
+    reconcile_driver_tickets(tr)
 
 async def on_ndtp(event):
     unit = event.pop('unit_id')
@@ -1327,7 +1477,8 @@ async def on_ndtp(event):
 
 @asynccontextmanager
 async def lifespan(app):
-    global schedule,schedule_template,traffic,points,mapping,client,model_meta,last_telemetry_received_at,ml_retry_after
+    global schedule,schedule_template,traffic,points,mapping,client,model_meta,last_telemetry_received_at,ml_retry_after,db,lock
+    lock=asyncio.Lock()
     ml_retry_after=0.0
     init_store()
     schedule = load_schedule(
@@ -1438,15 +1589,15 @@ async def lifespan(app):
         state.update(mode='live',index=0,clock=None,snapshot=False);vehicles.clear();last_telemetry_received_at=0.0
     server=await asyncio.start_server(lambda r,w:handle(r,w,on_ndtp,counters),'0.0.0.0',int(os.getenv('NDTP_PORT','9201')))
     official_warmup=asyncio.create_task(warm_official_source())
-    yield
-    official_warmup.cancel()
+    ticket_maintenance=asyncio.create_task(maintain_action_cases())
     try:
-        await official_warmup
-    except asyncio.CancelledError:
-        pass
-    server.close();await server.wait_closed();await client.aclose()
-    ml_retry_after=0.0
-    if db is not None:db.close()
+        yield
+    finally:
+        for task in (official_warmup,ticket_maintenance):task.cancel()
+        await asyncio.gather(official_warmup,ticket_maintenance,return_exceptions=True)
+        server.close();await server.wait_closed();await client.aclose()
+        ml_retry_after=0.0
+        if db is not None:db.close();db=None
 
 app=FastAPI(title='Такт — Backend API',version='1.1.0',lifespan=lifespan,
     description=DESCRIPTION,openapi_tags=TAGS,servers=SERVERS,
@@ -1827,29 +1978,23 @@ def simulate_driver_response(vehicle,command):
     action=command['action']
     decision=command.get('decision') or driver_decision(vehicle,action)
     prediction=float(vehicle['prediction_s']) if vehicle.get('prediction_s') is not None else None
-    probability=float(vehicle['late_probability']) if vehicle.get('late_probability') is not None else None
-    probability=None if probability is None else min(1.0,max(0.0,probability))
     before=prediction
     after=prediction
     result='acknowledged'
     response='Водитель получил указание и подтвердил текущую обстановку.'
     if action=='accelerate_safely':
-        recoverable=max(0.0,float((decision.get('expected_effect') or {}).get('recoverable_delay_s') or 0.0))
-        after=max(0.0,(prediction or 0.0)-recoverable)
-        result='applied'
+        result='acknowledged'
         response='Принял. Сокращаю отставание только в безопасном режиме, без нарушения ПДД.'
     elif action=='slow_down_safely':
-        correction=min(abs(min(0.0,prediction or 0.0)),30.0)
-        after=(prediction or 0.0)+correction
-        result='applied'
+        result='acknowledged'
         response='Принял. Выравниваю интервал без резкого торможения.'
     elif action=='maintain':
-        result='applied'
+        result='acknowledged'
         response='Принял. Продолжаю движение по графику и сообщу при изменении обстановки.'
     else:
         result='acknowledged'
         response='Принял. Текущее состояние подтверждаю, продолжаю наблюдение.'
-    expected_saved=None if before is None or after is None or probability is None else round(max(0.0,before-after)*probability,1)
+    expected_saved=0.0
     next_step={
         'action':'recheck_vehicle',
         'title':'Повторно проверить рейс',
@@ -1858,11 +2003,11 @@ def simulate_driver_response(vehicle,command):
         'reason':'Проверить новый прогноз и подтверждённую обстановку после реакции водителя.',
     }
     return clean({
-        'mode':'local_driver_simulator','simulated_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
+        'mode':'local_driver_simulator','simulated_at':_moscow_time().isoformat(),
         'acknowledged':True,'result':result,'response':response,
-        'projection':{'prediction_before_s':before,'prediction_after_s':round(after,1) if after is not None else None,'expected_saved_delay_s':expected_saved},
+        'projection':{'prediction_before_s':before,'prediction_after_s':after,'expected_saved_delay_s':expected_saved},
         'next_step':next_step,
-        'note':'Симуляция реакции для прототипа; live-телеметрия и прогноз в state не изменяются.',
+        'note':'Демо подтверждает только приём команды. Исполнение проверяется по новой live-телеметрии, прогноз не изменён.',
     })
 
 def simulate_reserve_response(action):
@@ -2186,9 +2331,10 @@ async def map_match(body:MapMatch):
 
 @app.get('/api/driver-commands',**operation('commands'))
 async def get_driver_commands(tr_id:int|None=None):
-    expire_stale_driver_commands()
-    items=stored_driver_commands(tr_id)
-    return {'items':items,'channel':'local_dispatch_outbox','external_delivery':False}
+    async with lock:
+        expire_stale_driver_commands()
+        items=stored_driver_commands(tr_id)
+        return {'items':items,'channel':'local_dispatch_outbox','external_delivery':False}
 
 @app.get('/api/action-plan',**operation('action_plan'))
 async def get_action_plan(tr_id:int,dispatcher_id:str|None=None):
@@ -2215,6 +2361,9 @@ async def get_action_plan(tr_id:int,dispatcher_id:str|None=None):
 
 @app.post('/api/driver-commands',status_code=201,**operation('queue_command'))
 async def queue_driver_command(body:DriverCommand):
+    async with lock:return register_driver_command(body)
+
+def register_driver_command(body):
     dispatcher=get_dispatcher(body.dispatcher_id)
     if dispatcher is None:raise HTTPException(422,'Unknown dispatcher profile')
     vehicle=action_vehicle(body.tr_id)
@@ -2225,7 +2374,7 @@ async def queue_driver_command(body:DriverCommand):
         'id':f"cmd-{uuid.uuid4().hex[:12]}",
         'tr_id':body.tr_id,'role':body.role,'dispatcher':dispatcher,'action':body.action,
         'action_title':DRIVER_ACTION_TITLES[body.action],'message':body.message,
-        'created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
+        'created_at':_moscow_time().isoformat(),
         'status':'queued_for_integration' if decision['allowed'] else 'blocked_by_guardrail','channel':'local_dispatch_outbox',
         'external_delivery':False,'simulation_available':decision['allowed'],
         'decision':decision,
@@ -2235,34 +2384,87 @@ async def queue_driver_command(body:DriverCommand):
         register_action_case(command,'driver_command')
     return command
 
-@app.post('/api/driver-commands/{command_id}/simulate',**operation('simulate_command'))
-async def simulate_driver_command(command_id:str):
+def command_for_acknowledgement(command_id):
+    """Validate before any demo side effects; closed receipts stay idempotent."""
     command=stored_driver_command(command_id)
     if command is None:
         raise HTTPException(404,'Driver command not found')
     if command.get('status')=='blocked_by_guardrail':
         raise HTTPException(status_code=409,detail={'message':'Заблокированное guardrail указание нельзя передать симулятору','blockers':command.get('decision',{}).get('blockers',[])})
-    if command.get('status')=='simulated_completed':
+    if command.get('status') in {'executing','completed','simulated_completed'}:
         return command
     if command.get('status')!='queued_for_integration' or command.get('simulation_available') is False:
         raise HTTPException(status_code=409,detail={'message':'Для этого указания локальная симуляция больше недоступна','status':command.get('status')})
     vehicle=action_vehicle(command['tr_id'])
     if not vehicle:
         raise HTTPException(422,'Vehicle is no longer available for driver simulation')
-    simulation=simulate_driver_response(vehicle,command)
-    command.update(status='simulated_completed',delivery_mode='local_driver_simulator',external_delivery=False,simulation_available=False,simulated_response=simulation,resolved_at=simulation['simulated_at'])
+    case=stored_action_case(_case_dispatcher(command),command['tr_id'])
+    if not case or case.get('attempt_id')!=command_id:
+        raise HTTPException(409,'Указание заменено новой попыткой или тикет уже закрыт')
+    return command
+
+def acknowledge_driver_command(command_id, demo=False):
+    """Idempotent receipt for the currently active attempt, not proof of success."""
+    command=command_for_acknowledgement(command_id)
+    if command.get('status')!='queued_for_integration':return command
+    vehicle=action_vehicle(command['tr_id'])
+    simulation=simulate_driver_response(vehicle,command) if demo else None
+    accepted_at=simulation['simulated_at'] if simulation else _moscow_time().isoformat()
+    command.update(status='executing',delivery_mode='local_driver_simulator' if demo else 'driver_acknowledgement',
+                   external_delivery=not demo,simulation_available=False,acknowledged_at=accepted_at,
+                   execution_started_at=accepted_at)
+    if simulation:command['simulated_response']=simulation
     update_driver_command(command)
     update_action_case_from_delivery(command,'driver_command')
     return command
 
+@app.post('/api/driver-commands/{command_id}/simulate',**operation('simulate_command'))
+async def simulate_driver_command(command_id:str):
+    async with lock:
+        command=command_for_acknowledgement(command_id)
+        if command.get('status')!='queued_for_integration':return command
+        effect=None
+        if command['tr_id']>=CUSTOM_TR_ID_OFFSET:
+            source=await custom_emulator_call('/status')
+            if source.get('status')=='unavailable':raise HTTPException(503,'Custom emulator unavailable; command not acknowledged')
+            if source.get('paused'):raise HTTPException(409,'Запустите custom-поток перед демо-реакцией водителя')
+            vehicle=action_vehicle(command['tr_id']) or {}
+            candidates=[(vehicle.get('features') or {}).get('speed_last'),
+                        (source.get('debug_speed_overrides') or {}).get(str(command['tr_id']))]
+            records=history.get(command['tr_id'])
+            if records:candidates.append(records[-1].get('speed'))
+            before=max([float(speed) for speed in candidates if speed is not None and np.isfinite(float(speed))]+[0.0])
+            target=round(min(130.0,max(30.0,before*1.5,before+15.0)),1)
+            effect=await apply_debug_speed(DebugSpeedOverride(dispatcher_id=_case_dispatcher(command),
+                                                             tr_id=command['tr_id'],speed_kmh=target))
+            effect['speed_before_kmh']=before
+        accepted=acknowledge_driver_command(command_id,demo=True)
+        response=accepted['simulated_response']
+        if effect:
+            response['debug_speed']=effect
+            response['response']+=f" ДЕМО: debug-скорость custom-ТС установлена {effect['speed_kmh']} км/ч."
+            response['note']='Изменено только движение custom-ТС через debug-оверлей. Прогноз и закрытие проверяются по новой телеметрии.'
+        else:
+            response['note']='Для оригинального потока демо подтверждает только приём: debug-ускорение поддерживается только у custom-ТС.'
+        update_driver_command(accepted)
+        return accepted
+
+@app.post('/api/driver-commands/{command_id}/acknowledge',**operation('acknowledge_command'))
+async def driver_command_acknowledgement(command_id:str):
+    async with lock:return acknowledge_driver_command(command_id)
+
 @app.get('/api/reserve-dispatches',**operation('reserve_dispatches'))
 async def get_reserve_dispatches(tr_id:int|None=None):
-    expire_stale_reserve_actions()
-    items=stored_reserve_actions(tr_id)
-    return {'items':items,'channel':'reserve_integration_outbox','external_execution':False}
+    async with lock:
+        expire_stale_reserve_actions()
+        items=stored_reserve_actions(tr_id)
+        return {'items':items,'channel':'reserve_integration_outbox','external_execution':False}
 
 @app.post('/api/reserve-dispatches',status_code=201,**operation('reserve_dispatch'))
 async def release_reserve(body:ReserveDispatch):
+    async with lock:return register_reserve_dispatch(body)
+
+def register_reserve_dispatch(body):
     expire_stale_reserve_actions()
     dispatcher=get_dispatcher(body.dispatcher_id)
     if dispatcher is None:
@@ -2280,7 +2482,10 @@ async def release_reserve(body:ReserveDispatch):
     recent=stored_reserve_actions(body.tr_id,limit=1)
     if recent:
         try:
-            if recent[0].get('status')=='queued_for_integration' and (now-pd.Timestamp(recent[0]['created_at'])).total_seconds()<900:
+            active_case=stored_action_case(_case_dispatcher(recent[0]),body.tr_id)
+            if (recent[0].get('status')=='queued_for_integration' and active_case
+                and active_case.get('attempt_id')==recent[0].get('id')
+                and (now-pd.Timestamp(recent[0]['created_at'])).total_seconds()<900):
                 raise HTTPException(status_code=409,detail={'message':'Для этой линии уже есть активная заявка на резерв','existing_action':recent[0]})
         except HTTPException:
             raise
@@ -2317,6 +2522,9 @@ async def simulate_reserve_dispatch(action_id:str):
 
 @app.get('/api/action-center',**operation('action_center'))
 async def get_action_center(dispatcher_id:str):
+    async with lock:return action_center_response(dispatcher_id)
+
+def action_center_response(dispatcher_id):
     expire_stale_driver_commands()
     expire_stale_reserve_actions()
     items=action_center_items(dispatcher_id)
@@ -2333,7 +2541,8 @@ async def get_action_center(dispatcher_id:str):
             'timed_out':sum(command.get('status')=='integration_timeout' for command in commands)+reserve_timed_out,
             'reserve_timed_out':reserve_timed_out,
             'high_priority':status_counts['worsened'],
-            'pending':status_counts['pending'],'success':status_counts['completed_success']+status_counts['improved_independently'],
+            'pending':status_counts['pending'],'executing':status_counts['executing'],
+            'success':status_counts['completed_success']+status_counts['improved_independently'],
             'no_result':status_counts['completed_no_result'],'not_delivered':status_counts['not_delivered'],
             'worsened':status_counts['worsened'],
         },
@@ -2509,9 +2718,13 @@ async def emulator_status():
     custom=await custom_emulator_call('/status')
     official=await official_emulator_config()
     active=[run for run in simulation_runs.values() if run.get('status') in {'queued','running'}]
+    # Generation state is separate from the TCP connection. Older custom
+    # images expose only paused/connected; resume must not briefly become unknown.
+    custom_status=custom.get('status') or ('paused' if custom.get('paused') else
+        'running' if custom.get('paused') is False or custom.get('connected') else 'unknown')
     return {'ingest_paused':bool(state.get('ingest_paused')),'sources':[{
         'id':'custom-emulator','label':'custom-emulator','kind':'built_in_ndtp','control':'pause_resume',
-        'status':'paused' if custom.get('paused') else ('running' if custom.get('connected') else custom.get('status','unknown')),
+        'status':custom_status,
         'details':custom,
     },{
         'id':'official-emulator','label':'Оригинальный NDTP-эмулятор','kind':'external_image','control':'config_api',
@@ -2542,6 +2755,9 @@ async def emulator_control(emulator_id:str,action:str,body:EmulatorControl):
 
 @app.post('/api/debug/custom-emulator/speed',**operation('debug_speed'))
 async def set_debug_speed(body:DebugSpeedOverride):
+    async with lock:return await apply_debug_speed(body)
+
+async def apply_debug_speed(body):
     """Forward a temporary speed overlay without changing dispatcher logic."""
     if get_dispatcher(body.dispatcher_id) is None:
         raise HTTPException(403,'Valid dispatcher profile required')
@@ -2558,6 +2774,9 @@ async def set_debug_speed(body:DebugSpeedOverride):
 
 @app.delete('/api/debug/custom-emulator/speed/{tr_id}',**operation('debug_speed'))
 async def clear_debug_speed(tr_id:int, body:EmulatorControl):
+    async with lock:return await remove_debug_speed(tr_id,body)
+
+async def remove_debug_speed(tr_id,body):
     if get_dispatcher(body.dispatcher_id) is None:
         raise HTTPException(403,'Valid dispatcher profile required')
     if tr_id < CUSTOM_TR_ID_OFFSET:

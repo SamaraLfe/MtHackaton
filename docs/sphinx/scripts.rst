@@ -42,3 +42,15 @@
 
 .. automodule:: scripts.extract_data
    :members:
+
+Упаковка итогового проекта
+--------------------------------------------------
+
+.. automodule:: scripts.package_submission
+   :members:
+
+Собственный NDTP-эмулятор
+--------------------------------------------------
+
+.. automodule:: emulator.service
+   :members:

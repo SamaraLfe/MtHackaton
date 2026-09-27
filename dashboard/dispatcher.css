@@ -1061,7 +1061,8 @@ body {
   background: #f8e8b5;
 }
 
-.action-center-item.is-not_delivered {
+.action-center-item.is-not_delivered,
+.action-center-item.is-pending {
   border-color: #c8d0d5;
   background: #f4f6f7;
 }
@@ -1073,6 +1074,10 @@ body {
   color: #53656f;
   background: #e5eaed;
 }
+
+.action-center-item.is-executing { border-color: #8bbbdc; background: #edf7ff; }
+.action-center-item.is-executing .action-center-mark,
+.action-center-item.is-executing .action-center-status { color: #155b8d; background: #d6ebfa; }
 
 .action-center-item.is-worsened {
   border-color: #e2a39c;
@@ -1857,6 +1862,27 @@ dialog form {
 #profile-close:hover { background: #edf3f7; color: #203747; }
 #profile-close:focus-visible, #profile-select:focus-visible { outline: 3px solid #2485c5; outline-offset: 3px; }
 
+#source-dialog { width: min(680px, calc(100% - 28px)); }
+#source-dialog form { position: relative; }
+#source-dialog .dialog-head { padding-right: 40px; }
+#source-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  float: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  line-height: 1;
+}
+#source-close:hover { background: #edf3f7; color: #203747; }
+#source-close:focus-visible { outline: 3px solid #2485c5; outline-offset: 3px; }
+#source-dialog .source-status-row { flex-wrap: wrap; }
+#source-dialog .source-status-row > span:first-child { flex: 1 1 160px; min-width: 0; }
+#source-dialog .source-actions { flex-wrap: wrap; }
+
 .dialog-actions {
   display: flex;
 
@@ -2399,6 +2425,10 @@ html.theme-dark .action-center-item.is-pending {
   background: #202b33;
 }
 
+html.theme-dark .action-center-item.is-executing { border-color: #447da2; background: #182f40; }
+html.theme-dark .action-center-item.is-executing .action-center-mark,
+html.theme-dark .action-center-item.is-executing .action-center-status { color: #a8d9fb; background: #24465e; }
+
 html.theme-dark .action-center-item.is-worsened {
   border-color: #8d4b50;
   background: #3b2024;
@@ -2412,3 +2442,5 @@ html.theme-dark .close,
 html.theme-dark #profile-close:hover {
   color: #afc2d1;
 }
+
+html.theme-dark #source-close:hover { background: #263b49; color: #afc2d1; }

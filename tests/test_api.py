@@ -14,13 +14,11 @@ from backend import app as backend
 
 
 def cleanup_action_case(attempt_id):
-    """Remove only the case created by a test, preserving any prior user case."""
-    with sqlite3.connect(backend.DB_PATH) as store:
-        rows=store.execute('SELECT id,payload FROM dispatcher_action_cases').fetchall()
-        for case_id,payload in rows:
-            if json.loads(payload).get('attempt_id')==attempt_id:
-                store.execute('DELETE FROM dispatcher_action_cases WHERE id=?',(case_id,))
-        store.commit()
+    """Ticket rows are temporary and already gone after app lifespan shutdown."""
+    if backend.db is not None:
+        for row in backend.db.execute('SELECT payload FROM dispatcher_action_cases').fetchall():
+            case=json.loads(row['payload'])
+            if case.get('attempt_id')==attempt_id:backend.delete_action_case(case)
 
 
 def test_risk_and_incident_helpers():
@@ -84,7 +82,7 @@ def test_action_center_orders_bad_results_and_reads_only_owner_cases(monkeypatch
 def test_new_action_for_same_dispatcher_and_vehicle_updates_stable_case(monkeypatch):
     cases={}
     monkeypatch.setattr(backend,'stored_action_case',lambda dispatcher_id,tr_id:cases.get((dispatcher_id,tr_id)))
-    monkeypatch.setattr(backend,'save_action_case',lambda case:cases.__setitem__((case['dispatcher_id'],case['tr_id']),dict(case)))
+    monkeypatch.setattr(backend,'create_action_case',lambda case:cases.__setitem__((case['dispatcher_id'],case['tr_id']),dict(case)))
     monkeypatch.setattr(backend,'action_vehicle',lambda tr_id:{'prediction_s':180})
     first={'id':'cmd-1','tr_id':10,'dispatcher':{'id':'dispatcher-01'},'action':'contact','action_title':'Связаться','created_at':'2026-01-06T11:00:00+03:00'}
     second={**first,'id':'cmd-2','action':'accelerate_safely','action_title':'Сократить отставание','created_at':'2026-01-06T11:05:00+03:00'}
@@ -106,7 +104,7 @@ def test_action_outcome_uses_absolute_timetable_deviation():
     assert backend.classify_action_outcome(90,30,delivered=False)=='improved_independently'
 
 
-def test_success_case_is_visible_for_three_seconds_only(monkeypatch):
+def test_success_case_is_visible_for_fifteen_seconds_only(monkeypatch):
     now=pd.Timestamp('2026-01-06T12:00:00+03:00')
     saved=[]
     case={
@@ -115,12 +113,14 @@ def test_success_case_is_visible_for_three_seconds_only(monkeypatch):
     }
     monkeypatch.setattr(backend,'save_action_case',lambda value:saved.append(dict(value)))
     resolved=backend.apply_action_case_outcome(case,'completed_success','Улучшилось',now,after=30)
-    assert pd.Timestamp(resolved['visible_until'])-now==pd.Timedelta(seconds=3)
+    assert pd.Timestamp(resolved['visible_until'])-now==pd.Timedelta(seconds=15)
     monkeypatch.setattr(backend,'get_dispatcher',lambda dispatcher_id:{'id':dispatcher_id})
     monkeypatch.setattr(backend,'stored_action_cases',lambda dispatcher_id,limit=200:[resolved])
     monkeypatch.setattr(backend,'reconcile_action_case',lambda value,now=None:value)
+    monkeypatch.setattr(backend,'delete_action_case',lambda value:True)
     assert backend.action_center_items('dispatcher-01',now+pd.Timedelta(seconds=2))
-    assert backend.action_center_items('dispatcher-01',now+pd.Timedelta(seconds=4))==[]
+    assert backend.action_center_items('dispatcher-01',now+pd.Timedelta(seconds=14))
+    assert backend.action_center_items('dispatcher-01',now+pd.Timedelta(seconds=15))==[]
 
 
 def test_bad_case_persists_until_newer_vehicle_observation_improves_it(monkeypatch):
@@ -185,7 +185,7 @@ def test_action_plan_ranks_actions_with_transparent_benefit_model():
         assert data['recommended_action'] in {option['action'] for option in data['options']}
 
 
-def test_driver_simulator_closes_allowed_command_from_open_queue():
+def test_driver_simulator_acknowledges_but_does_not_close_allowed_command():
     command_id=None
     old_mode=backend.state.get('mode')
     try:
@@ -201,15 +201,15 @@ def test_driver_simulator_closes_allowed_command_from_open_queue():
             simulated=client.post(f"/api/driver-commands/{command_id}/simulate")
             assert simulated.status_code==200,simulated.text
             result=simulated.json()
-            assert result['status']=='simulated_completed'
+            assert result['status']=='executing'
             assert result['simulated_response']['acknowledged'] is True
             assert result['simulated_response']['mode']=='local_driver_simulator'
             assert result['simulated_response']['next_step']['action']=='recheck_vehicle'
             assert result['simulated_response']['next_step']['check_at']
             center=client.get('/api/action-center',params={'dispatcher_id':'dispatcher-02'}).json()
             case=next(item for item in center['items'] if item['attempt_id']==command_id)
-            assert case['status']=='completed_no_result'
-            assert case['tone']=='no_result'
+            assert case['status']=='executing'
+            assert case['tone']=='executing'
     finally:
         if command_id:
             with sqlite3.connect(backend.DB_PATH) as store:

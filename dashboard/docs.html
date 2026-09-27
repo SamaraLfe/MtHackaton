@@ -390,7 +390,9 @@ projected_late_probability = max_late_probability × risk_multiplier</code></pre
     <p>Возвращает зарегистрированные диспетчером указания: от новых к старым, до 200 последних записей. Без параметров показывает всю очередь; необязательный query-параметр <code>tr_id</code> (целое число) фильтрует её по ТС.</p>
     <pre data-language="Shell"><code>curl -sS "$TAKT_URL/api/driver-commands?tr_id=131672"</code></pre>
     <pre data-language="JSON · пустая очередь, 200"><code>{"items":[],"channel":"local_dispatch_outbox","external_delivery":false}</code></pre>
-    <p>Поля каждой записи описаны в следующем разделе. Пагинации, подтверждения получения и статуса прочтения нет. Очередь хранится в SQLite и сохраняется при перезапуске backend. Нечисловой <code>tr_id</code> вернёт <code>422</code>.</p>
+    <p>Журнал хранится в SQLite на диске и переживает перезапуск. Приём подтверждается через <code>POST /api/driver-commands/{command_id}/acknowledge</code>; реальный защищённый канал водителя пока не подключён. Нечисловой <code>tr_id</code> вернёт <code>422</code>.</p>
+    <p><code>GET /api/action-center?dispatcher_id=...</code> — отдельные оперативные тикеты, только в памяти до перезапуска backend (F5 не очищает). Ожидание и недоставка серые, исполнение синее, закрытие зелёное на 15 секунд, затем тикет удаляется. Закрытие требует свежего live-прогноза в зелёной зоне после приёма команды по ранее рискованному ТС.</p>
+    <p><code>POST /api/driver-commands/{command_id}/simulate</code> подтверждает приём и повышает debug-скорость только выбранного custom-ТС. Повторный вызов не ускоряет повторно. У оригинального источника подтверждается только приём. Ручная скорость: <code>POST /api/debug/custom-emulator/speed</code>, сброс: <code>DELETE /api/debug/custom-emulator/speed/{tr_id}</code>. Точные поля и ошибки смотрите в <a href="/docs/swagger">Swagger</a>; прогнозы эти методы не подменяют.</p>
   </section>
 
   <section id="commands-create">

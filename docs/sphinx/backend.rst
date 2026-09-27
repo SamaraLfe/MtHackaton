@@ -32,3 +32,16 @@ OpenAPI-описания
 
 .. automodule:: backend.api_docs
    :members:
+
+Тикеты и debug-управление
+----------------------------------------------
+
+.. autofunction:: backend.app.get_action_center
+
+.. autofunction:: backend.app.simulate_driver_command
+
+.. autofunction:: backend.app.driver_command_acknowledgement
+
+.. autofunction:: backend.app.set_debug_speed
+
+.. autofunction:: backend.app.clear_debug_speed

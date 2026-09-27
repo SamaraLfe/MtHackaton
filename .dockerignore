@@ -8,4 +8,5 @@ docs/_build
 __pycache__
 .pytest_cache
 tests
+dist
 *.log

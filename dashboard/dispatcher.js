@@ -15,7 +15,9 @@
     unknown: 'Нет оценки'
   };
   const commandStatuses = {
-    queued_for_integration: 'ожидает ответа',
+    queued_for_integration: 'отправляем водителю',
+    executing: 'исполняется',
+    completed: 'закрыто · ТС вышло из зоны риска',
     blocked_by_guardrail: 'не отправлено',
     integration_timeout: 'не доставлено',
     simulated_completed: 'выполнено'
@@ -148,23 +150,38 @@
   }
 
   function commandFeedbackHtml(vehicleId) {
-    const feedback = commandFeedback;
+    let feedback = commandFeedback?.tr_id === vehicleId ? commandFeedback : null;
+    const ticket = actionCenter.find(item => item.tr_id === vehicleId && item.kind === 'driver_command');
+    if (ticket?.status === 'pending' && feedback?.kind !== 'error' && feedback?.kind !== 'blocked') {
+      feedback = {tr_id: vehicleId, message: 'Отправляем водителю. Ожидаем подтверждение приёма.',
+        commandId: ticket.attempt_id, simulatable: true};
+    } else if (ticket?.status === 'executing') {
+      feedback = {tr_id: vehicleId, kind: 'simulation', commandId: ticket.attempt_id,
+        response: feedback?.response || 'Водитель подтвердил приём команды.'};
+    } else if (ticket?.status === 'not_delivered') {
+      feedback = {tr_id: vehicleId, kind: 'error', message: ticket.result_detail || 'Приём команды не подтверждён.'};
+    } else if (ticket?.tone === 'success') {
+      return '<span>Закрыт · ТС вышло из зоны риска. Зелёный тикет будет удалён через 15 секунд после закрытия.</span>';
+    }
+    const journal = detailSupplementCache.get(detailCacheKey(vehicleId))?.items || [];
+    if (!ticket && journal.some(item => item.id === feedback?.commandId && item.status === 'completed')) {
+      return '<span>ТС вышло из зоны риска. Тикет закрыт и удалён.</span>';
+    }
     if (!feedback || feedback.tr_id !== vehicleId) return '';
     if (feedback.kind === 'simulation') {
-      const saved = Number(feedback.expectedSavedDelayS);
-      const saving = Number.isFinite(saved) && saved > 0
-        ? `Ожидаемое сохранение воздействия: −${duration(saved)}.`
-        : '';
-      return `<b>Ответ водителя получен</b><span>${esc(feedback.response || 'Водитель подтвердил указание.')} ${esc(saving)}</span><small>${esc(feedback.checkAt ? `Следующая проверка: ${time(feedback.checkAt)}.` : '')}</small>`;
+      return `<b>Исполняется · водитель принял указание</b><span>${esc(feedback.response || 'Водитель подтвердил указание.')}</span><small>Тикет закроется после выхода ТС из зоны риска по новой телеметрии.</small>`;
     }
     if (feedback.kind === 'error') {
       return `<span class="reserve-blocked">${esc(feedback.message)}</span>`;
     }
     const simulate = feedback.simulatable
-      ? '<button type="button" class="secondary simulate-command" id="simulate-command">Показать реакцию водителя (демо)</button>'
+      ? `<button type="button" class="secondary simulate-command" id="simulate-command" data-command-id="${esc(feedback.commandId)}">Показать реакцию водителя (демо)</button>`
       : '';
     const detail = feedback.detail ? `<small>${esc(feedback.detail)}</small>` : '';
-    return `<span>${esc(feedback.message)}</span>${simulate}${detail}`;
+    const demoHint = feedback.simulatable
+      ? `<small>${vehicleId >= CUSTOM_TR_ID_OFFSET ? 'Демо подтвердит приём и повысит debug-скорость этого custom-ТС. Оверлей можно сбросить внизу карточки.' : 'У оригинального потока демо подтвердит только приём; debug-ускорение доступно у custom-ТС.'}</small>`
+      : '';
+    return `<span>${esc(feedback.message)}</span>${simulate}${demoHint}${detail}`;
   }
 
   const isCustomEmulatorVehicle = vehicle =>
@@ -193,9 +210,9 @@
       <div class="debug-speed-controls">
         <label>Скорость, км/ч<input id="debug-speed-value" type="number" min="0" max="130" step="1" value="${esc(draft)}" inputmode="decimal"></label>
         <button type="button" class="secondary" id="debug-speed-apply">Применить</button>
-        <button type="button" class="secondary" id="debug-speed-reset" ${override ? '' : 'disabled'}>Вернуть темп</button>
+        <button type="button" class="secondary" id="debug-speed-reset">Вернуть темп</button>
       </div>
-      <small id="debug-speed-status">${esc(feedback || (override ? `Активен debug-оверлей: ${override.speed} км/ч.` : 'Оверлей не активен.'))}</small>
+      <small id="debug-speed-status">${esc(feedback || (override ? `Активен debug-оверлей: ${override.speed} км/ч.` : '«Вернуть темп» сбросит любой debug-оверлей этого ТС, включая демо-ускорение.'))}</small>
     </section>`;
   }
 
@@ -418,7 +435,7 @@
       const [data, runtime] = await Promise.all([api('/api/admin/emulators'), api('/api/state')]);
       const archiveView = runtime.state?.mode !== 'live';
       const canControl = Boolean(currentProfile()?.id);
-      const sourceStatus = status => ({running: 'Работает', paused: 'Пауза', unavailable: 'Недоступен', not_configured: 'Не настроен'}[status] || status || 'Неизвестно');
+      const sourceStatus = status => ({running: 'Работает', paused: 'Пауза', unavailable: 'Недоступен', not_configured: 'Не настроен', unknown: 'Неизвестно'}[status] || 'Неизвестно');
       box.innerHTML = (data.sources || []).map(source => `
         <div class="source-status-row">
           <span><b>${esc(source.label)}${archiveView ? ' (архив)' : ''}</b><small>${archiveView ? 'Источник не участвует в архивном отображении' : source.id === 'custom-emulator' ? 'Собственная NDTP Nav00' : 'Оригинальный NDTP-образ'}</small></span>
@@ -487,8 +504,8 @@
     if (!select) return;
 
     const previous =
-      reserveScenario?.routeId ||
-      select.value;
+      select.value ||
+      reserveScenario?.routeId;
 
     const sorted = [
       ...baseVehicles
@@ -1146,11 +1163,13 @@
 
     if (summary) {
       const attention = actionCenter.filter(item => ['worsened', 'no_result', 'not_delivered'].includes(item.tone)).length;
-      const pending = actionCenter.filter(item => item.tone === 'pending').length;
+      const pending = actionCenter.filter(item => item.status === 'pending').length;
+      const executing = actionCenter.filter(item => item.status === 'executing').length;
       const success = actionCenter.filter(item => item.tone === 'success').length;
       summary.textContent = [
         attention ? `${attention} требуют решения` : '',
         pending ? `${pending} ожидают ответа` : '',
+        executing ? `${executing} исполняются` : '',
         success ? `${success} успешно` : ''
       ].filter(Boolean).join(' · ') || 'Нет активных результатов';
     }
@@ -1161,10 +1180,10 @@
     }
 
     list.innerHTML = actionCenter.slice(0, 8).map(item => {
-      const tone = ['success', 'no_result', 'not_delivered', 'worsened', 'pending'].includes(item.tone)
+      const tone = ['success', 'no_result', 'not_delivered', 'worsened', 'pending', 'executing'].includes(item.tone)
         ? item.tone
         : 'pending';
-      const icons = {success: '✓', no_result: '!', not_delivered: '↛', worsened: '↑', pending: '…'};
+      const icons = {success: '✓', no_result: '!', not_delivered: '↛', worsened: '↑', pending: '…', executing: '▶'};
       const attempt = Number(item.revision || 1);
       return `<button class="action-center-item is-${tone}" data-id="${item.tr_id}" data-case-id="${esc(item.id)}" type="button" aria-label="ТС ${item.tr_id}: ${esc(item.status_label)}">
         <span class="action-center-mark" aria-hidden="true">${icons[tone]}</span>
@@ -1824,8 +1843,8 @@
     $('debug-speed-reset')?.addEventListener('click', () => clearDebugSpeed(vehicle.tr_id));
 
     const simulateButton = $('simulate-command');
-    if (simulateButton && commandFeedback?.commandId) {
-      simulateButton.onclick = () => simulateCommand(commandFeedback.commandId);
+    if (simulateButton?.dataset.commandId) {
+      simulateButton.onclick = () => simulateCommand(simulateButton.dataset.commandId);
     }
 
 
@@ -2008,16 +2027,23 @@
   }
 
   async function simulateCommand(commandId) {
+    const requestedVehicleId = selectedId;
     const button = $('simulate-command');
     if (button) button.disabled = true;
     try {
       const data = await api(`/api/driver-commands/${encodeURIComponent(commandId)}/simulate`, {method: 'POST'});
       commandHistoryOpen = true;
       const response = data.simulated_response || {};
+      if (response.debug_speed) {
+        debugSpeedOverrides.set(data.tr_id, {speed: response.debug_speed.speed_kmh});
+        if (debugSpeedDraft?.trId === data.tr_id) debugSpeedDraft = null;
+        debugSpeedFeedback = {trId: data.tr_id, message: `Демо-реакция водителя: debug-скорость ${response.debug_speed.speed_kmh} км/ч. Можно вернуть штатный темп.`};
+      }
       const projection = response.projection || {};
       const next = response.next_step || {};
       commandFeedback = {
-        tr_id: selectedId,
+        tr_id: data.tr_id,
+        commandId: data.id,
         kind: 'simulation',
         response: response.response,
         note: response.note || 'Локальная симуляция, live-контур не изменён.',
@@ -2025,17 +2051,17 @@
         checkAt: next.check_at,
         expectedSavedDelayS: projection.expected_saved_delay_s,
       };
-      invalidateDetailSupplement(selectedId);
+      invalidateDetailSupplement(data.tr_id);
       await refresh();
     } catch (error) {
       if (button) button.disabled = false;
       commandFeedback = {
-        tr_id: selectedId,
+        tr_id: requestedVehicleId,
         kind: 'error',
         message: `Симуляция не выполнена: ${error.message}`,
       };
       const result = $('command-result');
-      if (result) result.innerHTML = `<span class="reserve-blocked">Симуляция не выполнена: ${esc(error.message)}</span>`;
+      if (result && selectedId === requestedVehicleId) result.innerHTML = `<span class="reserve-blocked">Симуляция не выполнена: ${esc(error.message)}</span>`;
     }
   }
 
@@ -2194,12 +2220,36 @@
   $('reserve-run').onclick =
     runReserveScenario;
 
+  function selectReserveVehicle(event) {
+    const vehicleId = Number(event.target.value);
+    if (baseVehicles.some(vehicle => vehicle.tr_id === vehicleId)) openVehicle(vehicleId);
+  }
+  $('reserve-route')?.addEventListener('change', selectReserveVehicle);
+
   $('source-control-open')?.addEventListener('click', async () => {
     $('source-dialog')?.showModal();
     await refreshSourceStatus();
   });
 
   $('source-close')?.addEventListener('click', () => $('source-dialog')?.close());
+  function bindSourceDialogDismiss(dialog) {
+    if (!dialog) return;
+    let backdropPressed = false;
+    const outside = event => {
+      const bounds = dialog.getBoundingClientRect();
+      return event.target === dialog &&
+        (event.clientX < bounds.left || event.clientX > bounds.right ||
+         event.clientY < bounds.top || event.clientY > bounds.bottom);
+    };
+    dialog.addEventListener('pointerdown', event => { backdropPressed = outside(event); });
+    dialog.addEventListener('pointerup', event => {
+      if (backdropPressed && outside(event)) dialog.close();
+      backdropPressed = false;
+    });
+    dialog.addEventListener('pointercancel', () => { backdropPressed = false; });
+    dialog.addEventListener('close', () => { backdropPressed = false; });
+  }
+  bindSourceDialogDismiss($('source-dialog'));
   $('source-pause-all')?.addEventListener('click', () => controlSources('pause'));
   $('source-resume-all')?.addEventListener('click', () => controlSources('resume'));
 
