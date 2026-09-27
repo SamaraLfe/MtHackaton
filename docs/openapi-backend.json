@@ -791,7 +791,7 @@
           "Указания водителю"
         ],
         "summary": "Зарегистрировать указание",
-        "description": "Создаёт и сохраняет запись только для существующего локального dispatcher_id. `queued_for_integration` означает, что запись находится в durable local_dispatch_outbox; это не доставка водителю. `simulation_available=true` позволяет явно запустить локальный ответ водителя. Каждый повтор создаёт новую запись.",
+        "description": "Создаёт audit-запись только для существующего локального dispatcher_id. Разрешённое указание также создаёт или обновляет единственную карточку этого диспетчера по выбранному ТС. `queued_for_integration` означает, что запись находится в durable local_dispatch_outbox; это не доставка водителю. `simulation_available=true` позволяет явно запустить локальный ответ водителя.",
         "operationId": "queue_driver_command_api_driver_commands_post",
         "requestBody": {
           "required": true,
@@ -1003,28 +1003,68 @@
         }
       }
     },
+    "/api/reserve-dispatches/{action_id}/simulate": {
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Смоделировать подтверждение выпуска резерва",
+        "description": "Подтверждает заявку в локальном симуляторе флота и переносит рассчитанный what-if эффект в персональную карточку действия. Не отправляет команду реальному внешнему парку и не изменяет live-телеметрию.",
+        "operationId": "simulate_reserve_dispatch_api_reserve_dispatches__action_id__simulate_post",
+        "parameters": [
+          {
+            "name": "action_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Action Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Заявка выпуска резерва не найдена."
+          },
+          "409": {
+            "description": "Заявка уже закрыта или симуляция недоступна."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/action-center": {
       "get": {
         "tags": [
           "Указания водителю"
         ],
-        "summary": "Получить центр действий",
-        "description": "Объединяет открытые разрешённые указания водителю и заявки выпуска резерва, сортируя их по просроченности и приоритету. Заблокированные guardrail записи и истёкшие внешние интеграции остаются в истории и не считаются открытой работой; `due=true` означает, что нужна повторная проверка. `summary.timed_out` общий для двух outbox, `summary.reserve_timed_out` — только для резерва.",
+        "summary": "Получить персональный центр действий",
+        "description": "Возвращает только действия, созданные указанным `dispatcher_id`. Для пары диспетчер+ТС хранится одна стабильная карточка: новая попытка обновляет её и увеличивает `revision`. Статусы: `pending`, `completed_success` (зелёный, виден 3 секунды), `completed_no_result` (жёлтый), `not_delivered` (серый), `worsened` (красный) и `improved_independently`. Негативный результат сохраняется до новой попытки или более свежего улучшившегося прогноза.",
         "operationId": "get_action_center_api_action_center_get",
         "parameters": [
           {
             "name": "dispatcher_id",
             "in": "query",
-            "required": false,
+            "required": true,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
+              "type": "string",
               "title": "Dispatcher Id"
             }
           }
@@ -1042,14 +1082,7 @@
             "description": "Профиль dispatcher_id не найден."
           },
           "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
+            "description": "dispatcher_id обязателен."
           }
         }
       }

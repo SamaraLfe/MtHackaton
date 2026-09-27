@@ -13,6 +13,16 @@ from ml.service import app as ml_app
 from backend import app as backend
 
 
+def cleanup_action_case(attempt_id):
+    """Remove only the case created by a test, preserving any prior user case."""
+    with sqlite3.connect(backend.DB_PATH) as store:
+        rows=store.execute('SELECT id,payload FROM dispatcher_action_cases').fetchall()
+        for case_id,payload in rows:
+            if json.loads(payload).get('attempt_id')==attempt_id:
+                store.execute('DELETE FROM dispatcher_action_cases WHERE id=?',(case_id,))
+        store.commit()
+
+
 def test_risk_and_incident_helpers():
     items=[
         {'tr_id':10,'level':'high','late_probability':.8,'prediction_s':180,'reason':'slow'},
@@ -54,23 +64,81 @@ def test_driver_decision_has_guardrails_and_follow_up():
     assert ready['utility']['expected_saved_delay_s']>=0
 
 
-def test_action_center_orders_due_work_and_respects_dispatcher_scope(monkeypatch):
+def test_action_center_orders_bad_results_and_reads_only_owner_cases(monkeypatch):
     now=pd.Timestamp('2026-01-06T12:00:00+03:00')
-    monkeypatch.setattr(backend,'get_dispatcher',lambda dispatcher_id: {'assigned_tr_ids':[10]} if dispatcher_id=='dispatcher-01' else None)
-    monkeypatch.setattr(backend,'stored_driver_commands',lambda limit=200:[
-        {'id':'cmd-due','tr_id':10,'created_at':'2026-01-06T11:50:00+03:00','status':'queued_for_integration','action':'contact','action_title':'Связаться с водителем','decision':{'priority':'medium','next_check_at':'2026-01-06T11:55:00+03:00','goal':'Подтвердить обстановку'}},
-        {'id':'cmd-blocked','tr_id':10,'created_at':'2026-01-06T11:48:00+03:00','status':'blocked_by_guardrail','action':'accelerate_safely','action_title':'Сократить отставание','decision':{'priority':'high','blockers':['Прогноз недостаточен']}},
-        {'id':'cmd-filtered','tr_id':11,'created_at':'2026-01-06T11:40:00+03:00','status':'blocked_by_guardrail','action':'accelerate_safely','action_title':'Сократить отставание','decision':{'priority':'high','blockers':['Нет свежей телеметрии']}},
-        {'id':'cmd-open','tr_id':10,'created_at':'2026-01-06T11:59:00+03:00','status':'queued_for_integration','action':'maintain','action_title':'Продолжать по графику','decision':{'priority':'low','next_check_at':'2026-01-06T12:05:00+03:00','goal':'Сохранить интервал'}},
+    requested=[]
+    monkeypatch.setattr(backend,'get_dispatcher',lambda dispatcher_id: {'id':dispatcher_id} if dispatcher_id=='dispatcher-01' else None)
+    monkeypatch.setattr(backend,'stored_action_cases',lambda dispatcher_id,limit=200: requested.append(dispatcher_id) or [
+        {'id':'case-yellow','dispatcher_id':'dispatcher-01','tr_id':10,'status':'completed_no_result','tone':'no_result','updated_at':'2026-01-06T11:59:00+03:00'},
+        {'id':'case-red','dispatcher_id':'dispatcher-01','tr_id':11,'status':'worsened','tone':'worsened','updated_at':'2026-01-06T11:58:00+03:00'},
     ])
-    monkeypatch.setattr(backend,'stored_reserve_actions',lambda limit=100:[])
+    monkeypatch.setattr(backend,'reconcile_action_case',lambda case,now=None:case)
 
     items=backend.action_center_items('dispatcher-01',now)
 
-    assert [item['id'] for item in items]==['cmd-due','cmd-open']
-    assert items[0]['due'] is True
-    assert items[0]['priority']=='medium'
-    assert items[1]['due'] is False
+    assert requested==['dispatcher-01']
+    assert [item['id'] for item in items]==['case-red','case-yellow']
+    assert all(item['dispatcher_id']=='dispatcher-01' for item in items)
+
+
+def test_new_action_for_same_dispatcher_and_vehicle_updates_stable_case(monkeypatch):
+    cases={}
+    monkeypatch.setattr(backend,'stored_action_case',lambda dispatcher_id,tr_id:cases.get((dispatcher_id,tr_id)))
+    monkeypatch.setattr(backend,'save_action_case',lambda case:cases.__setitem__((case['dispatcher_id'],case['tr_id']),dict(case)))
+    monkeypatch.setattr(backend,'action_vehicle',lambda tr_id:{'prediction_s':180})
+    first={'id':'cmd-1','tr_id':10,'dispatcher':{'id':'dispatcher-01'},'action':'contact','action_title':'Связаться','created_at':'2026-01-06T11:00:00+03:00'}
+    second={**first,'id':'cmd-2','action':'accelerate_safely','action_title':'Сократить отставание','created_at':'2026-01-06T11:05:00+03:00'}
+
+    case_one=backend.register_action_case(first,'driver_command')
+    case_two=backend.register_action_case(second,'driver_command')
+
+    assert case_two['id']==case_one['id']=='case-dispatcher-01-10'
+    assert case_two['revision']==2
+    assert case_two['attempt_id']=='cmd-2'
+    assert case_two['status']=='pending'
+
+
+def test_action_outcome_uses_absolute_timetable_deviation():
+    assert backend.classify_action_outcome(180,90)=='completed_success'
+    assert backend.classify_action_outcome(-120,-30)=='completed_success'
+    assert backend.classify_action_outcome(180,175)=='completed_no_result'
+    assert backend.classify_action_outcome(90,180)=='worsened'
+    assert backend.classify_action_outcome(90,30,delivered=False)=='improved_independently'
+
+
+def test_success_case_is_visible_for_three_seconds_only(monkeypatch):
+    now=pd.Timestamp('2026-01-06T12:00:00+03:00')
+    saved=[]
+    case={
+        'id':'case-dispatcher-01-10','dispatcher_id':'dispatcher-01','tr_id':10,
+        'status':'completed_no_result','tone':'no_result','updated_at':now.isoformat(),
+    }
+    monkeypatch.setattr(backend,'save_action_case',lambda value:saved.append(dict(value)))
+    resolved=backend.apply_action_case_outcome(case,'completed_success','Улучшилось',now,after=30)
+    assert pd.Timestamp(resolved['visible_until'])-now==pd.Timedelta(seconds=3)
+    monkeypatch.setattr(backend,'get_dispatcher',lambda dispatcher_id:{'id':dispatcher_id})
+    monkeypatch.setattr(backend,'stored_action_cases',lambda dispatcher_id,limit=200:[resolved])
+    monkeypatch.setattr(backend,'reconcile_action_case',lambda value,now=None:value)
+    assert backend.action_center_items('dispatcher-01',now+pd.Timedelta(seconds=2))
+    assert backend.action_center_items('dispatcher-01',now+pd.Timedelta(seconds=4))==[]
+
+
+def test_bad_case_persists_until_newer_vehicle_observation_improves_it(monkeypatch):
+    saved=[]
+    case={
+        'id':'case-dispatcher-01-10','dispatcher_id':'dispatcher-01','tr_id':10,
+        'status':'worsened','tone':'worsened','delivery_confirmed':True,
+        'baseline_prediction_s':120,'latest_prediction_s':180,
+        'action_started_at':'2026-01-06T11:55:00+03:00',
+        'last_observation_at':'2026-01-06T12:00:00+03:00',
+        'updated_at':'2026-01-06T12:00:00+03:00','visible_until':None,
+    }
+    monkeypatch.setattr(backend,'save_action_case',lambda value:saved.append(dict(value)))
+    monkeypatch.setattr(backend,'action_vehicle',lambda tr_id:{'prediction_s':30,'T':'2026-01-06T12:01:00+03:00','stale':False})
+    resolved=backend.reconcile_action_case(case,pd.Timestamp('2026-01-06T12:01:00+03:00'))
+    assert resolved['status']=='completed_success'
+    assert resolved['tone']=='success'
+    assert resolved['outcome_source']=='vehicle_telemetry'
 
 
 def test_stale_driver_command_becomes_terminal_integration_timeout(monkeypatch):
@@ -138,11 +206,16 @@ def test_driver_simulator_closes_allowed_command_from_open_queue():
             assert result['simulated_response']['mode']=='local_driver_simulator'
             assert result['simulated_response']['next_step']['action']=='recheck_vehicle'
             assert result['simulated_response']['next_step']['check_at']
+            center=client.get('/api/action-center',params={'dispatcher_id':'dispatcher-02'}).json()
+            case=next(item for item in center['items'] if item['attempt_id']==command_id)
+            assert case['status']=='completed_no_result'
+            assert case['tone']=='no_result'
     finally:
         if command_id:
             with sqlite3.connect(backend.DB_PATH) as store:
                 store.execute('DELETE FROM driver_commands WHERE id=?',(command_id,))
                 store.commit()
+            cleanup_action_case(command_id)
         backend.state['mode']=old_mode
 
 
@@ -167,6 +240,7 @@ def test_driver_simulator_rejects_expired_command():
             with sqlite3.connect(backend.DB_PATH) as store:
                 store.execute('DELETE FROM driver_commands WHERE id=?',(command_id,))
                 store.commit()
+            cleanup_action_case(command_id)
 
 
 def test_reserve_placement_handles_vehicle_without_control_stop():
@@ -227,11 +301,19 @@ def test_reserve_release_is_persisted_only_after_evidence_gate():
             assert action['placement']['reserve_eta_s']<=action['placement']['horizon_s']
             history=client.get('/api/reserve-dispatches',params={'tr_id':131672}).json()['items']
             assert any(item['id']==action_id for item in history)
+            simulated=client.post(f'/api/reserve-dispatches/{action_id}/simulate')
+            assert simulated.status_code==200,simulated.text
+            assert simulated.json()['status']=='simulated_completed'
+            center=client.get('/api/action-center',params={'dispatcher_id':'dispatcher-02'}).json()
+            case=next(item for item in center['items'] if item['attempt_id']==action_id)
+            assert case['dispatcher_id']=='dispatcher-02'
+            assert case['status'] in {'completed_success','completed_no_result'}
     finally:
         if action_id:
             with sqlite3.connect(backend.DB_PATH) as store:
                 store.execute('DELETE FROM reserve_actions WHERE id=?',(action_id,))
                 store.commit()
+            cleanup_action_case(action_id)
         backend.vehicles.clear()
 
 def test_map_match_and_admin_role_gate():
@@ -275,6 +357,8 @@ def test_dispatcher_command_is_persisted_in_the_local_outbox():
         if command_id:
             with sqlite3.connect(backend.DB_PATH) as store:
                 store.execute('DELETE FROM driver_commands WHERE id=?',(command_id,))
+                store.commit()
+            cleanup_action_case(command_id)
 
 
 def test_control_room_loads_leaflet_stylesheet():

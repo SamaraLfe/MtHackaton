@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=submission-13">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=action-results-13">
 </head>
 <body>
   <header class="topbar">
@@ -63,10 +63,10 @@
 
     <section class="card action-center-card" id="action-center-card" aria-labelledby="action-center-title">
       <div class="card-head">
-        <div><p class="eyebrow">ЦЕНТР ДЕЙСТВИЙ</p><h2 id="action-center-title">Что проверить дальше</h2></div>
+        <div><p class="eyebrow">МОИ ОПЕРАТИВНЫЕ ДЕЙСТВИЯ</p><h2 id="action-center-title">Результат по каждому ТС</h2><p class="action-center-help">Только ваши действия. Повторная попытка по тому же ТС обновляет карточку.</p></div>
         <span class="action-center-summary" id="action-center-summary">—</span>
       </div>
-      <div id="action-center-list" class="action-center-list"></div>
+      <div id="action-center-list" class="action-center-list" aria-live="polite"></div>
     </section>
 
     <section class="reserve-card card is-hidden" id="reserve-card" aria-labelledby="reserve-title">
@@ -89,7 +89,7 @@
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=submission-11"></script>
-  <script src="/static/dispatcher.js?v=submission-13"></script>
+  <script src="/static/map.js?v=action-results-12"></script>
+  <script src="/static/dispatcher.js?v=action-results-13"></script>
 </body>
 </html>
