@@ -276,16 +276,69 @@ def test_metrics_expose_readable_v5_summary():
         assert len(data['feature_importance'])==6
 
 
-def test_what_if_reduces_projected_risk():
+def test_what_if_without_selection_preserves_risk():
     with TestClient(backend.app) as client:
+        client.post('/api/mode',json={'mode':'replay'})
         backend.vehicles.clear()
         backend.vehicles[10]={'tr_id':10,'level':'high','late_probability':.8,'prediction_s':180}
         response=client.post('/api/what-if',json={'extra_vehicles':1})
         assert response.status_code==200
         data=response.json()
-        assert data['projected'][0]['projected_late_probability']==.68
-        assert data['impact']['saved_expected_delay_minutes']==.4
+        assert next(item for item in data['projected'] if item['tr_id']==10)['projected_late_probability']==.8
+        assert data['impact']['saved_expected_delay_minutes']==0
+        assert data['impact']['baseline']==data['impact']['projected']
         backend.vehicles.clear()
+
+
+def test_selected_reserve_preserves_all_forecasts_and_kpis(monkeypatch):
+    import copy
+    items=[{'tr_id':1,'prediction_s':180,'current_deviation_s':200,'late_probability':.8,'level':'high',
+            'position_match':{'segment_index':0,'fraction':0,'confidence':1,'projected_lon':37,'projected_lat':55}},
+           {'tr_id':2,'prediction_s':400,'late_probability':.9,'level':'high'}]
+    original=copy.deepcopy(items)
+    async def snapshot():
+        return {'vehicles':items}
+    monkeypatch.setattr(backend,'get_state',snapshot)
+    monkeypatch.setattr(backend,'schedule',pd.DataFrame([
+        dict(tr_id=1,ts=i*100,tt_action_item_id=i,lon=37+i*.001,lat=55,building_address=f'Stop {i}')
+        for i in range(6)]))
+    result=asyncio.run(backend.what_if(backend.WhatIf(tr_id=1,extra_vehicles=1)))
+    assert items==original
+    assert result['placement']['reserve_eta_s']==0
+    assert result['placement']['before_prediction_s']==result['placement']['after_prediction_s']==180
+    assert result['impact']['baseline']==result['impact']['projected']
+    assert result['impact']['expected_stop_compensation_minutes']>0
+    for row in result['projected']:
+        assert row['projected_late_probability']==row['max_late_probability']
+    blocked=asyncio.run(backend.what_if(backend.WhatIf(tr_id=1,extra_vehicles=1,policy={'min_delay_s':181})))
+    assert not blocked['decision']['allowed']
+    assert blocked['placement']['compensation']['expected_compensation_s']==0
+    monkeypatch.setattr(backend,'expire_stale_reserve_actions',lambda:None)
+    monkeypatch.setattr(backend,'get_dispatcher',lambda _: {'id':'dispatcher-02'})
+    monkeypatch.setattr(backend,'action_vehicle',lambda _:items[0])
+    with pytest.raises(backend.HTTPException) as error:
+        asyncio.run(backend.release_reserve(backend.ReserveDispatch(
+            tr_id=1,dispatcher_id='dispatcher-02',policy={'min_delay_s':181})))
+    assert error.value.status_code==409
+
+
+def test_reserve_confirmation_uses_compensation_and_keeps_result(monkeypatch):
+    benefit={'justified':True,'expected_compensation_s':300}
+    action={'id':'reserve-test','tr_id':1,'dispatcher':{'id':'dispatcher-02'},
+            'status':'simulated_completed','placement':{
+                'before_prediction_s':180,'after_prediction_s':180,'compensation':benefit}}
+    simulation=backend.simulate_reserve_response(action)
+    assert simulation['projection']['prediction_after_s']==180
+    assert simulation['projection']['expected_saved_delay_s']==300
+    action['simulated_response']=simulation
+    case={'attempt_id':'reserve-test','status':'pending','baseline_prediction_s':180}
+    monkeypatch.setattr(backend,'stored_action_case',lambda *_:case)
+    monkeypatch.setattr(backend,'save_action_case',lambda _:None)
+    result=backend.update_action_case_from_delivery(action,'reserve_release')
+    assert result['status']=='completed_success'
+    assert result['latest_prediction_s']==180
+    assert result['reserve_compensation']==benefit
+    assert backend.reconcile_action_case(result)==result
 
 
 def test_reserve_release_is_persisted_only_after_evidence_gate():

@@ -139,16 +139,23 @@ def test_real_first_packet_preserves_actual_delay_but_emulator_calibrates(fleet)
     assert synthetic['deviation_s']==0.
 
 
-def test_reserve_remaining_distance_is_not_multiplied_twice(fleet):
+def test_reserve_remaining_distance_is_not_multiplied_twice(fleet,monkeypatch):
+    captured=[]
+    original=backend.compensation
+    def capture(stops,distances,*args):
+        captured.extend(distances)
+        return original(stops,distances,*args)
+    monkeypatch.setattr(backend,'compensation',capture)
     vehicle=dict(tr_id=1,lon=37.005,lat=55.,target_stop_id=2,current_deviation_s=300,
                  prediction_s=10,horizon_s=720,position_match=backend.match_stop(1,37.005,55.))
     placement=backend.reserve_placement(vehicle)
     expected=haversine(37.005,55.,37.01,55.)
-    assert placement['distance_to_target_m']==pytest.approx(expected,abs=.1)
-    assert placement['reserve_eta_s']==pytest.approx(expected/(placement['reserve_speed_kmh']/3.6),abs=.1)
-    assert placement['slack_s']==pytest.approx(720-placement['reserve_eta_s'],abs=.1)
-    assert 0<=placement['after_prediction_s']<=10
-    assert placement['relief_s']<=10
+    assert captured[0]==pytest.approx(expected,abs=.1)
+    assert captured[-1]==pytest.approx(expected+2*haversine(37.01,55.,37.02,55.),abs=.1)
+    assert placement['reserve_eta_s']==0  # New reserve appears at its start stop.
+    assert placement['after_prediction_s']==placement['before_prediction_s']==10
+    assert placement['after_current_deviation_s']==placement['before_current_deviation_s']==300
+    assert placement['relief_s']==0
 
 
 def test_remaining_horizon_counts_down_without_changing_model_input(fleet):
@@ -164,11 +171,12 @@ def test_remaining_horizon_counts_down_without_changing_model_input(fleet):
 def test_reserve_temporal_match_accounts_for_current_delay(fleet):
     vehicle=dict(tr_id=1,T=iso(fleet+405),position_time=fleet+410,target_time_begin=iso(fleet+720),
                  target_stop_id=2,current_deviation_s=50,prediction_s=100,horizon_s=310,
-                 lon=37.005,lat=55.,position_match=backend.match_stop(1,37.005,55.))
+                 lon=37.005,lat=55.,position_match=None)
     placement=backend.reserve_placement(vehicle)
-    assert placement['lon']==pytest.approx(37.005)
-    assert placement['distance_to_target_m']==pytest.approx(haversine(37.005,55.,37.01,55.),abs=.1)
-    assert placement['track'][-1]['lon']==37.01
+    assert placement['compensation']['stops'][0]['planned_eta_s']==pytest.approx(360)
+    assert placement['compensation']['stops'][0]['primary_eta_s']==pytest.approx(460)
+    assert placement['track'][-1]['lon']==37.03
+    assert placement['after_prediction_s']==100
 
 
 def test_action_case_numeric_time_uses_seconds_not_nanoseconds():
