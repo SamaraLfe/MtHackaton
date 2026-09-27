@@ -8,4 +8,5 @@ data/
 ml/artifacts/
 *.log
 state/
+tmp/
 .idea/

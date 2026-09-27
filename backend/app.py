@@ -165,6 +165,10 @@ def init_store():
           id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS reserve_actions (
           id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS dispatcher_action_cases (
+          id TEXT PRIMARY KEY, dispatcher_id TEXT NOT NULL, tr_id INTEGER NOT NULL,
+          payload TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(dispatcher_id,tr_id));
         CREATE TABLE IF NOT EXISTS app_meta (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
     ''')
@@ -257,6 +261,7 @@ def expire_stale_driver_commands(now=None,ttl_s=900):
             resolved_at=now.isoformat(),
         )
         update_driver_command(command)
+        update_action_case_from_delivery(command,'driver_command',now=now)
         expired+=1
     return expired
 
@@ -304,63 +309,200 @@ def expire_stale_reserve_actions(now=None,ttl_s=900):
             resolved_at=now.isoformat(),
         )
         update_reserve_action(action)
+        update_action_case_from_delivery(action,'reserve_release',now=now)
         expired+=1
     return expired
 
-def action_center_items(dispatcher_id=None,now=None):
-    """Combine open driver and reserve work into one dispatcher queue."""
+ACTION_CASE_STATUSES={
+    'pending':('Ожидает выполнения','pending'),
+    'completed_success':('Выполнено успешно','success'),
+    'completed_no_result':('Выполнено без результата','no_result'),
+    'not_delivered':('Не дошло до водителя','not_delivered'),
+    'worsened':('Ситуация ухудшилась','worsened'),
+    'improved_independently':('Ситуация улучшилась','success'),
+}
+ACTION_RESULT_THRESHOLD_S=15.0
+ACTION_SUCCESS_VISIBLE_S=3
+
+def _moscow_time(value=None):
+    stamp=pd.Timestamp.now(tz='Europe/Moscow') if value is None else pd.Timestamp(value)
+    return stamp.tz_localize('Europe/Moscow') if stamp.tzinfo is None else stamp.tz_convert('Europe/Moscow')
+
+def _case_dispatcher(record):
+    dispatcher=record.get('dispatcher') or {}
+    return dispatcher.get('id') or record.get('dispatcher_id')
+
+def stored_action_case(dispatcher_id,tr_id):
+    row=db.execute(
+        'SELECT payload FROM dispatcher_action_cases WHERE dispatcher_id=? AND tr_id=?',
+        (dispatcher_id,int(tr_id)),
+    ).fetchone()
+    return json.loads(row['payload']) if row else None
+
+def stored_action_cases(dispatcher_id,limit=200):
+    rows=db.execute(
+        'SELECT payload FROM dispatcher_action_cases WHERE dispatcher_id=? ORDER BY updated_at DESC LIMIT ?',
+        (dispatcher_id,int(limit)),
+    ).fetchall()
+    return [json.loads(row['payload']) for row in rows]
+
+def save_action_case(case):
+    """Upsert one stable dispatcher+vehicle case without changing its identity."""
+    payload=json.dumps(clean(case),ensure_ascii=False)
+    db.execute('''
+        INSERT INTO dispatcher_action_cases(id,dispatcher_id,tr_id,payload,updated_at)
+        VALUES(?,?,?,?,?)
+        ON CONFLICT(dispatcher_id,tr_id) DO UPDATE SET
+          payload=excluded.payload, updated_at=excluded.updated_at
+    ''',(case['id'],case['dispatcher_id'],int(case['tr_id']),payload,case['updated_at']))
+    db.commit()
+
+def register_action_case(record,kind,now=None):
+    """Start or replace the current attempt in the same dispatcher+vehicle case."""
+    dispatcher_id=_case_dispatcher(record)
+    if not dispatcher_id:
+        return None
+    now=_moscow_time(now or record.get('created_at'))
+    previous=stored_action_case(dispatcher_id,record['tr_id'])
+    decision=record.get('decision') or {}
+    baseline=(record.get('placement') or {}).get('before_prediction_s')
+    if baseline is None:
+        baseline=(decision.get('evidence') or {}).get('prediction_s')
+    if baseline is None:
+        vehicle=action_vehicle(record['tr_id'])
+        baseline=vehicle.get('prediction_s') if vehicle else None
+    status_label,tone=ACTION_CASE_STATUSES['pending']
+    case={
+        'id':previous['id'] if previous else f"case-{dispatcher_id}-{int(record['tr_id'])}",
+        'dispatcher_id':dispatcher_id,'dispatcher':record.get('dispatcher') or {'id':dispatcher_id},
+        'tr_id':int(record['tr_id']),'revision':int((previous or {}).get('revision') or 0)+1,
+        'attempt_id':record['id'],'kind':kind,'action':record.get('action'),
+        'action_title':record.get('action_title') or ('Выпуск резервного ТС' if kind=='reserve_release' else 'Оперативное действие'),
+        'status':'pending','status_label':status_label,'tone':tone,
+        'result_detail':'Действие зарегистрировано. Ожидаем подтверждение исполнения и новый результат по ТС.',
+        'created_at':(previous or {}).get('created_at') or now.isoformat(),
+        'action_started_at':now.isoformat(),'updated_at':now.isoformat(),'visible_until':None,
+        'delivery_confirmed':False,'outcome_source':'outbox',
+        'baseline_prediction_s':baseline,'latest_prediction_s':baseline,
+        'last_observation_at':now.isoformat(),
+    }
+    save_action_case(case)
+    return case
+
+def classify_action_outcome(before,after,delivered=True):
+    """Classify useful change by distance from the timetable, not delay sign."""
+    if before is None or after is None:
+        return 'completed_no_result' if delivered else 'not_delivered'
+    improvement=abs(float(before))-abs(float(after))
+    if improvement>=ACTION_RESULT_THRESHOLD_S:
+        return 'completed_success' if delivered else 'improved_independently'
+    if improvement<=-ACTION_RESULT_THRESHOLD_S and delivered:
+        return 'worsened'
+    return 'completed_no_result' if delivered else 'not_delivered'
+
+def apply_action_case_outcome(case,status,detail,now=None,after=None,source='telemetry'):
+    now=_moscow_time(now)
+    label,tone=ACTION_CASE_STATUSES[status]
+    changed=case.get('status')!=status
+    case.update(
+        status=status,status_label=label,tone=tone,result_detail=detail,
+        updated_at=now.isoformat(),outcome_source=source,
+        latest_prediction_s=after if after is not None else case.get('latest_prediction_s'),
+    )
+    if tone=='success':
+        # Start the three-second acknowledgement only on a real transition;
+        # repeated polling must not keep a green card alive indefinitely.
+        if changed or not case.get('visible_until'):
+            case['visible_until']=(now+pd.to_timedelta(ACTION_SUCCESS_VISIBLE_S,unit='s')).isoformat()
+    else:
+        case['visible_until']=None
+    save_action_case(case)
+    return case
+
+def update_action_case_from_delivery(record,kind,now=None):
+    """Apply a delivery/simulator lifecycle result to the owner's stable case."""
+    dispatcher_id=_case_dispatcher(record)
+    if not dispatcher_id:
+        return None
+    case=stored_action_case(dispatcher_id,record['tr_id'])
+    if not case or case.get('attempt_id')!=record.get('id'):
+        return case
+    now=_moscow_time(now or record.get('resolved_at'))
+    if record.get('status')=='integration_timeout':
+        target='Не получено подтверждение внешнего канала. Действие не считается доставленным или выполненным.'
+        return apply_action_case_outcome(case,'not_delivered',target,now,source='integration_timeout')
+    if record.get('status')!='simulated_completed':
+        return case
+    response=record.get('simulated_response') or {}
+    projection=response.get('projection') or {}
+    before=projection.get('prediction_before_s',case.get('baseline_prediction_s'))
+    after=projection.get('prediction_after_s')
+    status=classify_action_outcome(before,after,delivered=True)
+    details={
+        'completed_success':'Действие подтверждено: ожидаемое отклонение от графика уменьшилось.',
+        'completed_no_result':'Действие выполнено, но заметного улучшения отклонения пока нет.',
+        'worsened':'После выполнения отклонение от графика увеличилось. Нужна новая мера.',
+    }
+    case['delivery_confirmed']=True
+    case['last_observation_at']=now.isoformat()
+    return apply_action_case_outcome(case,status,details[status],now,after,source=response.get('mode') or 'local_simulator')
+
+def reconcile_action_case(case,now=None):
+    """Let a newer vehicle forecast improve or worsen a persistent result."""
+    now=_moscow_time(now)
+    vehicle=action_vehicle(case['tr_id'])
+    if not vehicle or vehicle.get('prediction_s') is None or vehicle.get('stale'):
+        return case
+    observed_at=vehicle.get('T') or vehicle.get('position_time')
+    if not observed_at:
+        return case
+    try:
+        observed=_moscow_time(observed_at)
+        previous=_moscow_time(case.get('last_observation_at') or case.get('action_started_at'))
+    except (TypeError,ValueError):
+        return case
+    if observed<=previous:
+        return case
+    before=case.get('baseline_prediction_s')
+    after=vehicle.get('prediction_s')
+    status=classify_action_outcome(before,after,bool(case.get('delivery_confirmed')))
+    # A queued action remains pending until delivery is confirmed or expires;
+    # merely seeing a new forecast does not prove that it was executed.
+    if case.get('status')=='pending' and not case.get('delivery_confirmed'):
+        case['last_observation_at']=observed.isoformat()
+        case['latest_prediction_s']=after
+        save_action_case(case)
+        return case
+    case['last_observation_at']=observed.isoformat()
+    details={
+        'completed_success':'Новая телеметрия подтверждает улучшение ситуации по ТС.',
+        'improved_independently':'Ситуация по ТС улучшилась, хотя доставка действия не была подтверждена.',
+        'completed_no_result':'По новой телеметрии заметного улучшения пока нет.',
+        'not_delivered':'Доставка не подтверждена; заметного улучшения ситуации по ТС пока нет.',
+        'worsened':'Новая телеметрия показывает увеличение отклонения от графика. Нужна новая мера.',
+    }
+    return apply_action_case_outcome(case,status,details[status],observed,after,source='vehicle_telemetry')
+
+def action_center_items(dispatcher_id,now=None):
+    """Return only the current dispatcher's stable per-vehicle action cases."""
     now=pd.Timestamp.now(tz='Europe/Moscow') if now is None else pd.Timestamp(now)
     if now.tzinfo is None:
         now=now.tz_localize('Europe/Moscow')
-    assigned=None
-    if dispatcher_id:
-        profile=get_dispatcher(dispatcher_id)
-        if profile is None:
-            raise HTTPException(404,'Dispatcher not found')
-        assigned=set(profile['assigned_tr_ids'])
+    profile=get_dispatcher(dispatcher_id)
+    if profile is None:
+        raise HTTPException(404,'Dispatcher not found')
     items=[]
-
-    def add_item(item,kind,created_at,due_at,priority,title,reason,status,action):
-        try:
-            created=pd.Timestamp(created_at)
-            if created.tzinfo is None:created=created.tz_localize('Europe/Moscow')
-            due=pd.Timestamp(due_at)
-            if due.tzinfo is None:due=due.tz_localize('Europe/Moscow')
-        except (TypeError,ValueError):
-            created=now;due=now
-        age_s=max(0.0,(now-created).total_seconds())
-        items.append(clean({
-            'id':item['id'],'kind':kind,'tr_id':int(item['tr_id']),'title':title,'reason':reason,
-            'priority':priority,'status':status,'action':action,'created_at':created.isoformat(),
-            'due_at':due.isoformat(),'due':due<=now,'age_s':round(age_s,1),
-        }))
-
-    for command in stored_driver_commands(limit=200):
-        tr=int(command['tr_id'])
-        if assigned is not None and tr not in assigned:continue
-        # A guardrail rejection is a terminal audit result, not an open task.
-        # It stays in the vehicle history and can be retried after the reason
-        # is fixed, but it must not keep the dispatcher queue red forever.
-        if command.get('status')!='queued_for_integration':continue
-        decision=command.get('decision') or {}
-        due_at=decision.get('next_check_at') or command.get('created_at')
-        priority=decision.get('priority') or 'medium'
-        title='Проверить результат указания водителю'
-        reason=(decision.get('blockers') or [decision.get('goal') or command.get('action_title')])[0]
-        add_item(command,'driver_command',command.get('created_at'),due_at,priority,title,reason,command.get('status'),command.get('action'))
-
-    for reserve in stored_reserve_actions(limit=100):
-        tr=int(reserve['tr_id'])
-        if assigned is not None and tr not in assigned:continue
-        if reserve.get('status')!='queued_for_integration':continue
-        created=pd.Timestamp(reserve.get('created_at') or now)
-        if created.tzinfo is None:created=created.tz_localize('Europe/Moscow')
-        due_at=(created+pd.to_timedelta(300,unit='s')).isoformat()
-        reason='Проверить подтверждение выпуска резервного ТС во внешнем флоте'
-        add_item(reserve,'reserve_release',created.isoformat(),due_at,'high','Проверить заявку на выпуск резерва',reason,reserve.get('status'),'release_reserve')
-
-    priority_rank={'critical':0,'high':1,'medium':2,'low':3,'none':4}
-    items.sort(key=lambda item:(not item['due'],priority_rank.get(item['priority'],9),item['due_at']))
+    for original in stored_action_cases(dispatcher_id):
+        case=reconcile_action_case(dict(original),now)
+        if case.get('tone')=='success' and case.get('visible_until'):
+            try:
+                if _moscow_time(case['visible_until'])<=now:
+                    continue
+            except (TypeError,ValueError):
+                continue
+        items.append(clean(case))
+    tone_rank={'worsened':0,'no_result':1,'not_delivered':2,'pending':3,'success':4}
+    items.sort(key=lambda item:(tone_rank.get(item.get('tone'),9),item.get('updated_at','')))
     return items
 
 def live_track(tr_id,limit=100):
@@ -1693,6 +1835,22 @@ def simulate_driver_response(vehicle,command):
         'note':'Симуляция реакции для прототипа; live-телеметрия и прогноз в state не изменяются.',
     })
 
+def simulate_reserve_response(action):
+    """Confirm a reserve release with the already calculated placement effect."""
+    placement=action.get('placement') or {}
+    before=placement.get('before_prediction_s')
+    after=placement.get('after_prediction_s')
+    now=pd.Timestamp.now(tz='Europe/Moscow').isoformat()
+    return clean({
+        'mode':'local_fleet_simulator','simulated_at':now,'acknowledged':True,'result':'applied',
+        'response':'Флот подтвердил выпуск резервного ТС на рассчитанный участок.',
+        'projection':{
+            'prediction_before_s':before,'prediction_after_s':after,
+            'expected_saved_delay_s':None if before is None or after is None else round(max(0.0,float(before)-float(after)),1),
+        },
+        'note':'Локальная эмуляция подтверждения флота; реальный внешний парк не подключён.',
+    })
+
 
 def driver_decision(vehicle,action):
     """Evaluate a driver instruction and return evidence for the audit trail."""
@@ -2063,6 +2221,8 @@ async def queue_driver_command(body:DriverCommand):
         'decision':decision,
     }
     save_driver_command(command)
+    if decision['allowed']:
+        register_action_case(command,'driver_command')
     return command
 
 @app.post('/api/driver-commands/{command_id}/simulate',**operation('simulate_command'))
@@ -2082,6 +2242,7 @@ async def simulate_driver_command(command_id:str):
     simulation=simulate_driver_response(vehicle,command)
     command.update(status='simulated_completed',delivery_mode='local_driver_simulator',external_delivery=False,simulation_available=False,simulated_response=simulation,resolved_at=simulation['simulated_at'])
     update_driver_command(command)
+    update_action_case_from_delivery(command,'driver_command')
     return command
 
 @app.get('/api/reserve-dispatches',**operation('reserve_dispatches'))
@@ -2123,31 +2284,48 @@ async def release_reserve(body:ReserveDispatch):
         'message':'Заявка подготовлена после проверки горизонта, ETA резерва, уверенности map matching и риска задержки.',
     }
     save_reserve_action(action)
+    register_action_case(action,'reserve_release')
+    return action
+
+@app.post('/api/reserve-dispatches/{action_id}/simulate',**operation('simulate_reserve'))
+async def simulate_reserve_dispatch(action_id:str):
+    action=next((item for item in stored_reserve_actions(limit=2000) if item.get('id')==action_id),None)
+    if action is None:
+        raise HTTPException(404,'Reserve action not found')
+    if action.get('status')=='simulated_completed':
+        return action
+    if action.get('status')!='queued_for_integration':
+        raise HTTPException(status_code=409,detail={'message':'Для этой заявки локальная симуляция больше недоступна','status':action.get('status')})
+    simulation=simulate_reserve_response(action)
+    action.update(
+        status='simulated_completed',delivery_mode='local_fleet_simulator',external_execution=False,
+        simulated_response=simulation,resolved_at=simulation['simulated_at'],
+    )
+    update_reserve_action(action)
+    update_action_case_from_delivery(action,'reserve_release')
     return action
 
 @app.get('/api/action-center',**operation('action_center'))
-async def get_action_center(dispatcher_id:str|None=None):
+async def get_action_center(dispatcher_id:str):
     expire_stale_driver_commands()
     expire_stale_reserve_actions()
     items=action_center_items(dispatcher_id)
-    commands=stored_driver_commands(limit=2000)
-    if dispatcher_id:
-        profile=get_dispatcher(dispatcher_id)
-        assigned=set(profile['assigned_tr_ids']) if profile else set()
-        commands=[command for command in commands if int(command['tr_id']) in assigned]
-    reserve_actions=stored_reserve_actions(limit=2000)
-    if dispatcher_id:
-        reserve_actions=[action for action in reserve_actions if int(action['tr_id']) in assigned]
+    commands=[command for command in stored_driver_commands(limit=2000) if _case_dispatcher(command)==dispatcher_id]
+    reserve_actions=[action for action in stored_reserve_actions(limit=2000) if _case_dispatcher(action)==dispatcher_id]
     reserve_timed_out=sum(action.get('status')=='integration_timeout' for action in reserve_actions)
+    status_counts={key:sum(item.get('status')==key for item in items) for key in ACTION_CASE_STATUSES}
     return {
         'items':items,
         'summary':{
             'open':len(items),
-            'due':sum(bool(item.get('due')) for item in items),
+            'due':status_counts['worsened']+status_counts['completed_no_result']+status_counts['not_delivered'],
             'blocked':sum(command.get('status')=='blocked_by_guardrail' for command in commands),
             'timed_out':sum(command.get('status')=='integration_timeout' for command in commands)+reserve_timed_out,
             'reserve_timed_out':reserve_timed_out,
-            'high_priority':sum(item.get('priority') in {'critical','high'} for item in items),
+            'high_priority':status_counts['worsened'],
+            'pending':status_counts['pending'],'success':status_counts['completed_success']+status_counts['improved_independently'],
+            'no_result':status_counts['completed_no_result'],'not_delivered':status_counts['not_delivered'],
+            'worsened':status_counts['worsened'],
         },
         'as_of':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
         'dispatcher_id':dispatcher_id,

@@ -40,6 +40,7 @@
   let paths = [];
   let actionCenter = [];
   let actionCenterSummary = {};
+  let actionCenterExpiryTimer = null;
 
   let selectedId = null;
 
@@ -730,11 +731,36 @@
       result.innerHTML =
         `<b>Выпуск резерва зарегистрирован</b>
          <span>Заявка ${esc(action.id)} добавлена в локальный integration outbox. ${Number.isFinite(saved) ? `Ожидаемое снижение воздействия: ${saved.toFixed(1)} с.` : ''} Внешняя передача флоту пока не подключена.</span>
+         <button type="button" class="primary" id="reserve-simulate">Эмулировать подтверждение флота</button>
          <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
+      $('reserve-simulate').onclick = () => simulateReserve(action.id);
       $('reserve-clear').onclick = clearReserveScenario;
+      await refresh();
     } catch (error) {
       if (button) button.disabled = false;
       result.innerHTML += `<span class="reserve-blocked">Заявка не зарегистрирована: ${esc(error.message)}</span>`;
+    }
+  }
+
+  async function simulateReserve(actionId) {
+    const button = $('reserve-simulate');
+    if (button) button.disabled = true;
+    try {
+      const action = await api(`/api/reserve-dispatches/${encodeURIComponent(actionId)}/simulate`, {method: 'POST'});
+      const response = action.simulated_response || {};
+      const projection = response.projection || {};
+      const before = projection.prediction_before_s;
+      const after = projection.prediction_after_s;
+      $('reserve-result').innerHTML =
+        `<b>Флот подтвердил выпуск резерва</b>
+         <span>${esc(response.response || 'Подтверждение получено.')} Прогноз отклонения: ${delay(before)} → ${delay(after)}.</span>
+         <span>${esc(response.note || '')}</span>
+         <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
+      $('reserve-clear').onclick = clearReserveScenario;
+      await refresh();
+    } catch (error) {
+      if (button) button.disabled = false;
+      $('reserve-result').insertAdjacentHTML('beforeend', `<span class="reserve-blocked">Подтверждение не получено: ${esc(error.message)}</span>`);
     }
   }
 
@@ -1013,45 +1039,56 @@
     const summary = $('action-center-summary');
     if (!list) return;
 
-    const due = actionCenter.filter(item => item.due).length;
+    if (actionCenterExpiryTimer) {
+      clearTimeout(actionCenterExpiryTimer);
+      actionCenterExpiryTimer = null;
+    }
+    const now = Date.now();
+    actionCenter = actionCenter.filter(item =>
+      item.tone !== 'success' || !item.visible_until || new Date(item.visible_until).getTime() > now
+    );
+    const expiries = actionCenter
+      .filter(item => item.tone === 'success' && item.visible_until)
+      .map(item => new Date(item.visible_until).getTime())
+      .filter(value => Number.isFinite(value) && value > now);
+    if (expiries.length) {
+      actionCenterExpiryTimer = setTimeout(renderActionCenter, Math.max(50, Math.min(...expiries) - now + 20));
+    }
+
     if (summary) {
-      const blocked = Number(actionCenterSummary.blocked || 0);
-      const timedOut = Number(actionCenterSummary.timed_out || 0);
-      const terminal = blocked + timedOut;
-      const terminalLabel = [
-        blocked ? `${blocked} заблокировано` : '',
-        timedOut ? `${timedOut} истекло` : ''
-      ].filter(Boolean).join(' · ');
-      const historyLabel = terminal ? `история: ${terminalLabel}` : '';
-      summary.textContent = actionCenter.length
-        ? `${due ? `${due} требуют внимания · ` : ''}${actionCenter.length} открытых${historyLabel ? ` · ${historyLabel}` : ''}`
-        : terminal
-          ? `Нет открытых действий · ${historyLabel}`
-          : 'Нет открытых действий';
+      const attention = actionCenter.filter(item => ['worsened', 'no_result', 'not_delivered'].includes(item.tone)).length;
+      const pending = actionCenter.filter(item => item.tone === 'pending').length;
+      const success = actionCenter.filter(item => item.tone === 'success').length;
+      summary.textContent = [
+        attention ? `${attention} требуют решения` : '',
+        pending ? `${pending} ожидают ответа` : '',
+        success ? `${success} успешно` : ''
+      ].filter(Boolean).join(' · ') || 'Нет активных результатов';
     }
 
     if (!actionCenter.length) {
-      list.innerHTML = '<p class="empty">Открытых действий нет.</p>';
+      list.innerHTML = '<p class="empty">Ваших активных действий пока нет. Выберите ТС и отправьте указание или выпустите резерв.</p>';
       return;
     }
 
     list.innerHTML = actionCenter.slice(0, 8).map(item => {
-      const status = item.status === 'blocked_by_guardrail'
-        ? 'Заблокировано правилами'
-        : item.due
-          ? 'Проверить сейчас'
-          : `Проверить в ${time(item.due_at)}`;
-      const priority = ['critical', 'high', 'medium', 'low'].includes(item.priority)
-        ? item.priority
-        : 'medium';
-      return `<button class="action-center-item ${item.due ? 'is-due' : ''}" data-id="${item.tr_id}" type="button">
-        <i class="action-center-mark ${priority}"></i>
-        <span class="action-center-copy"><b>${esc(item.title)}</b><small>ТС ${item.tr_id} · ${esc(item.reason)}</small></span>
-        <span class="action-center-status">${esc(status)}</span>
+      const tone = ['success', 'no_result', 'not_delivered', 'worsened', 'pending'].includes(item.tone)
+        ? item.tone
+        : 'pending';
+      const icons = {success: '✓', no_result: '!', not_delivered: '↛', worsened: '↑', pending: '…'};
+      const attempt = Number(item.revision || 1);
+      return `<button class="action-center-item is-${tone}" data-id="${item.tr_id}" data-case-id="${esc(item.id)}" type="button" aria-label="ТС ${item.tr_id}: ${esc(item.status_label)}">
+        <span class="action-center-mark" aria-hidden="true">${icons[tone]}</span>
+        <span class="action-center-copy">
+          <b>ТС ${item.tr_id} · ${esc(item.action_title)}</b>
+          <small>${esc(item.result_detail || '')}</small>
+          <small class="action-center-meta">Ваше действие · попытка ${attempt} · ${time(item.updated_at)}</small>
+        </span>
+        <span class="action-center-status">${esc(item.status_label)}</span>
       </button>`;
     }).join('');
 
-    document.querySelectorAll('.action-center-item').forEach(item => {
+    document.querySelectorAll('#action-center-list .action-center-item').forEach(item => {
       item.onclick = () => openVehicle(Number(item.dataset.id));
     });
   }
