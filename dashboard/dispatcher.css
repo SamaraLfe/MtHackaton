@@ -2353,14 +2353,9 @@ html.theme-dark .prediction-panel {
 }
 
 html.theme-dark .prediction-panel p,
-html.theme-dark .decision-panel p:not(.eyebrow),
 html.theme-dark .explanation-section p,
 html.theme-dark .debug-speed-section > p:not(.eyebrow) {
   color: #b4c5d5;
-}
-
-html.theme-dark .decision-panel {
-  background: #173227;
 }
 
 html.theme-dark .action-plan {

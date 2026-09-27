@@ -28,7 +28,7 @@
     new Map();
 
   const LIVE_MOVE_DURATION_MS =
-    4800;
+    900;
 
   let map = null;
 

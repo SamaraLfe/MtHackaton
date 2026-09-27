@@ -47,6 +47,11 @@ LIVE_FALLBACK_S = int(
         '60'
     )
 )
+# Inference follows accepted telemetry, not a second timer. Keep a small
+# per-vehicle floor for unusually chatty sources and a shared failure backoff.
+LIVE_FORECAST_INTERVAL_S=max(0.0,float(os.getenv('LIVE_FORECAST_INTERVAL_S','1')))
+ML_RETRY_INTERVAL_S=max(0.0,float(os.getenv('ML_RETRY_INTERVAL_S','5')))
+ml_retry_after=0.0
 history=defaultdict(lambda:deque(maxlen=1000));vehicles={};archive_vehicles={};counters=defaultdict(int)
 last_telemetry_received_at=0.0
 deviations={};position_offsets={};position_states={};last_forecast={};state={'mode':'replay','clock':None,'index':0,'snapshot':False,'ingest_paused':False}
@@ -330,7 +335,8 @@ ACTION_RESULT_THRESHOLD_S=15.0
 ACTION_SUCCESS_VISIBLE_S=3
 
 def _moscow_time(value=None):
-    stamp=pd.Timestamp.now(tz='Europe/Moscow') if value is None else pd.Timestamp(value)
+    stamp=pd.Timestamp.now(tz='Europe/Moscow') if value is None else (
+        timestamp(value) if isinstance(value,(int,float,np.integer,np.floating)) else pd.Timestamp(value))
     return stamp.tz_localize('Europe/Moscow') if stamp.tzinfo is None else stamp.tz_convert('Europe/Moscow')
 
 def _case_dispatcher(record):
@@ -456,7 +462,7 @@ def reconcile_action_case(case,now=None):
     """Let a newer vehicle forecast improve or worsen a persistent result."""
     now=_moscow_time(now)
     vehicle=action_vehicle(case['tr_id'])
-    if not vehicle or vehicle.get('prediction_s') is None or vehicle.get('stale'):
+    if not vehicle or vehicle.get('prediction_s') is None or vehicle.get('stale') or vehicle.get('degraded'):
         return case
     observed_at=vehicle.get('T') or vehicle.get('position_time')
     if not observed_at:
@@ -535,11 +541,9 @@ def align_schedule_to_event_day(frame, event_time):
     schedule_start=pd.to_datetime(result['ts'].min(), unit='s', utc=True).tz_convert('Europe/Moscow').normalize()
     shift=event_local.normalize().timestamp()-schedule_start.timestamp()
     result['ts']=result['ts'].astype(float)+shift
-    # Preserve the wall-clock plan time from the dataset while changing only
-    # its calendar day. `ts` remains the authoritative epoch for matching.
-    original_times=pd.to_datetime(frame['time_begin'],format='mixed')
-    delta_days=(event_local.date()-pd.Timestamp(original_times.min()).date()).days
-    result['time_begin']=(original_times+pd.to_timedelta(delta_days,unit='D')).map(lambda value:value.isoformat(sep=' '))
+    # Derive both representations from one epoch. Naive dataset times are UTC,
+    # not Moscow wall time: independently replacing their date breaks nights.
+    result['time_begin']=pd.to_datetime(result['ts'],unit='s',utc=True).dt.tz_localize(None).map(lambda value:value.isoformat(sep=' '))
     return result
 
 def clean(value):
@@ -656,7 +660,7 @@ def business_kpis(items):
         operational.append(item)
         prediction=item.get('prediction_s')
         probability=item.get('late_probability')
-        if item.get('stale') or prediction is None or probability is None:
+        if item.get('stale') or item.get('degraded') or prediction is None or probability is None:
             continue
         try:
             prediction=float(prediction); probability=float(probability)
@@ -730,7 +734,8 @@ def reserve_placement(vehicle):
     index=nearest_index
     if target_epoch is not None and vehicle.get('T') is not None and len(route)>1:
         try:
-            current_raw_ts=epoch(vehicle['T'])-schedule_shift
+            observed_ts=float(vehicle['position_time']) if vehicle.get('position_time') is not None else epoch(vehicle['T'])
+            current_raw_ts=observed_ts-schedule_shift-float(vehicle.get('current_deviation_s') or 0.0)
             temporal_index=int(np.searchsorted(route.ts.to_numpy(dtype=float),current_raw_ts,side='right')-1)
             temporal_index=max(0,min(len(route)-2,temporal_index))
             if temporal_index<target_index:
@@ -754,7 +759,7 @@ def reserve_placement(vehicle):
         target_index=min(len(route)-1,index+1)
     target=route.iloc[target_index]
     track=[{'lon':float(match.get('projected_lon',route.iloc[index].lon)),'lat':float(match.get('projected_lat',route.iloc[index].lat)),'simulated':True}]
-    for row in route.iloc[index+1:min(len(route),index+13)].itertuples():
+    for row in route.iloc[index+1:target_index+1].itertuples():
         track.append({'lon':float(row.lon),'lat':float(row.lat),'simulated':True})
     current=float(vehicle.get('current_deviation_s') or 0)
     raw_forecast=vehicle.get('prediction_s')
@@ -762,8 +767,8 @@ def reserve_placement(vehicle):
     positive_delay=max(0.0,forecast,current)
     distance_to_target=0.0
     if len(route)>1:
-        first_fraction=1.0-float(match.get('fraction',0.0)) if match.get('segment_index')==index else 1.0
-        distance_to_target+=haversine(float(match.get('projected_lon',route.iloc[index].lon)),float(match.get('projected_lat',route.iloc[index].lat)),route.iloc[index+1].lon,route.iloc[index+1].lat)*first_fraction
+        # The projected point already removes the completed segment fraction.
+        distance_to_target+=haversine(float(match.get('projected_lon',route.iloc[index].lon)),float(match.get('projected_lat',route.iloc[index].lat)),route.iloc[index+1].lon,route.iloc[index+1].lat)
         for left,right in zip(route.iloc[index+1:target_index].itertuples(),route.iloc[index+2:target_index+1].itertuples()):
             distance_to_target+=haversine(left.lon,left.lat,right.lon,right.lat)
 
@@ -780,7 +785,7 @@ def reserve_placement(vehicle):
     planned_speed_kmh=distance_to_target/planned_time_s*3.6 if distance_to_target else 0.0
     reserve_speed_kmh=round(min(60.0,max(15.0,planned_speed_kmh*1.15 if planned_speed_kmh else 25.0)),1)
     reserve_eta_s=distance_to_target/(reserve_speed_kmh/3.6) if distance_to_target else 0.0
-    horizon=vehicle.get('horizon_s')
+    horizon=vehicle.get('remaining_horizon_s',vehicle.get('horizon_s'))
     if horizon is None and vehicle.get('T') is not None and vehicle.get('target_time_begin') is not None:
         try:horizon=epoch(vehicle['target_time_begin'])-epoch(vehicle['T'])
         except (TypeError,ValueError):horizon=None
@@ -800,7 +805,9 @@ def reserve_placement(vehicle):
     horizon_factor=min(1.0,max(0.0,(horizon or 0.0)/900.0))
     slack_factor=min(1.0,max(0.0,(slack_s or 0.0)/max(horizon or 1.0,1.0)))
     effect_ratio=round(min(0.35,0.05+0.20*confidence*horizon_factor*slack_factor),3) if feasible else 0.0
-    relief=round(positive_delay*effect_ratio,1) if positive_delay else 0.0
+    # A relief heuristic must not turn a small delay into an early arrival
+    # just because the current deviation is much larger than the forecast.
+    relief=round(min(max(0.0,forecast),positive_delay*effect_ratio),1) if positive_delay else 0.0
     after_prediction=round(forecast-relief if forecast>0 else forecast,1)
     after_current=round(current-min(max(0.0,current),relief),1)
     return {
@@ -929,7 +936,7 @@ def match_stop(tr_id, lon, lat, segment_hint=None):
             'distance_to_next_stop_m':round(distance_to_next,2),'direction_degrees':round(best['heading'],1),
             'direction':'along_planned_trajectory','confidence':round(max(0.,1-best['distance']/250),3)}
 
-def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fraction_hint=None, allow_slow_stop=True):
+def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fraction_hint=None, allow_slow_stop=True, calibrate_start=True):
     """Estimate live schedule offset from the vehicle's position on the plan.
 
     The emulator moves between planned stop coordinates, so a stop-arrival-only
@@ -977,6 +984,7 @@ def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fracti
                 else _segment_projection(lon, lat, start.lon, start.lat, end.lon, end.lat)[0]
             )
         raw_expected = float(start.ts) + fraction * max(0.0, float(end.ts) - float(start.ts))
+        match['fraction']=round(fraction,6)
     # A near-zero speed packet at a planned stop is the one case where the
     # feed gives us an observed arrival signal rather than only a geometric
     # estimate.  Keep this explicit so the UI/API can distinguish it.
@@ -1004,7 +1012,7 @@ def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fracti
             # than half a route as a new source pass while preserving normal
             # sub-hour operational deviations.
             calibration_threshold=max(3600.0, period * 0.5)
-            offset = raw_gap if abs(raw_gap) > calibration_threshold else 0.0
+            offset = raw_gap if calibrate_start and abs(raw_gap) > calibration_threshold else 0.0
             position_offsets[tr_id] = offset
         offset = float(offset)
         expected = planned + offset
@@ -1037,7 +1045,7 @@ def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fracti
     # produce a permanent multi-hour error.  Subsequent packets then change
     # the value as the vehicle progresses through scheduled segments.
     if tr_id not in position_offsets:
-        position_offsets[tr_id] = float(ts) - raw_expected
+        position_offsets[tr_id] = float(ts) - raw_expected if calibrate_start else 0.0
     expected = raw_expected + position_offsets[tr_id]
     # If a route wraps, keep the equivalent planned timestamp closest to the
     # previous live estimate rather than jumping back to the source day.
@@ -1061,21 +1069,36 @@ def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fracti
     }
 
 async def forecast(point,records,source):
+    global ml_retry_after
     t=epoch(point['T']);tr=int(point['tr_id'])
     schedule_offset=float(point.get('schedule_offset',0) or 0)
     stop=target_for(tr,t,int(point['target_stop_id']),schedule_offset,same_day=source=='live')
     if stop is None or int(stop['tt_action_item_id'])!=int(point['target_stop_id']) or abs(stop['ts']-epoch(point['target_time_begin']))>1:
         raise ValueError('Точка не соответствует первой остановке в окне (T+10, T+15]')
     features=build_one(point,records,stop)
-    start=time.perf_counter();degraded=False
+    start=time.perf_counter();degraded=False;request_started=False
     try:
+        if time.monotonic()<ml_retry_after:
+            counters['ml_backoff_skips']+=1
+            raise httpx.ConnectError('ML retry backoff')
         schedule_window=schedule[(schedule.tr_id==tr)&(schedule.ts+schedule_offset>=t-1800)&(schedule.ts+schedule_offset<=t+1800)].copy()
         if schedule_offset:
             schedule_window['ts']=schedule_window['ts'].astype(float)+schedule_offset
             schedule_window['time_begin']=(pd.to_datetime(schedule_window['time_begin'],format='mixed')+pd.to_timedelta(schedule_offset,unit='s')).map(lambda value:value.isoformat(sep=' '))
+        request_started=True
         response=await client.post(ML_URL+'/predict_v5',json={'points':[clean(point)],'histories':[[clean(x) for x in records]],'schedules':[[clean(x) for x in schedule_window.to_dict('records')]]});response.raise_for_status()
         result=response.json()['predictions'][0]
-    except (httpx.HTTPError,KeyError,ValueError):
+        if not np.isfinite(float(result['prediction_s'])):
+            raise ValueError('Non-finite ML prediction')
+        probability=result['late_probability']
+        if probability is not None and not (np.isfinite(float(probability)) and 0<=float(probability)<=1):
+            raise ValueError('Invalid ML probability')
+        ml_retry_after=0.0
+    except (httpx.HTTPError,KeyError,IndexError,TypeError,ValueError) as exc:
+        # A request-specific 4xx is not evidence that ML is unavailable for
+        # the rest of the fleet. Transport/server/invalid-response failures are.
+        client_error=isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code<500
+        if request_started and not client_error:ml_retry_after=time.monotonic()+ML_RETRY_INTERVAL_S
         counters['ml_failures']+=1;degraded=True
         result=dict(prediction_s=point['cur_dev_s'],lower_s=None,upper_s=None,late_probability=None,model='persistence_fallback')
     counters['last_inference_ms']=round((time.perf_counter()-start)*1000,2)
@@ -1129,13 +1152,26 @@ async def ingest(event):
         return
     tr=event['tr_id'];ts=epoch(event['event_time'])
     if ts>time.time()+60: raise ValueError('Телеметрия из будущего')
-    event_day=timestamp(event['event_time']).date()
-    if state['mode']=='live' and live_schedule_day!=event_day:
-        schedule=align_schedule_to_event_day(schedule, event['event_time'])
-        live_schedule_day=event_day
     records=history[tr]
     if records and ts<=records[-1]['ts']:
         counters['late_or_duplicate_packets']+=1;return
+    event_day=timestamp(event['event_time']).date()
+    # A late packet from another vehicle must not move the whole fleet's
+    # schedule back to yesterday after midnight.
+    if state['mode']=='live' and live_schedule_day is not None and event_day<live_schedule_day:
+        counters['late_or_duplicate_packets']+=1;return
+    if state['mode']=='live' and live_schedule_day!=event_day:
+        aligned_schedule=align_schedule_to_event_day(schedule, event['event_time'])
+        day_shift=float(aligned_schedule.ts.min()-schedule.ts.min()) if not schedule.empty else 0.0
+        # Synthetic sources run continuously across midnight. Moving the
+        # calendar anchor must not move their already calibrated source clock.
+        for source_tr,offset in list(position_offsets.items()):
+            source_rows=history.get(source_tr)
+            source_row=source_rows[-1] if source_rows else {}
+            if source_row.get('telemetry_source') in {'ndtp_nav00','custom_ndtp_nav00'} or source_row.get('simulated'):
+                position_offsets[source_tr]=float(offset)-day_shift
+        schedule=aligned_schedule
+        live_schedule_day=event_day
     last_telemetry_received_at=time.time()
     row=dict(event,ts=ts);records.append(row);counters['telemetry_rows']+=1
     if state['mode']!='live':
@@ -1193,6 +1229,7 @@ async def ingest(event):
             segment_hint=projection_segment_hint,
             fraction_hint=projected.get('fraction') if projection_segment_hint is not None else None,
             allow_slow_stop=event.get('telemetry_source') not in {'ndtp_nav00', 'custom_ndtp_nav00'},
+            calibrate_start=event.get('telemetry_source') in {'ndtp_nav00', 'custom_ndtp_nav00'} or bool(event.get('simulated')),
         )
         if position_match is not None:
             deviations[tr] = {
@@ -1201,15 +1238,18 @@ async def ingest(event):
                 'expected_ts': float(position_match['expected_ts']),
                 'position_match': position_match,
             }
+    if position_match is None:
+        deviations.pop(tr,None)
 
     # Position is refreshed for every valid NDTP packet.
     # ML inference stays throttled separately below.
     current = vehicles.get(tr)
 
-    if current is not None and event['location_valid']:
-        current['lon'] = event['lon']
-        current['lat'] = event['lat']
-        current['position_time'] = ts
+    if current is not None:
+        if event['location_valid']:
+            current['lon'] = event['lon']
+            current['lat'] = event['lat']
+            current['position_time'] = ts
         current['telemetry_source'] = event.get(
             'telemetry_source',
             'unknown',
@@ -1235,11 +1275,14 @@ async def ingest(event):
             current['deviation_estimated'] = False
             current['position_match'] = None
 
-    if ts - last_forecast.get(tr, 0) < 30:
-        return
-    last_forecast[tr]=ts
     schedule_offset=float(position_offsets.get(tr,0) or 0) if position_match is not None else 0.0
     stop=target_for(tr,ts,time_offset=schedule_offset,same_day=True)
+    target_id=int(stop['tt_action_item_id']) if stop is not None else None
+    # Target changes (including leaving the strict 10–15 min window) are
+    # applied immediately even inside the normal inference rate limit.
+    if current is not None and current.get('target_stop_id')==target_id and ts-last_forecast.get(tr,float('-inf'))<LIVE_FORECAST_INTERVAL_S:
+        return
+    last_forecast[tr]=ts
     if stop is None:
         vehicles[tr]=dict(tr_id=tr,T=timestamp(event['event_time']).isoformat(),level='unknown',reason='Нет плановой остановки через 10–15 минут',reason_is_hypothesis=True,lon=event['lon'] if event['location_valid'] else None,lat=event['lat'] if event['location_valid'] else None,source='live',telemetry_source=event.get('telemetry_source','unknown'),position_adjusted=bool(event.get('position_adjusted',False)),position_origin='planned_route_projection' if event.get('position_adjusted') else None,prediction_s=None,late_probability=None,position_time=ts)
         return
@@ -1312,7 +1355,8 @@ async def on_ndtp(event):
 
 @asynccontextmanager
 async def lifespan(app):
-    global schedule,schedule_template,traffic,points,mapping,client,model_meta,last_telemetry_received_at
+    global schedule,schedule_template,traffic,points,mapping,client,model_meta,last_telemetry_received_at,ml_retry_after
+    ml_retry_after=0.0
     init_store()
     schedule = load_schedule(
         DATA / 'validate/schedule_plan.csv'
@@ -1429,6 +1473,7 @@ async def lifespan(app):
     except asyncio.CancelledError:
         pass
     server.close();await server.wait_closed();await client.aclose()
+    ml_retry_after=0.0
     if db is not None:db.close()
 
 app=FastAPI(title='Такт — Backend API',version='1.1.0',lifespan=lifespan,
@@ -1557,6 +1602,8 @@ async def observability():
             'queues':{'telemetry_points_in_memory':sum(len(items) for items in history.values()),
                       'driver_commands_persisted':db.execute('SELECT COUNT(*) FROM driver_commands').fetchone()[0],
                       'active_simulations':sum(run.get('status') in {'queued','running'} for run in simulation_runs.values())},
+            'recalculation':{'live_forecast_interval_s':LIVE_FORECAST_INTERVAL_S,
+                             'ml_retry_interval_s':ML_RETRY_INTERVAL_S},
             'counters':dict(counters)}
 
 @app.get('/api/dispatchers',**operation('dispatchers'))
@@ -1670,6 +1717,12 @@ def operational_vehicle(tr, now):
     packet_ts=records[-1]['ts'] if records else item.get('position_time')
     age=max(0,now-float(packet_ts)) if packet_ts is not None else None
     item['telemetry_age_s']=round(age,1) if age is not None else None
+    # Keep horizon_s as the immutable model input at T. Decisions use the
+    # remaining wall-clock horizon, which keeps decreasing between packets.
+    if item.get('T') is not None:
+        item['forecast_age_s']=round(max(0.0,now-epoch(item['T'])),1)
+    if item.get('target_time_begin') is not None:
+        item['remaining_horizon_s']=round(epoch(item['target_time_begin'])-now,1)
     item['telemetry_source']=item.get('telemetry_source') or (records[-1].get('telemetry_source') if records else None)
     ended=(seen and len(route)>1 and match.get('segment_index')==len(route)-2
            and float(match.get('fraction',0))>=.995 and item.get('lon') is not None
@@ -1863,8 +1916,8 @@ def driver_decision(vehicle,action):
     prediction=vehicle.get('prediction_s')
     current=vehicle.get('current_deviation_s')
     probability=vehicle.get('late_probability')
-    horizon=vehicle.get('horizon_s')
-    stale=bool(vehicle.get('stale')) or vehicle.get('connection_state') in {'offline','waiting'}
+    horizon=vehicle.get('remaining_horizon_s',vehicle.get('horizon_s'))
+    stale=bool(vehicle.get('stale')) or bool(vehicle.get('degraded')) or vehicle.get('connection_state') in {'offline','waiting','paused','historical'}
     prediction=float(prediction) if prediction is not None else None
     current=float(current) if current is not None else None
     probability=float(probability) if probability is not None else None
@@ -1883,9 +1936,9 @@ def driver_decision(vehicle,action):
         if stale:blockers.append('Нет свежей телеметрии')
         if prediction is None or prediction<120:blockers.append('Прогноз не показывает задержку не менее 120 секунд')
         if probability is None or probability<.35:blockers.append('Риск ниже порога активного вмешательства')
-        if horizon is not None and horizon<600:blockers.append('До контрольной точки осталось меньше 10 минут')
+        if horizon is None or horizon<600:blockers.append('Нет подтверждённого горизонта не менее 10 минут')
         allowed=not blockers
-        recoverable=round(min(max(0.0,prediction or 0.0),max(30.0,(current or prediction or 0.0)*.25)),1) if allowed else 0.0
+        recoverable=round(min(max(0.0,prediction or 0.0),max(30.0,(current if current is not None else prediction or 0.0)*.25)),1) if allowed else 0.0
         goal='Сократить отставание только в рамках ПДД и подтверждённой дорожной обстановки.'
         effect={'type':'heuristic','recoverable_delay_s':recoverable,'note':'Оценка потенциала, не обещание фактического сокращения.'}
     elif action=='slow_down_safely':
@@ -2580,7 +2633,8 @@ async def execute_simulation(run):
                 run['status']='cancelled';run['cancelled_at']=pd.Timestamp.now(tz='Europe/Moscow').isoformat();save_simulation(run)
                 return
             event={'tr_id':run['tr_id'],'event_time':timestamp(now+index*run['interval_s']).isoformat(),'lon':lon+index*0.00005,'lat':lat+index*0.00003,'speed':speed,'location_valid':True,'simulated':True,'simulation_id':run['id']}
-            await ingest(event)
+            async with lock:
+                await ingest(event)
             run['events'].append({'sequence':index+1,'event_time':event['event_time'],'lon':event['lon'],'lat':event['lat'],'speed_kmh':speed,'accepted':True,'simulated':True})
             run['progress']={'completed':index+1,'total':run['count']}
             save_simulation(run)
@@ -2649,7 +2703,9 @@ async def admin_simulation(body:AdminSimulation):
     accepted=0;now=time.time()-body.count*body.interval_s
     for index in range(body.count):
         event={'tr_id':body.tr_id,'event_time':timestamp(now+index*body.interval_s).isoformat(),'lon':lon+index*0.00005,'lat':lat+index*0.00003,'speed':speed,'location_valid':True}
-        await ingest(event);accepted+=1
+        async with lock:
+            await ingest(event)
+        accepted+=1
     return {'accepted':accepted,'scenario':body.scenario,'tr_id':body.tr_id,'role':'admin','message':'Simulation events injected into live pipeline'}
 
 @app.get('/api/network',**operation('network'))

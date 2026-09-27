@@ -115,14 +115,16 @@
    * Опрос запускается и после первого выбора профиля, и после перезагрузки.
    * Один цикл намеренно ждёт завершения refresh() перед следующим запросом.
    */
-  const REFRESH_INTERVAL_MS = 2000;
+  const REFRESH_INTERVAL_MS = 1000;
   let refreshTimer = null;
   let pollingActive = false;
   let pollingGeneration = 0;
   let refreshPromise = null;
+  let networkCache = null;
+  let networkLoadedAt = 0;
 
   /* Данные, которые не должны мигать при каждом обновлении карты. */
-  const DETAIL_CACHE_TTL_MS = 10000;
+  const DETAIL_CACHE_TTL_MS = 3000;
   const detailSupplementCache = new Map();
   let detailRenderVersion = 0;
 
@@ -222,7 +224,8 @@
           {
             timeZone: 'Europe/Moscow',
             hour: '2-digit',
-            minute: '2-digit'
+            minute: '2-digit',
+            second: '2-digit'
           }
         )
       : '—';
@@ -234,7 +237,7 @@
   };
   const delay = value => !Number.isFinite(value) ? '—' : `${value < 0 ? '−' : '+'}${duration(value)}`;
   const expectedDelaySeconds = vehicle => {
-    if (vehicle.stale || !Number.isFinite(vehicle.prediction_s) || !Number.isFinite(vehicle.late_probability)) return null;
+    if (vehicle.stale || vehicle.degraded || !Number.isFinite(vehicle.prediction_s) || !Number.isFinite(vehicle.late_probability)) return null;
     return Math.max(0, vehicle.prediction_s) * Math.min(1, Math.max(0, vehicle.late_probability));
   };
   const businessFromVehicles = items => {
@@ -248,7 +251,7 @@
   };
   const predictionText = vehicle => {
     if (vehicle.trip_status === 'completed') return 'Рейс завершён';
-    if (!Number.isFinite(vehicle.prediction_s) || vehicle.stale) return vehicle.status_label || 'Нет актуального прогноза';
+    if (!Number.isFinite(vehicle.prediction_s) || vehicle.stale || vehicle.degraded) return vehicle.status_label || 'Нет актуального прогноза';
     if (Math.round(vehicle.prediction_s) === 0) return 'По расписанию';
     return `${vehicle.prediction_s > 0 ? 'Опоздание' : 'Раньше плана'} на ${duration(vehicle.prediction_s)}`;
   };
@@ -957,7 +960,7 @@
 
     const processingMs = Number(counters.last_inference_ms);
     $('kpi-processing').textContent = Number.isFinite(processingMs) ? `${processingMs} мс` : '—';
-    $('kpi-coverage').textContent = Number.isFinite(Number(business.coverage_pct))
+    $('kpi-coverage').textContent = Number.isFinite(business.coverage_pct)
       ? `${Math.round(Number(business.coverage_pct))}%`
       : '—';
 
@@ -1654,7 +1657,7 @@
        NORMAL VEHICLE
        ----------------------------------------------------- */
 
-    const expectedArrival = Number.isFinite(vehicle.prediction_s) && vehicle.target_time_begin && !vehicle.stale
+    const expectedArrival = Number.isFinite(vehicle.prediction_s) && vehicle.target_time_begin && !vehicle.stale && !vehicle.degraded
       ? new Date(new Date(vehicle.target_time_begin).getTime() + vehicle.prediction_s * 1000).toISOString() : null;
     const risk = Number.isFinite(vehicle.late_probability) && !vehicle.stale
       ? `${Math.round(vehicle.late_probability * 100)}%` : '—';
@@ -1672,6 +1675,8 @@
           end: $('command-text').selectionEnd
         }
       : null;
+    const activeDebugSpeed = document.activeElement?.id === 'debug-speed-value';
+    const previousActionPlan = $('action-plan')?.dataset.cacheKey === supplementKey ? $('action-plan') : null;
     $('vehicle-detail').innerHTML =
       `<div class="vehicle-title"><p class="eyebrow">РЕЙС</p><h2>ТС ${vehicle.tr_id}</h2><p>${esc(vehicle.route_start_stop || '—')} → ${esc(vehicle.route_end_stop || '—')}</p></div>
       <div class="detail-status"><span class="tag ${vehicle.level}">${esc(vehicle.status_label || labels[vehicle.level])}</span></div>
@@ -1752,6 +1757,11 @@
 
       ${debugSpeedControlHtml(vehicle)}`;
 
+    // Keep the reaction node itself between frequent metric redraws. This
+    // preserves hover/focus and prevents CSS transitions from restarting.
+    if (previousActionPlan) $('action-plan').replaceWith(previousActionPlan);
+    $('action-plan').dataset.cacheKey = supplementKey;
+
     /*
      * Состояние details обновляем
      * сразу по пользовательскому toggle.
@@ -1810,6 +1820,7 @@
 
     const debugSpeedInput = $('debug-speed-value');
     if (debugSpeedInput) {
+      if (activeDebugSpeed) debugSpeedInput.focus({preventScroll: true});
       debugSpeedInput.oninput = event => {
         debugSpeedDraft = {trId: vehicle.tr_id, value: event.target.value};
       };
@@ -2072,7 +2083,13 @@
             )}`
           ),
 
-          api('/api/network'),
+          networkCache && Date.now() - networkLoadedAt < 60000
+            ? Promise.resolve(networkCache)
+            : api('/api/network').then(network => {
+                networkCache = network;
+                networkLoadedAt = Date.now();
+                return network;
+              }),
 
           api(
             `/api/action-center?dispatcher_id=${encodeURIComponent(

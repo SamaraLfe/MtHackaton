@@ -19,6 +19,8 @@ services:
       OFFICIAL_EMULATOR_URL: http://emulator:18080
       NDTP_PORT: "9201"
       START_MODE: live
+      LIVE_FORECAST_INTERVAL_S: "1"
+      ML_RETRY_INTERVAL_S: "5"
     volumes:
       - ./dataset:/app/dataset:ro
       - ./artifacts:/app/artifacts:ro

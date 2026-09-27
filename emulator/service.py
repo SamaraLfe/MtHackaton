@@ -390,6 +390,37 @@ def initial_vehicle_state(
     }
 
 
+def debug_route_clock(vehicle: dict, elapsed: float, elapsed_s: float, speed_kmh: float) -> float:
+    """Advance by metres, then map that distance back onto the plan clock.
+
+    One pace multiplier is incorrect across segments with different planned
+    speeds. Repeated coordinates are zero-distance segments, not a division
+    by zero; an entirely stationary route keeps its current clock.
+    """
+    path, timings = vehicle['path'], vehicle['timings']
+    if speed_kmh <= 0 or elapsed_s <= 0:
+        return elapsed
+    distances = vehicle.get('_debug_cumulative_m')
+    if distances is None:
+        distances = [0.0]
+        for start, end in zip(path, path[1:]):
+            distances.append(distances[-1] + haversine_m(*start, *end))
+        vehicle['_debug_cumulative_m'] = distances
+    if distances[-1] <= 0:
+        return elapsed
+    index = max(0, min(len(path)-2, bisect.bisect_right(timings, elapsed)-1))
+    fraction = min(1.0, max(0.0, (elapsed-timings[index])/max(1.0, timings[index+1]-timings[index])))
+    position = distances[index] + fraction*(distances[index+1]-distances[index])
+    position += speed_kmh/3.6*elapsed_s
+    if position > distances[-1]:
+        position %= distances[-1]
+    if position == distances[-1]:
+        return timings[-1]
+    index = max(0, min(len(path)-2, bisect.bisect_right(distances, position)-1))
+    fraction = (position-distances[index])/(distances[index+1]-distances[index])
+    return timings[index] + fraction*(timings[index+1]-timings[index])
+
+
 def advance_vehicle(
     vehicle: dict,
     state: dict,
@@ -408,21 +439,11 @@ def advance_vehicle(
         # at a fixed road speed.  This is still a synthetic source, but its
         # points now stay on the same segment the backend forecasts.
         route_duration = max(1.0, timings[-1])
-        elapsed_before = state["elapsed_route_s"]
-        index_before = max(0, min(len(path) - 2, bisect.bisect_right(timings, elapsed_before) - 1))
-        while index_before < len(path) - 2 and timings[index_before + 1] <= timings[index_before]:
-            index_before += 1
-        planned_before = haversine_m(*path[index_before], *path[index_before + 1]) / max(
-            1.0,
-            timings[index_before + 1] - timings[index_before],
-        ) * 3.6
         debug_speed = debug_speed_overrides.get(vehicle["tr_id"])
-        pace_factor = (
-            debug_speed / max(1.0, planned_before)
-            if debug_speed is not None
-            else state.get("pace_factor", 1.0)
-        )
-        state["elapsed_route_s"] += elapsed_s * pace_factor
+        if debug_speed is not None:
+            state['elapsed_route_s'] = debug_route_clock(vehicle,state['elapsed_route_s'],elapsed_s,debug_speed)
+        else:
+            state["elapsed_route_s"] += elapsed_s * state.get("pace_factor", 1.0)
         if state["elapsed_route_s"] > route_duration:
             state["elapsed_route_s"] %= route_duration
         elapsed = state["elapsed_route_s"]
