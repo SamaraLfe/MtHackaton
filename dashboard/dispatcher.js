@@ -53,6 +53,7 @@
   let reserveScenario = null;
   let lastRuntime = {};
   let commandFeedback = null;
+  let commandDraft = null;
 
   /*
    * Состояние раскрытых блоков карточки.
@@ -61,6 +62,24 @@
    */
   let explanationOpen = false;
   let commandHistoryOpen = false;
+
+  function resetCommandDraft() {
+    commandDraft = null;
+    commandFeedback = null;
+  }
+
+  function commandState(vehicle, initialAction = 'contact') {
+    if (commandDraft?.trId !== vehicle.tr_id) {
+      const action = actionText[initialAction] ? initialAction : 'contact';
+      commandDraft = {
+        trId: vehicle.tr_id,
+        action,
+        message: actionText[action],
+        sending: false
+      };
+    }
+    return commandDraft;
+  }
 
   function commandFeedbackHtml(vehicleId) {
     const feedback = commandFeedback;
@@ -1165,7 +1184,7 @@
     if (selectedId !== id) {
       explanationOpen = false;
       commandHistoryOpen = false;
-      commandFeedback = null;
+      resetCommandDraft();
     }
 
     selectedId = id;
@@ -1251,6 +1270,10 @@
     document.body
       .classList
       .remove('drawer-open');
+
+    explanationOpen = false;
+    commandHistoryOpen = false;
+    resetCommandDraft();
   }
 
 
@@ -1424,6 +1447,13 @@
     const recommendation = vehicle.dispatcher_recommendation || {};
     const initialAction = actionText[recommendation.action] ? recommendation.action : 'contact';
     const expectedImpact = expectedDelaySeconds(vehicle);
+    const draft = commandState(vehicle, initialAction);
+    const activeCommand = document.activeElement?.id === 'command-text'
+      ? {
+          start: $('command-text').selectionStart,
+          end: $('command-text').selectionEnd
+        }
+      : null;
     $('vehicle-detail').innerHTML =
       `<div class="vehicle-title"><p class="eyebrow">РЕЙС</p><h2>ТС ${vehicle.tr_id}</h2><p>${esc(vehicle.route_start_stop || '—')} → ${esc(vehicle.route_end_stop || '—')}</p></div>
       <div class="detail-status"><span class="tag ${vehicle.level}">${esc(vehicle.status_label || labels[vehicle.level])}</span></div>
@@ -1470,6 +1500,7 @@
           <button
             type="button"
             data-action="contact"
+            aria-pressed="${draft.action === 'contact'}"
           >
             Связаться и уточнить
           </button>
@@ -1477,6 +1508,7 @@
           <button
             type="button"
             data-action="accelerate_safely"
+            aria-pressed="${draft.action === 'accelerate_safely'}"
           >
             Предложить безопасно
             сократить отставание
@@ -1485,6 +1517,7 @@
           <button
             type="button"
             data-action="maintain"
+            aria-pressed="${draft.action === 'maintain'}"
           >
             Согласовать выдерживание
             интервала
@@ -1496,15 +1529,14 @@
         <textarea
           class="command-text"
           id="command-text"
-        >${esc(
-          actionText[initialAction]
-        )}</textarea>
+        >${esc(draft.message)}</textarea>
 
 
         <button
           class="send-command"
           id="send-command"
-          data-action="${initialAction}"
+          data-action="${esc(draft.action)}"
+          ${draft.sending ? 'disabled' : ''}
         >
           Зарегистрировать указание
         </button>
@@ -1589,26 +1621,30 @@
       .forEach(
         button => {
           button.onclick = () => {
-            $('command-text').value =
-              actionText[
-                button.dataset.action
-              ];
-
-            $('send-command')
-              .dataset
-              .action =
-              button.dataset.action;
-
-            $('send-command')
-              .textContent =
-              button.textContent
-                .trim();
+            draft.action = button.dataset.action;
+            draft.message = actionText[draft.action];
             commandFeedback = null;
-            const result = $('command-result');
-            if (result) result.textContent = '';
+            renderDetail();
           };
         }
       );
+
+
+    $('command-text').addEventListener(
+      'input',
+      event => {
+        draft.message = event.target.value;
+      }
+    );
+
+    if (activeCommand) {
+      const input = $('command-text');
+      input.focus();
+      input.setSelectionRange(
+        Math.min(activeCommand.start, input.value.length),
+        Math.min(activeCommand.end, input.value.length)
+      );
+    }
 
 
     $('send-command').onclick =
@@ -1695,14 +1731,11 @@
           button.onclick = () => {
             if (button.disabled) return;
             const target = button.dataset.planAction;
-            const send = $('send-command');
-            if (!send || !actionText[target]) return;
-            $('command-text').value = actionText[target];
-            send.dataset.action = target;
-            send.textContent = button.querySelector('b')?.textContent || 'Зарегистрировать указание';
+            if (!actionText[target]) return;
+            draft.action = target;
+            draft.message = actionText[target];
             commandFeedback = null;
-            const result = $('command-result');
-            if (result) result.textContent = '';
+            renderDetail();
           };
         });
       }
@@ -1739,13 +1772,8 @@
           item.tr_id === selectedId
       );
 
-    const button =
-      $('send-command');
-
-    const message =
-      $('command-text')
-        .value
-        .trim();
+    const draft = commandState(vehicle || {tr_id: null});
+    const message = draft.message.trim();
 
     if (
       !vehicle ||
@@ -1754,7 +1782,9 @@
       return;
     }
 
-    button.disabled = true;
+    draft.sending = true;
+    commandFeedback = null;
+    await renderDetail();
 
     try {
       const data =
@@ -1779,9 +1809,7 @@
                 vehicle.tr_id,
 
               action:
-                button
-                  .dataset
-                  .action,
+                draft.action,
 
               message
             })
@@ -1813,25 +1841,17 @@
             detail: 'Это терминальный результат guardrail: он остаётся в журнале, но не попадает в очередь открытых действий.',
             simulatable: false,
           };
-      await renderDetail();
-
     } catch (error) {
       commandFeedback = {
         tr_id: vehicle.tr_id,
         kind: 'error',
         message: `Не удалось зарегистрировать: ${error.message}`,
       };
-      const result =
-        $('command-result');
-
-      if (result) {
-        result.textContent =
-          `Не удалось зарегистрировать: ` +
-          `${error.message}`;
-      }
-
     } finally {
-      button.disabled = false;
+      if (commandDraft?.trId === vehicle.tr_id) {
+        draft.sending = false;
+        await renderDetail();
+      }
     }
   }
 
