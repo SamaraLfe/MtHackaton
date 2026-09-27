@@ -2,6 +2,12 @@
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
+docs/_build/
+.cache/
 data/
 ml/artifacts/
 *.log
+state/
+tmp/
+.idea/
+dist/

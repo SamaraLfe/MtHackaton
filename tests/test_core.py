@@ -102,6 +102,88 @@ def test_slow_stop_deviation_uses_live_calibration():
         backend.deviations.clear(); backend.deviations.update(saved_deviations)
 
 
+def test_slow_stop_on_long_route_does_not_become_multi_hour_delay():
+    """A restarted synthetic route may be less than one full loop behind the plan."""
+    from backend import app as backend
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(backend, 'schedule', pd.DataFrame([
+            dict(tt_action_item_id=1, tr_id=99, ts=1000, time_begin='1970-01-01 00:16:40', lon=37.60, lat=55.70, building_address='A'),
+            dict(tt_action_item_id=2, tr_id=99, ts=4600, time_begin='1970-01-01 01:16:40', lon=37.61, lat=55.71, building_address='B'),
+            dict(tt_action_item_id=3, tr_id=99, ts=8200, time_begin='1970-01-01 02:16:40', lon=37.62, lat=55.72, building_address='C'),
+        ]))
+        monkeypatch.setattr(backend, 'position_offsets', {})
+        monkeypatch.setattr(backend, 'position_states', {})
+        monkeypatch.setattr(backend, 'deviations', {})
+
+        match = backend.estimate_position(99, 37.60, 55.70, 4700, speed=1)
+        assert match is not None
+        assert match['match_kind'] == 'observed_slow_stop'
+        assert abs(match['deviation_s']) < 1
+        assert backend.position_offsets[99] == 3700
+    finally:
+        monkeypatch.undo()
+
+
+def test_repeated_geometry_uses_temporal_segment_hint(monkeypatch):
+    """A duplicate coordinate in a loop must resolve to the timed segment."""
+    from backend import app as backend
+
+    monkeypatch.setattr(backend, 'schedule', pd.DataFrame([
+        dict(tt_action_item_id=1, tr_id=99, ts=1000, time_begin='1970-01-01 00:16:40', lon=37.60, lat=55.70, building_address='A'),
+        dict(tt_action_item_id=2, tr_id=99, ts=1600, time_begin='1970-01-01 00:26:40', lon=37.61, lat=55.71, building_address='B'),
+        dict(tt_action_item_id=3, tr_id=99, ts=2200, time_begin='1970-01-01 00:36:40', lon=37.60, lat=55.70, building_address='A again'),
+    ]))
+    monkeypatch.setattr(backend, 'position_offsets', {})
+    monkeypatch.setattr(backend, 'position_states', {})
+    monkeypatch.setattr(backend, 'deviations', {})
+
+    projected = backend.planned_position_at(99, 2150)
+    match = backend.estimate_position(
+        99,
+        projected['lon'],
+        projected['lat'],
+        2150,
+        speed=10,
+        segment_hint=projected['segment_index'],
+    )
+    assert projected['segment_index'] == 1
+    assert match['segment_index'] == 1
+    assert match['deviation_s'] == pytest.approx(0, abs=.1)
+
+
+def test_synthetic_zero_length_segment_uses_time_not_fake_stop(monkeypatch):
+    """A duplicate stop coordinate must keep the planned time interpolation."""
+    from backend import app as backend
+
+    monkeypatch.setattr(backend, 'schedule', pd.DataFrame([
+        dict(tt_action_item_id=1, tr_id=99, ts=1000, time_begin='1970-01-01 00:16:40', lon=37.60, lat=55.70, building_address='A'),
+        dict(tt_action_item_id=2, tr_id=99, ts=1600, time_begin='1970-01-01 00:26:40', lon=37.61, lat=55.71, building_address='B'),
+        dict(tt_action_item_id=3, tr_id=99, ts=2200, time_begin='1970-01-01 00:36:40', lon=37.61, lat=55.71, building_address='B again'),
+        dict(tt_action_item_id=4, tr_id=99, ts=2800, time_begin='1970-01-01 00:46:40', lon=37.62, lat=55.72, building_address='C'),
+    ]))
+    monkeypatch.setattr(backend, 'position_offsets', {})
+    monkeypatch.setattr(backend, 'position_states', {})
+    monkeypatch.setattr(backend, 'deviations', {})
+
+    projected = backend.planned_position_at(99, 1900)
+    match = backend.estimate_position(
+        99,
+        projected['lon'],
+        projected['lat'],
+        1900,
+        speed=1,
+        segment_hint=projected['segment_index'],
+        fraction_hint=projected['fraction'],
+        allow_slow_stop=False,
+    )
+    assert projected['segment_index'] == 1
+    assert match['segment_index'] == 1
+    assert match['match_kind'] == 'planned_trajectory_segment'
+    assert match['deviation_s'] == pytest.approx(0, abs=.1)
+
+
 def test_submission_complete_and_finite():
     from pathlib import Path
     p=Path('artifacts/submission.csv')

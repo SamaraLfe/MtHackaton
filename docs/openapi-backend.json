@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Такт — Backend API",
-    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили и\nназначения и локальная очередь указаний хранятся в SQLite, а история\nтелеметрии — в памяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n\nКонтракт версионируется вместе с репозиторием. Для интерактивной проверки\nиспользуйте `/docs/swagger`, для генерации клиента — `/openapi.json`, а для\nобъяснения полей и сценариев — `/docs`. В ответах, где нет надёжного прогноза,\nbackend возвращает `null`/`unknown`, а не подменяет отсутствие данных нулевой\nзадержкой.\n",
+    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили,\nназначения и локальная очередь указаний хранятся в SQLite, а история\nтелеметрии — в памяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n\nКонтракт версионируется вместе с репозиторием. Для интерактивной проверки\nиспользуйте `/docs/swagger`, для генерации клиента — `/openapi.json`, а для\nобъяснения полей и сценариев — `/docs`. В ответах, где нет надёжного прогноза,\nbackend возвращает `null`/`unknown`, а не подменяет отсутствие данных нулевой\nзадержкой. Исключение для уровня внимания: потеря связи на активном рейсе\nдаёт `high` и `attention_level=critical` при `null` вместо прогноза. В\n`/api/state` поле `business` содержит прозрачные proxy для приоритизации:\nожидаемые минуты задержки и покрытие актуальным прогнозом. Они не являются\nпассажиро-минутами или доказанной экономией.\n",
     "contact": {
       "name": "Команда прототипа «Такт»",
       "url": "https://github.com/SamaraLfe/MtHackaton"
@@ -512,7 +512,7 @@
           "Состояние"
         ],
         "summary": "Получить картину рейсов",
-        "description": "В live возвращает оперативное состояние рейсов. `trip_status`: not_started (выход не подтверждён), active, completed. `on_route=false` исключает ТС из активной карты. При потере пакетов дольше LIVE_STALE_S на активном рейсе `attention_level=critical`, `level=high`, прогноз очищается. Завершение определяется по позиции у конца финального сегмента, а не по отсутствию цели прогноза. `route_start_stop`/`route_end_stop` — границы плановой траектории; previous_stop_time/next_stop_time — расчётные времена, не наблюдённые прибытия. В replay используется архивный снимок. Также возвращаются mode, counters и total_points. `telemetry_source` указывает путь точки: `custom_ndtp_nav00` — собственный custom-emulator, `ndtp_nav00` — оригинальный Nav00 после CRC, `http_json` — POST /api/telemetry. `current_deviation_s` — непрерывная оценка по проекции координаты на плановый сегмент; position_match отдельно описывает ближайшую плановую остановку на карте. На медленной телеметрии у плановой точки применяется тот же live-сдвиг, что и для проекции, поэтому исходный день расписания не превращается в многотысячное отклонение. `prediction_s` — прогноз на целевой остановке, поэтому он не обязан совпадать с текущей оценкой; backend сохраняет ответ V5 без эвристического ограничения относительно текущей позиции. Для ТС с живыми координатами добавляется `live_track` — до 100 валидных точек за последний час; у скорректированных оригинальных точек в нём также доступны `raw_lon`/`raw_lat` для аудита исходного GPS. `position_adjusted=true` у оригинального NDTP означает, что синтетическая GPS-точка внешнего образа не используется как положение на карте: backend сохраняет её для provenance, а маркер получает детерминированную интерполяцию по плановой траектории, чтобы карта и остановки не расходились. `raw_lon` и `raw_lat` — именно исходные координаты оригинального Nav00, а `lon` и `lat` — рабочая координата карты. `previous_stop_time` и `next_stop_time` — расчётные времена прохождения текущего сегмента (для следующей остановки — ожидаемое прибытие); это не подтверждение дверями или валидатором. `source=waiting_for_live` означает, что ТС уже есть в расписании и конфиге источника, но первый пакет ещё не пришёл: координата — первая плановая точка, прогноз не рассчитывается. `schedule_offset_s` показывает применённый к live-прогнозу сдвиг планового дня, если источник стартовал с другой календарной точки. При отсутствии цели строго в (T+10, T+15] прогноз недоступен: окно не расширяется и вымышленные повторные рейсы не добавляются. `reason` — наблюдаемый сигнал, а `reason_explanation` объясняет, почему он выбран; `reason_is_hypothesis=true` означает, что причина не подтверждена событием. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Прогнозы, не являющиеся архивными, старше 120 секунд становятся `stale`/`unknown` в ответе.",
+        "description": "В live возвращает оперативное состояние рейсов. При общей паузе или отсутствии всех пакетов дольше LIVE_FALLBACK_S (60 с по умолчанию) возвращает исторический резерв: state.mode=replay, source_mode=live, fallback_mode=historical; внутренний режим остаётся live. source=historical_fallback означает архивный прогноз с degraded=true даже при stale=false; последняя live-позиция накладывается при наличии. Без архивной записи возвращается последнее состояние без прогноза с level=unknown и attention_level=critical. Возобновление пакетов после снятия паузы возвращает оперативную картину. `trip_status`: not_started (выход не подтверждён), active, completed. `on_route=false` исключает ТС из активной карты. При потере пакетов дольше LIVE_STALE_S на активном рейсе `attention_level=critical`, `level=high`, прогноз очищается. Завершение определяется по позиции у конца финального сегмента, а не по отсутствию цели прогноза. `route_start_stop`/`route_end_stop` — границы плановой траектории; previous_stop_time/next_stop_time — расчётные времена, не наблюдённые прибытия. В replay используется архивный снимок. Также возвращаются mode, counters и total_points. `telemetry_source` указывает путь точки: `custom_ndtp_nav00` — собственный custom-emulator, `ndtp_nav00` — оригинальный Nav00 после CRC, `http_json` — POST /api/telemetry. `current_deviation_s` — непрерывная оценка по проекции координаты на плановый сегмент; position_match отдельно описывает ближайшую плановую остановку на карте. На медленной телеметрии у плановой точки применяется тот же live-сдвиг, что и для проекции, поэтому исходный день расписания не превращается в многотысячное отклонение. `prediction_s` — прогноз на целевой остановке, поэтому он не обязан совпадать с текущей оценкой; backend сохраняет ответ V5 без эвристического ограничения относительно текущей позиции. Для ТС с живыми координатами добавляется `live_track` — до 100 валидных точек за последний час; у скорректированных оригинальных точек в нём также доступны `raw_lon`/`raw_lat` для аудита исходного GPS. `position_adjusted=true` у оригинального NDTP означает, что синтетическая GPS-точка внешнего образа не используется как положение на карте: backend сохраняет её для provenance, а маркер получает детерминированную интерполяцию по плановой траектории, чтобы карта и остановки не расходились. `raw_lon` и `raw_lat` — именно исходные координаты оригинального Nav00, а `lon` и `lat` — рабочая координата карты. `previous_stop_time` и `next_stop_time` — расчётные времена прохождения текущего сегмента (для следующей остановки — ожидаемое прибытие); это не подтверждение дверями или валидатором. `source=waiting_for_live` означает, что ТС уже есть в расписании и конфиге источника, но первый пакет ещё не пришёл: координата — первая плановая точка, прогноз не рассчитывается. `schedule_offset_s` показывает применённый к live-прогнозу сдвиг планового дня, если источник стартовал с другой календарной точки. При отсутствии цели строго в (T+10, T+15] прогноз недоступен: окно не расширяется и вымышленные повторные рейсы не добавляются. `reason` — наблюдаемый сигнал, а `reason_explanation` объясняет, почему он выбран; `reason_is_hypothesis=true` означает, что причина не подтверждена событием. Необязательный `dispatcher_id` фильтрует рейсы по назначениям профиля. Свежесть пакетов в live проверяется по LIVE_STALE_S; потеря связи даёт критический high, а не unknown. Replay не стареет по настенным часам.",
         "operationId": "get_state_api_state_get",
         "parameters": [
           {
@@ -592,7 +592,7 @@
           "Риски и what-if"
         ],
         "summary": "Получить очередь внимания",
-        "description": "Возвращает сохранённые high/medium результаты: high идут первыми, затем medium. Это текущая очередь, не журнал; unknown в неё не входит. Для свежести конкретного рейса используйте /api/state.",
+        "description": "Формирует high/medium результаты из текущего /api/state, включая критическую потерю связи на активном рейсе. При общем историческом резерве риски могут быть архивными: проверяйте source и режим /api/state; high идут первыми, затем medium. Это текущая очередь, не журнал; unknown в неё не входит. Для свежести конкретного рейса используйте /api/state.",
         "operationId": "get_incidents_api_incidents_get",
         "responses": {
           "200": {
@@ -632,7 +632,7 @@
           "Риски и what-if"
         ],
         "summary": "Рассчитать размещение резервного ТС",
-        "description": "Без изменения live-состояния выбирает текущую плановую позицию выбранного ТС, строит виртуальный путь резерва до следующей контрольной точки и возвращает влияние на исходное ТС и резерв. Вероятность и секунды — operational what-if эвристика, а не новый ML-прогноз.",
+        "description": "При задержке от 180 секунд резерв мгновенно появляется на остановке около середины оставшегося пути. Возвращает компенсацию по остановкам, сценарную вероятность пользы и решение по порогам policy. Прогноз основного ТС и показатели остальных маршрутов неизменны. Это эвристика, не новый ML-прогноз.",
         "operationId": "what_if_api_what_if_post",
         "requestBody": {
           "content": {
@@ -751,8 +751,8 @@
         "tags": [
           "Указания водителю"
         ],
-        "summary": "Прочитать локальную очередь",
-        "description": "Необязательный `tr_id` фильтрует максимум 200 сохранённых в SQLite записей от новых к старым. В ответе `external_delivery: false`: канал связи с водителем не подключён, но запись не теряется при перезапуске backend.",
+        "summary": "Прочитать журнал команд",
+        "description": "Необязательный `tr_id` фильтрует максимум 200 сохранённых в SQLite записей от новых к старым. `queued_for_integration` — ожидает приёма, `executing` — водитель подтвердил, `completed` — свежая live-телеметрия подтвердила выход из зоны риска. Командный audit-журнал сохраняется отдельно от удаляемых тикетов. Демо не означает внешнюю доставку.",
         "operationId": "get_driver_commands_api_driver_commands_get",
         "parameters": [
           {
@@ -791,7 +791,7 @@
           "Указания водителю"
         ],
         "summary": "Зарегистрировать указание",
-        "description": "Создаёт и сохраняет запись только для существующего локального dispatcher_id. `queued_for_integration` означает, что запись находится в durable local_dispatch_outbox; это не доставка водителю. Каждый повтор создаёт новую запись.",
+        "description": "Создаёт audit-запись только для существующего локального dispatcher_id. Разрешённое указание также создаёт или обновляет единственную карточку этого диспетчера по выбранному ТС. `queued_for_integration` означает, что запись находится в durable local_dispatch_outbox; это не доставка водителю. `simulation_available=true` позволяет явно запустить локальный ответ водителя.",
         "operationId": "queue_driver_command_api_driver_commands_post",
         "requestBody": {
           "required": true,
@@ -814,6 +814,318 @@
           },
           "422": {
             "description": "Неизвестный профиль или неверные поля указания."
+          }
+        }
+      }
+    },
+    "/api/action-plan": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Сравнить пользу действий",
+        "description": "Для выбранного ТС применяет прозрачную версию benefit-v1 к допустимым действиям. Сравнение использует текущий прогноз, риск, свежесть, горизонт и ожидаемый эффект guardrail; это decision-support proxy, а не причинная ML-оценка результата.",
+        "operationId": "get_action_plan_api_action_plan_get",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Tr Id"
+            }
+          },
+          {
+            "name": "dispatcher_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "ТС не назначено этому диспетчеру."
+          },
+          "404": {
+            "description": "Профиль или ТС не найден."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/driver-commands/{command_id}/simulate": {
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Смоделировать приём и ускорение custom-ТС",
+        "description": "Идемпотентно подтверждает приём активного указания и переводит его в `executing`. Только для выбранного custom-ТС повышает скорость через существующий debug-оверлей: min(130, max(30, speed×1.5, speed+15)) км/ч с учётом ручного оверлея. Повторное подтверждение не ускоряет ещё раз. Для оригинального потока подтверждает только приём. Прогноз напрямую не меняется: успех определяется последующей свежей live-телеметрией. При недоступном/paused custom-потоке не подтверждает команду.",
+        "operationId": "simulate_driver_command_api_driver_commands__command_id__simulate_post",
+        "parameters": [
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Указание не найдено."
+          },
+          "409": {
+            "description": "Указание заблокировано, заменено, локальная симуляция недоступна или custom-поток приостановлен."
+          },
+          "422": {
+            "description": "ТС больше недоступно."
+          },
+          "503": {
+            "description": "Debug-оверлей custom-эмулятора недоступен; команда не подтверждена."
+          }
+        }
+      }
+    },
+    "/api/driver-commands/{command_id}/acknowledge": {
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Подтвердить принятие команды водителем",
+        "description": "Внутренний callback приёма: идемпотентно переводит активное указание в `executing` без изменения прогноза. Не подтверждает успех и не воскрешает удалённые тикеты. В production необходимо подключить настоящий канал водителя и защитить callback аутентификацией.",
+        "operationId": "driver_command_acknowledgement_api_driver_commands__command_id__acknowledge_post",
+        "parameters": [
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Указание не найдено."
+          },
+          "409": {
+            "description": "Указание заблокировано, заменено или недоступно для подтверждения."
+          },
+          "422": {
+            "description": "ТС больше недоступно."
+          }
+        }
+      }
+    },
+    "/api/reserve-dispatches": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Прочитать журнал выпуска резерва",
+        "description": "Возвращает сохранённые заявки выпуска резерва с решением, доказательствами, расчётным эффектом и статусом локального integration outbox. `external_execution: false` означает, что внешний флот ещё не подключён. Если подтверждения нет 15 минут, запись получает `integration_timeout` и остаётся только в истории.",
+        "operationId": "get_reserve_dispatches_api_reserve_dispatches_get",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tr Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Зарегистрировать выпуск резервного ТС",
+        "description": "Проверяет положительный риск, свежесть данных, уверенность map matching, расчётный ETA резерва и запас времени до контрольной остановки. При успехе сохраняет заявку в SQLite; внешний выпуск не выполняется без интеграции с флотом.",
+        "operationId": "release_reserve_api_reserve_dispatches_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveDispatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Выпуск заблокирован правилами безопасности данных или уже есть активная заявка."
+          },
+          "422": {
+            "description": "Неизвестный профиль, ТС или плановая геометрия."
+          }
+        }
+      }
+    },
+    "/api/reserve-dispatches/{action_id}/simulate": {
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Смоделировать подтверждение выпуска резерва",
+        "description": "Подтверждает заявку в локальном симуляторе флота и переносит рассчитанный what-if эффект в персональную карточку действия. Не отправляет команду реальному внешнему парку и не изменяет live-телеметрию.",
+        "operationId": "simulate_reserve_dispatch_api_reserve_dispatches__action_id__simulate_post",
+        "parameters": [
+          {
+            "name": "action_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Action Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Заявка выпуска резерва не найдена."
+          },
+          "409": {
+            "description": "Заявка уже закрыта или симуляция недоступна."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/action-center": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Получить персональный центр действий",
+        "description": "Возвращает только действия указанного `dispatcher_id`, один текущий тикет на ТС. Тикеты хранятся только в памяти и исчезают при перезапуске backend; F5 и другие вкладки разделяют текущую сессию диспетчера. Цикл: серый `pending` → синий `executing` → зелёный `completed_success` (Закрыт). Свежий live-прогноз после приёма должен подтвердить выход из ранее наблюдавшейся зоны риска: `level=low`, вероятность <35%. Тикет остаётся зелёным 15 секунд от времени этого прогноза, затем полностью удаляется. Новый риск и опрос не продлевают срок. Отдельный audit-журнал сохраняет `completed` и доказательство закрытия. Архив, устаревшие данные и демо-приём не закрывают тикет. Для успешного выпуска резерва также действует 15-секундное отображение.",
+        "operationId": "get_action_center_api_action_center_get",
+        "parameters": [
+          {
+            "name": "dispatcher_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Профиль dispatcher_id не найден."
+          },
+          "422": {
+            "description": "dispatcher_id обязателен."
           }
         }
       }
@@ -968,6 +1280,115 @@
           },
           "404": {
             "description": "Неизвестный источник или действие."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/custom-emulator/speed": {
+      "post": {
+        "tags": [
+          "Отладка"
+        ],
+        "summary": "Временно задать скорость ТС",
+        "description": "Только для копии ТС из `custom-emulator`. Значение меняет темп генерации следующей телеметрии вдоль той же плановой траектории; расписание, ML-модель и диспетчерские правила не меняются. Оверлей хранится только в памяти эмулятора и сбрасывается отдельным DELETE или его перезапуском.",
+        "operationId": "set_debug_speed_api_debug_custom_emulator_speed_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DebugSpeedOverride"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Нужен существующий профиль."
+          },
+          "409": {
+            "description": "Исходное ТС официального эмулятора не поддерживает debug-оверлей."
+          },
+          "503": {
+            "description": "Собственный эмулятор недоступен."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/debug/custom-emulator/speed/{tr_id}": {
+      "delete": {
+        "tags": [
+          "Отладка"
+        ],
+        "summary": "Временно задать скорость ТС",
+        "description": "Только для копии ТС из `custom-emulator`. Значение меняет темп генерации следующей телеметрии вдоль той же плановой траектории; расписание, ML-модель и диспетчерские правила не меняются. Оверлей хранится только в памяти эмулятора и сбрасывается отдельным DELETE или его перезапуском.",
+        "operationId": "clear_debug_speed_api_debug_custom_emulator_speed__tr_id__delete",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Tr Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EmulatorControl"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "Нужен существующий профиль."
+          },
+          "409": {
+            "description": "Исходное ТС официального эмулятора не поддерживает debug-оверлей."
+          },
+          "503": {
+            "description": "Собственный эмулятор недоступен."
           },
           "422": {
             "description": "Validation Error",
@@ -1216,7 +1637,7 @@
           "Качество модели"
         ],
         "summary": "Прочитать офлайн-метрики",
-        "description": "Возвращает legacy-метрики, объект v5, feature_importance и строки readable. Для V5 используйте `v5.mae_s`; верхнеуровневый test_mae_s относится к прежнему отчёту. Текущая задержка ML — counters.last_inference_ms в /api/state.",
+        "description": "Возвращает актуальный отчёт champion-b4b, объект v5, feature_importance и строки readable. Краткая MAE находится в `v5.mae_s`, полный отчёт — в `mae_test` и `real_vehicle_group_holdout`. Текущая задержка ML — counters.last_inference_ms в /api/state.",
         "operationId": "metrics_api_metrics_get",
         "responses": {
           "200": {
@@ -1328,6 +1749,40 @@
         "title": "AssignmentUpdate",
         "description": "Complete replacement for one profile's assigned vehicles."
       },
+      "DebugSpeedOverride": {
+        "properties": {
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^(admin|dispatcher)-[a-z0-9-]{2,40}$",
+            "title": "Dispatcher Id",
+            "description": "Существующий рабочий профиль, управляющий источниками эмуляции.",
+            "examples": [
+              "dispatcher-01"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "ТС собственного эмулятора."
+          },
+          "speed_kmh": {
+            "type": "number",
+            "maximum": 130.0,
+            "minimum": 0.0,
+            "title": "Speed Kmh",
+            "description": "Искусственная скорость, км/ч."
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id",
+          "tr_id",
+          "speed_kmh"
+        ],
+        "title": "DebugSpeedOverride",
+        "description": "Ephemeral debug-only speed overlay for a custom-emulator vehicle."
+      },
       "DispatcherCreate": {
         "properties": {
           "name": {
@@ -1427,7 +1882,7 @@
           "message"
         ],
         "title": "DriverCommand",
-        "description": "Locally queued instruction; it is never delivered outside the MVP."
+        "description": "Auditable driver instruction evaluated against current vehicle evidence."
       },
       "EmulatorControl": {
         "properties": {
@@ -1576,6 +2031,77 @@
         ],
         "title": "Point",
         "description": "Manual forecast point tied to one scheduled stop in the 10–15 minute window."
+      },
+      "ReserveDispatch": {
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ReservePolicy"
+          },
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^(admin|dispatcher)-[a-z0-9-]{2,40}$",
+            "title": "Dispatcher Id",
+            "description": "Профиль оператора, подтверждающий выпуск резерва.",
+            "examples": [
+              "dispatcher-02"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "Основное ТС/линия, для которой выпускается резерв.",
+            "examples": [
+              131672
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id",
+          "tr_id"
+        ],
+        "title": "ReserveDispatch",
+        "description": "Request to register a reserve release after data-driven validation."
+      },
+      "ReservePolicy": {
+        "properties": {
+          "min_delay_s": {
+            "type": "number",
+            "minimum": 180.0,
+            "title": "Min Delay S",
+            "default": 180
+          },
+          "min_benefit_probability": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Benefit Probability",
+            "default": 0.35
+          },
+          "min_compensated_stops": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Min Compensated Stops",
+            "default": 1
+          },
+          "min_expected_compensation_s": {
+            "type": "number",
+            "minimum": 0.0,
+            "title": "Min Expected Compensation S",
+            "default": 60
+          },
+          "min_confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Confidence",
+            "default": 0.25
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ReservePolicy"
       },
       "SimulationCancel": {
         "properties": {
@@ -1758,6 +2284,9 @@
       },
       "WhatIf": {
         "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/ReservePolicy"
+          },
           "tr_id": {
             "anyOf": [
               {

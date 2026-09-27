@@ -1,6 +1,12 @@
 data
+dataset
+state
+docs/_build
+.git
 .venv
+.cache
 __pycache__
 .pytest_cache
 tests
+dist
 *.log

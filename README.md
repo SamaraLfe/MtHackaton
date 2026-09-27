@@ -1,131 +1,49 @@
 # Интеграционный контур «Такт»
 
-Ветка `integration` содержит только glue-код и проверки сборки: Dockerfile,
-Compose-конфигурацию, локальные скрипты, integration-тесты и снимки
-документации/API. Здесь намеренно нет исходников `backend/`, `ml/`,
-`dashboard/`, датасета и артефактов модели.
+Ветка содержит Docker/config, зависимости, scripts/, tests/ и docs/.
+Исходники backend/, ml/, dashboard/, emulator/, dataset/ и artifacts/
+в эту ветку не входят. Полная запускаемая поставка находится в prototype.
+Интеграционные файлы синхронизированы с этой реализацией; ветка отдельно
+не собирается без модулей и данных.
 
-## Что находится в ветке
+## Состав и запуск
 
-| Путь | Назначение |
-|---|---|
-| `Dockerfile` | общий образ Python для интеграционного запуска |
-| `compose.yaml` | локальная связка ML, backend, dashboard и optional NDTP image |
-| `requirements.txt` | зависимости runtime/test |
-| `scripts/run_local.py` | запуск ML на 8001 и backend на 8000 |
-| `scripts/verify_running.py` | smoke-проверка работающего контура |
-| `scripts/extract_data.py` | безопасное извлечение только CSV/Markdown из архива |
-| `tests/test_api.py` | проверки API, what-if, профилей и UI-контрактов |
-| `tests/test_core.py` | причинность признаков, NDTP, CRC и временная логика |
-| `tests/test_trip_status.py` | жизненный цикл рейса и критическая потеря live-связи |
-| `docs/ANALYSIS.md` | зафиксированный анализ качества и ограничений |
-| `docs/forecast-audit.md` | аудит текущего отклонения, прогноза и источников |
-| `docs/openapi-*.json` | снимки backend/ML OpenAPI 1.1.0 |
-| `docs/code/` | сохранённые страницы документации модулей |
-| `docs/evaluation.png` | визуализация оценки модели |
+Dockerfile создаёт Python-образ с runtime и Sphinx-зависимостями;
+requirements.txt и requirements-docs.txt разделяют их описание.
+compose.yaml связывает ML, backend, nginx dashboard и два NDTP-источника.
+Официальный образ ndtp-telemetry-emulator:1.0 предоставляется организаторами;
+собственный эмулятор находится в emulator/ полной ветки.
 
-Снимки в `docs/` — результат интеграционной проверки, а не замена живого
-Swagger. Источник API-контракта находится в коде компонентных веток и доступен
-после запуска по `/openapi.json`.
+Из полного checkout: docker compose up -d --build. Без официального образа:
+docker compose up -d --build ml backend dashboard custom-emulator.
+Порты на localhost: dashboard 8080, backend 8000, NDTP 9201,
+официальный источник 18080, собственный 18081. ML :8001 доступен внутри сети.
 
-## Требования к полному checkout
+## Проверки и документация
 
-Для запуска этой ветки рядом должны быть предоставлены исходники и данные из
-компонентных веток:
+scripts/run_prototype.py запускает полный стенд и ожидает готовности;
+start_backend.py собирает Sphinx перед стартом. export_openapi.py генерирует
+схемы из FastAPI; при экспорте используется отдельный STATE_DIR.
+verify_running.py проверяет 151 replay-точку, submission, горизонт и NDTP/CRC.
+Скрипт изменяет режим/телеметрию тестового стенда; --target только маркирует
+отчёт. scripts/package_submission.py собирает полный проект из чистого commit
+с HTML Sphinx и SHA256-манифестом; предназначен для ветки prototype.
 
-```text
-backend/       исходники FastAPI и NDTP
-ml/            модельный сервис и feature pipeline
-dashboard/     HTML/CSS/JS диспетчерской
-dataset/       train/test/validate и расписание
-artifacts/     model_v5.cbm, schema, metrics, submission
-```
+Проверенная реализация: 199 Python-тестов, 19 Node-тестов, строгая сборка
+Sphinx. Docker replay: p50 16,28 мс, p95 20,23 мс, максимум 148,98 мс.
+Это последовательный прогон из backend-контейнера, не нагрузочный SLA.
+Документация и ограничения измерений находятся в docs/.
 
-Поэтому checkout только `integration` не является самостоятельным приложением:
-его назначение — собрать полный прототип и проверить стыки между компонентами.
+Устаревшие отдельные HTML-снимки docs/code заменены исходниками Sphinx;
+HTML строится из полного проекта, поэтому содержит актуальные сигнатуры кода.
 
-## Локальный запуск
+## Документация полного решения
 
-После объединения с компонентными ветками и установки зависимостей:
+- [Запуск трёх модулей в Docker](https://github.com/SamaraLfe/MtHackaton/tree/prototype).
+- [Инструкция для жюри](https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/jury-guide.md).
+- [OpenAPI/Swagger и Sphinx](https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/README.md).
+- [Производительность и дополнительные возможности](https://github.com/SamaraLfe/MtHackaton/blob/prototype/docs/capabilities.md).
 
-```sh
-python -m pip install -r requirements.txt
-python scripts/run_local.py
-```
-
-Локальные адреса:
-
-```text
-Backend:  http://127.0.0.1:8000
-ML API:   http://127.0.0.1:8001
-Swagger:   http://127.0.0.1:8000/docs/swagger
-API guide: http://127.0.0.1:8000/docs
-NDTP TCP: 127.0.0.1:9201
-```
-
-Compose-вариант:
-
-```sh
-docker compose up --build
-```
-
-В этом integration Compose официальный `ndtp-telemetry-emulator` включается
-только с профилем `emulator`:
-
-```sh
-docker compose --profile emulator up --build
-```
-
-Образ `ndtp-telemetry-emulator:1.0` является внешним артефактом и не хранится в
-ветке. Полный `prototype` дополнительно подключает собственный custom-emulator
-и его настройки.
-
-## Проверка работающего контура
-
-После запуска сервисов:
-
-```sh
-python scripts/verify_running.py --target local
-```
-
-Проверка выполняет:
-
-- `/health/ready` и `/api/observability`;
-- полный replay по `dataset/validate/points.csv`;
-- формат и покрытие `artifacts/submission_v5.csv`;
-- соблюдение строгого окна `600 < horizon_s <= 900` для всех replay-точек;
-- фрагментированный TCP NDTP-кадр;
-- отказ кадра с неверным CRC;
-- восстановление исходного режима после проверки.
-
-Отчёт сохраняется в `artifacts/verification.json`. Этот путь должен быть
-доступен для записи, поэтому артефакты не входят в integration-ветку.
-
-Тесты запускаются из полного checkout:
-
-```sh
-python -m pytest -q
-```
-
-Они не обучают модель заново и используют сохранённые артефакты. Для изменения
-схемы API сначала обновляются backend/ML-ветки, затем выполняется экспорт
-OpenAPI и обновляются снимки `docs/openapi-backend.json` и
-`docs/openapi-ml.json`.
-
-Актуальный набор дополнительно проверяет, что отсутствие контрольной точки не
-завершает рейс, никогда не выходившее ТС не считается потерянным, намеренная
-пауза отделена от обрыва связи, а старший «Диспетчер №2 (все ТС)» при миграции
-получает полный парк. Backend не применяет удалённый `stabilize_forecast` и не
-расширяет окно цели за 10–15 минут.
-
-## Границы интеграционного контура
-
-Ветка проверяет соединение компонентов, а не заменяет их ответственность:
-
-- данные и анти-утечка описаны в ветке `data`;
-- CatBoost V5 и `/predict_v5` описаны в ветке `ml`;
-- NDTP, прогноз, what-if и административные API описаны в ветке `backend`;
-- карта и рабочие места описаны в ветке `dashboard`.
-
-Такой состав позволяет обновлять интеграционные проверки, не копируя исходники
-компонентов и не создавая вторую версию бизнес-логики.
+Команды запуска выполняются из полного checkout ветки prototype, а не из
+этой компонентной ветки. Компонентные ветки сохраняют разделение исходников
+и не являются самостоятельной Docker-поставкой.

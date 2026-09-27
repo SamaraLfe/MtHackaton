@@ -9,21 +9,29 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
   backend:
     build: .
-    command: python -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
+    command: python scripts/start_backend.py
     environment:
       ML_URL: http://ml:8001
+      CUSTOM_EMULATOR_URL: http://custom-emulator:18081
+      OFFICIAL_EMULATOR_URL: http://emulator:18080
       NDTP_PORT: "9201"
+      START_MODE: live
+      LIVE_FORECAST_INTERVAL_S: "1"
+      ML_RETRY_INTERVAL_S: "5"
     volumes:
       - ./dataset:/app/dataset:ro
       - ./artifacts:/app/artifacts:ro
+      - ./state:/app/state
     ports:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:9201:9201"
     depends_on:
       ml:
         condition: service_healthy
+
   dashboard:
     image: nginx:alpine
     ports:
@@ -32,10 +40,38 @@ services:
       - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
+
   emulator:
     image: ndtp-telemetry-emulator:1.0
-    profiles: [emulator]
     ports:
       - "127.0.0.1:18080:18080"
+    depends_on:
+      - backend
+
+  custom-emulator:
+    build: .
+    command: python -m emulator.service
+    environment:
+      NDTP_HOST: backend
+      NDTP_PORT: "9201"
+      DATA_DIR: dataset
+
+      EMULATOR_HTTP_PORT: "18081"
+      EMULATOR_INTERVAL_S: "3"
+      EMULATOR_CHAOS: "1"
+      EMULATOR_CHAOS_SEED: "42"
+      EMULATOR_MAX_VEHICLES: "0"
+
+      EMULATOR_START_PAUSED: "0"
+
+      CUSTOM_TR_ID_OFFSET: "1000000"
+      CUSTOM_UNIT_ID_OFFSET: "100000000"
+
+    volumes:
+      - ./dataset:/app/dataset:ro
+
+    ports:
+      - "127.0.0.1:18081:18081"
+
     depends_on:
       - backend
