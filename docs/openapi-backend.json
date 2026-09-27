@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Такт — Backend API",
-    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили и\nназначения и локальная очередь указаний хранятся в SQLite, а история\nтелеметрии — в памяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n\nКонтракт версионируется вместе с репозиторием. Для интерактивной проверки\nиспользуйте `/docs/swagger`, для генерации клиента — `/openapi.json`, а для\nобъяснения полей и сценариев — `/docs`. В ответах, где нет надёжного прогноза,\nbackend возвращает `null`/`unknown`, а не подменяет отсутствие данных нулевой\nзадержкой.\n",
+    "description": "\nAPI «Такт» принимает телеметрию транспорта, хранит рабочую картину диспетчера\nи прогнозирует отклонение от расписания на первой остановке в окне **строго\nболее 10 и не более 15 минут**. Положительный `prediction_s` — опоздание,\nотрицательный — прибытие раньше плана.\n\nНачните с [руководства по API](/docs): там есть первый сценарий, примеры,\nполя ответов и описание профилей диспетчера. Интерактивный Swagger выполняет\nнастоящие запросы к текущему локальному состоянию.\n\nТела запросов и ответы — JSON. Время без часового пояса считается UTC;\nиспользуйте ISO 8601 с `Z` или смещением. Это локальный MVP: профили и\nназначения и локальная очередь указаний хранятся в SQLite, а история\nтелеметрии — в памяти одного процесса. `role` и `dispatcher_id` — локальные проверки,\nне production-аутентификация.\n\nКонтракт версионируется вместе с репозиторием. Для интерактивной проверки\nиспользуйте `/docs/swagger`, для генерации клиента — `/openapi.json`, а для\nобъяснения полей и сценариев — `/docs`. В ответах, где нет надёжного прогноза,\nbackend возвращает `null`/`unknown`, а не подменяет отсутствие данных нулевой\nзадержкой. В `/api/state` поле `business` содержит прозрачные proxy для\nприоритизации: ожидаемые минуты задержки и покрытие актуальным прогнозом.\nОни не являются пассажиро-минутами или доказанной экономией.\n",
     "contact": {
       "name": "Команда прототипа «Такт»",
       "url": "https://github.com/SamaraLfe/MtHackaton"
@@ -752,7 +752,7 @@
           "Указания водителю"
         ],
         "summary": "Прочитать локальную очередь",
-        "description": "Необязательный `tr_id` фильтрует максимум 200 сохранённых в SQLite записей от новых к старым. В ответе `external_delivery: false`: канал связи с водителем не подключён, но запись не теряется при перезапуске backend.",
+        "description": "Необязательный `tr_id` фильтрует максимум 200 сохранённых в SQLite записей от новых к старым. В ответе `external_delivery: false`: канал связи с водителем не подключён, но запись не теряется при перезапуске backend. `simulated_completed` означает, что для демонстрации получен отдельный локальный ответ симулятора.",
         "operationId": "get_driver_commands_api_driver_commands_get",
         "parameters": [
           {
@@ -791,7 +791,7 @@
           "Указания водителю"
         ],
         "summary": "Зарегистрировать указание",
-        "description": "Создаёт и сохраняет запись только для существующего локального dispatcher_id. `queued_for_integration` означает, что запись находится в durable local_dispatch_outbox; это не доставка водителю. Каждый повтор создаёт новую запись.",
+        "description": "Создаёт и сохраняет запись только для существующего локального dispatcher_id. `queued_for_integration` означает, что запись находится в durable local_dispatch_outbox; это не доставка водителю. `simulation_available=true` позволяет явно запустить локальный ответ водителя. Каждый повтор создаёт новую запись.",
         "operationId": "queue_driver_command_api_driver_commands_post",
         "requestBody": {
           "required": true,
@@ -814,6 +814,242 @@
           },
           "422": {
             "description": "Неизвестный профиль или неверные поля указания."
+          }
+        }
+      }
+    },
+    "/api/action-plan": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Сравнить пользу действий",
+        "description": "Для выбранного ТС применяет прозрачную версию benefit-v1 к допустимым действиям. Сравнение использует текущий прогноз, риск, свежесть, горизонт и ожидаемый эффект guardrail; это decision-support proxy, а не причинная ML-оценка результата.",
+        "operationId": "get_action_plan_api_action_plan_get",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Tr Id"
+            }
+          },
+          {
+            "name": "dispatcher_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "403": {
+            "description": "ТС не назначено этому диспетчеру."
+          },
+          "404": {
+            "description": "Профиль или ТС не найден."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/driver-commands/{command_id}/simulate": {
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Смоделировать реакцию водителя",
+        "description": "Запускает локальный детерминированный симулятор подтверждения указания. Он возвращает текст ответа, статус применения, прогнозный эффект и следующий момент проверки, но не меняет live-телеметрию, ML-прогноз или внешний парк.",
+        "operationId": "simulate_driver_command_api_driver_commands__command_id__simulate_post",
+        "parameters": [
+          {
+            "name": "command_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Command Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Указание не найдено."
+          },
+          "409": {
+            "description": "Указание заблокировано guardrail, просрочено внешним каналом или уже недоступно для локальной симуляции."
+          },
+          "422": {
+            "description": "ТС больше недоступно для расчёта реакции."
+          }
+        }
+      }
+    },
+    "/api/reserve-dispatches": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Прочитать журнал выпуска резерва",
+        "description": "Возвращает сохранённые заявки выпуска резерва с решением, доказательствами, расчётным эффектом и статусом локального integration outbox. `external_execution: false` означает, что внешний флот ещё не подключён. Если подтверждения нет 15 минут, запись получает `integration_timeout` и остаётся только в истории.",
+        "operationId": "get_reserve_dispatches_api_reserve_dispatches_get",
+        "parameters": [
+          {
+            "name": "tr_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tr Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Зарегистрировать выпуск резервного ТС",
+        "description": "Проверяет положительный риск, свежесть данных, уверенность map matching, расчётный ETA резерва и запас времени до контрольной остановки. При успехе сохраняет заявку в SQLite; внешний выпуск не выполняется без интеграции с флотом.",
+        "operationId": "release_reserve_api_reserve_dispatches_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReserveDispatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "409": {
+            "description": "Выпуск заблокирован правилами безопасности данных или уже есть активная заявка."
+          },
+          "422": {
+            "description": "Неизвестный профиль, ТС или плановая геометрия."
+          }
+        }
+      }
+    },
+    "/api/action-center": {
+      "get": {
+        "tags": [
+          "Указания водителю"
+        ],
+        "summary": "Получить центр действий",
+        "description": "Объединяет открытые разрешённые указания водителю и заявки выпуска резерва, сортируя их по просроченности и приоритету. Заблокированные guardrail записи и истёкшие внешние интеграции остаются в истории и не считаются открытой работой; `due=true` означает, что нужна повторная проверка. `summary.timed_out` общий для двух outbox, `summary.reserve_timed_out` — только для резерва.",
+        "operationId": "get_action_center_api_action_center_get",
+        "parameters": [
+          {
+            "name": "dispatcher_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Dispatcher Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Профиль dispatcher_id не найден."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
@@ -1427,7 +1663,7 @@
           "message"
         ],
         "title": "DriverCommand",
-        "description": "Locally queued instruction; it is never delivered outside the MVP."
+        "description": "Auditable driver instruction evaluated against current vehicle evidence."
       },
       "EmulatorControl": {
         "properties": {
@@ -1576,6 +1812,35 @@
         ],
         "title": "Point",
         "description": "Manual forecast point tied to one scheduled stop in the 10–15 minute window."
+      },
+      "ReserveDispatch": {
+        "properties": {
+          "dispatcher_id": {
+            "type": "string",
+            "pattern": "^(admin|dispatcher)-[a-z0-9-]{2,40}$",
+            "title": "Dispatcher Id",
+            "description": "Профиль оператора, подтверждающий выпуск резерва.",
+            "examples": [
+              "dispatcher-02"
+            ]
+          },
+          "tr_id": {
+            "type": "integer",
+            "exclusiveMinimum": 0.0,
+            "title": "Tr Id",
+            "description": "Основное ТС/линия, для которой выпускается резерв.",
+            "examples": [
+              131672
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "dispatcher_id",
+          "tr_id"
+        ],
+        "title": "ReserveDispatch",
+        "description": "Request to register a reserve release after data-driven validation."
       },
       "SimulationCancel": {
         "properties": {

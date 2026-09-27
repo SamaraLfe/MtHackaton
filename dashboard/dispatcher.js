@@ -13,6 +13,12 @@
     high: 'Риск опоздания',
     unknown: 'Нет оценки'
   };
+  const commandStatuses = {
+    queued_for_integration: 'в очереди интеграции',
+    blocked_by_guardrail: 'заблокировано правилами · терминальный результат',
+    integration_timeout: 'интеграция истекла · канал не подтвердил',
+    simulated_completed: 'ответ симулятора получен'
+  };
 
   const actionText = {
     contact:
@@ -22,13 +28,18 @@
       'При возможности сократите отставание без нарушения ПДД, скоростного режима и требований безопасности.',
 
     maintain:
-      'Подтвердите возможность выдерживать интервал движения и следовать графику безопасно.'
+      'Подтвердите возможность выдерживать интервал движения и следовать графику безопасно.',
+
+    slow_down_safely:
+      'Согласуйте мягкое снижение темпа, чтобы вернуть интервал к плану без резкого торможения.'
   };
 
   let vehicles = [];
   let baseVehicles = [];
   let archivedVehicles = [];
   let paths = [];
+  let actionCenter = [];
+  let actionCenterSummary = {};
 
   let selectedId = null;
 
@@ -41,6 +52,7 @@
 
   let reserveScenario = null;
   let lastRuntime = {};
+  let commandFeedback = null;
 
   /*
    * Состояние раскрытых блоков карточки.
@@ -49,6 +61,26 @@
    */
   let explanationOpen = false;
   let commandHistoryOpen = false;
+
+  function commandFeedbackHtml(vehicleId) {
+    const feedback = commandFeedback;
+    if (!feedback || feedback.tr_id !== vehicleId) return '';
+    if (feedback.kind === 'simulation') {
+      const saved = Number(feedback.expectedSavedDelayS);
+      const saving = Number.isFinite(saved) && saved > 0
+        ? `Ожидаемое сохранение воздействия: −${duration(saved)}.`
+        : '';
+      return `<b>Ответ симулятора получен</b><span>${esc(feedback.response || 'Водитель подтвердил указание.')} ${esc(saving)}</span><small>${esc(feedback.note || '')} ${esc(feedback.reason || '')} ${esc(feedback.checkAt ? `Следующая проверка: ${time(feedback.checkAt)}.` : '')}</small>`;
+    }
+    if (feedback.kind === 'error') {
+      return `<span class="reserve-blocked">${esc(feedback.message)}</span>`;
+    }
+    const simulate = feedback.simulatable
+      ? '<button type="button" class="secondary simulate-command" id="simulate-command">Смоделировать ответ водителя</button>'
+      : '';
+    const detail = feedback.detail ? `<small>${esc(feedback.detail)}</small>` : '';
+    return `<span>${esc(feedback.message)}</span>${simulate}${detail}`;
+  }
 
 
   /* =======================================================
@@ -86,6 +118,19 @@
     return seconds < 60 ? `${seconds} с` : `${Math.floor(seconds / 60)} мин${seconds % 60 ? ` ${seconds % 60} с` : ''}`;
   };
   const delay = value => !Number.isFinite(value) ? '—' : `${value < 0 ? '−' : '+'}${duration(value)}`;
+  const expectedDelaySeconds = vehicle => {
+    if (vehicle.stale || !Number.isFinite(vehicle.prediction_s) || !Number.isFinite(vehicle.late_probability)) return null;
+    return Math.max(0, vehicle.prediction_s) * Math.min(1, Math.max(0, vehicle.late_probability));
+  };
+  const businessFromVehicles = items => {
+    const active = items.filter(vehicle => vehicle.trip_status !== 'completed' && vehicle.trip_status !== 'not_started' && vehicle.on_route !== false);
+    const forecasted = active.filter(vehicle => expectedDelaySeconds(vehicle) != null);
+    const expected = forecasted.reduce((sum, vehicle) => sum + expectedDelaySeconds(vehicle), 0);
+    return {
+      coverage_pct: active.length ? (forecasted.length / active.length) * 100 : null,
+      expected_delay_minutes: expected / 60
+    };
+  };
   const predictionText = vehicle => {
     if (vehicle.trip_status === 'completed') return 'Рейс завершён';
     if (!Number.isFinite(vehicle.prediction_s) || vehicle.stale) return vehicle.status_label || 'Нет актуального прогноза';
@@ -158,7 +203,7 @@
   ) => {
     const response = await fetch(
       url,
-      options
+      {cache: 'no-store', ...options}
     );
 
     const data = await response
@@ -168,8 +213,11 @@
       }));
 
     if (!response.ok) {
+      const detail = typeof data.detail === 'string'
+        ? data.detail
+        : data.detail?.message || JSON.stringify(data.detail || `HTTP ${response.status}`);
       throw Error(
-        data.detail ||
+        detail ||
         `HTTP ${response.status}`
       );
     }
@@ -564,6 +612,7 @@
         headway,
         before,
         after,
+        decision: data.decision || {},
 
         vehicle:
           scenarioVehicle(
@@ -598,13 +647,24 @@
           : 'риск не рассчитан';
 
       const placement = data.placement || {};
+      const savedExpectedDelay = Number(data.impact?.saved_expected_delay_minutes);
+      const impactText = Number.isFinite(savedExpectedDelay)
+        ? `Ожидаемый эффект для парка: −${savedExpectedDelay.toFixed(1)} мин.`
+        : 'Эффект для парка не рассчитан.';
+      const decision = data.decision || {};
+      const blockers = (decision.blockers || []).join('; ');
+      const releaseControl = decision.allowed
+        ? `<button type="button" class="primary" id="reserve-release">Зарегистрировать выпуск</button>`
+        : `<span class="reserve-blocked">Выпуск заблокирован: ${esc(blockers || 'недостаточно подтверждений')}</span>`;
       result.innerHTML =
         `<b>Резерв размещён на плановом сегменте</b>
          <span>
-           Основное ТС ${routeId}: риск ${change}; прогноз ${delay(placement.before_prediction_s)} → ${delay(placement.after_prediction_s)}.
+           Основное ТС ${routeId}: риск ${change}; прогноз ${delay(placement.before_prediction_s)} → ${delay(placement.after_prediction_s)}. ${impactText}
            Следующая точка: ${esc(placement.next_stop_address || 'не определена')}.
            Пунктир показывает путь резерва до цели.
          </span>
+         <span>ETA резерва ${duration(placement.reserve_eta_s)} · запас ${placement.slack_s >= 0 ? '+' : '−'}${duration(Math.abs(placement.slack_s || 0))} · уверенность ${Math.round((placement.confidence || 0) * 100)}%.</span>
+         ${releaseControl}
          <button
            type="button"
            class="link-button"
@@ -615,6 +675,7 @@
 
       $('reserve-clear').onclick =
         clearReserveScenario;
+      if (decision.allowed) $('reserve-release').onclick = releaseReserve;
 
       openVehicle(
         reserveScenario
@@ -630,6 +691,31 @@
         </span>`;
     } finally {
       button.disabled = false;
+    }
+  }
+
+
+  async function releaseReserve() {
+    if (!reserveScenario) return;
+    const result = $('reserve-result');
+    const button = $('reserve-release');
+    if (button) button.disabled = true;
+    try {
+      const action = await api('/api/reserve-dispatches', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dispatcher_id: profileId, tr_id: reserveScenario.routeId})
+      });
+      reserveScenario.release = action;
+      const saved = Number(action.decision?.expected_effect?.saved_expected_delay_s);
+      result.innerHTML =
+        `<b>Выпуск резерва зарегистрирован</b>
+         <span>Заявка ${esc(action.id)} добавлена в локальный integration outbox. ${Number.isFinite(saved) ? `Ожидаемое снижение воздействия: ${saved.toFixed(1)} с.` : ''} Внешняя передача флоту пока не подключена.</span>
+         <button type="button" class="link-button" id="reserve-clear">Убрать сценарий</button>`;
+      $('reserve-clear').onclick = clearReserveScenario;
+    } catch (error) {
+      if (button) button.disabled = false;
+      result.innerHTML += `<span class="reserve-blocked">Заявка не зарегистрирована: ${esc(error.message)}</span>`;
     }
   }
 
@@ -657,7 +743,8 @@
      ======================================================= */
 
   function render(
-    runtime = {}
+    runtime = {},
+    { refreshDetail = true } = {}
   ) {
     lastRuntime = runtime;
 
@@ -671,6 +758,7 @@
     vehicles.sort(
       (a, b) =>
         Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical') ||
+        (expectedDelaySeconds(b) ?? -1) - (expectedDelaySeconds(a) ?? -1) ||
         (
           priority[a.level] ?? 9
         ) -
@@ -700,6 +788,8 @@
     const counters =
       runtime.counters || {};
 
+    const business = runtime.business || businessFromVehicles(baseVehicles);
+
     const live =
       runtime.state
         ?.mode === 'live';
@@ -728,6 +818,12 @@
 
     const processingMs = Number(counters.last_inference_ms);
     $('kpi-processing').textContent = Number.isFinite(processingMs) ? `${processingMs} мс` : '—';
+    $('kpi-expected-delay').textContent = Number.isFinite(Number(business.expected_delay_minutes))
+      ? `${Number(business.expected_delay_minutes).toFixed(1)} мин`
+      : '—';
+    $('kpi-coverage').textContent = Number.isFinite(Number(business.coverage_pct))
+      ? `${Math.round(Number(business.coverage_pct))}%`
+      : '—';
 
     /* stream status */
 
@@ -776,6 +872,7 @@
 
     renderReserveOptions();
     renderAttention();
+    renderActionCenter();
     renderTable();
 
     window.TransitMap.render(
@@ -790,6 +887,7 @@
      * но сохраняем состояние details.
      */
     if (
+      refreshDetail &&
       $('drawer')
         .classList
         .contains('open')
@@ -805,18 +903,17 @@
 
   function renderAttention() {
     const attention =
-      [...baseVehicles].sort((a,b) => Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical'))
+      [...baseVehicles]
         .filter(
           vehicle =>
             vehicle.level === 'high' ||
             vehicle.level === 'medium'
         )
-        .concat(
-          baseVehicles.filter(
-            vehicle =>
-              vehicle.level === 'low'
-          )
-        )
+        .sort((a,b) =>
+        Number(b.attention_level === 'critical') - Number(a.attention_level === 'critical') ||
+        (expectedDelaySeconds(b) ?? -1) - (expectedDelaySeconds(a) ?? -1) ||
+        ({high:0, medium:1, low:2, unknown:3}[a.level] ?? 9) - ({high:0, medium:1, low:2, unknown:3}[b.level] ?? 9)
+      )
         .slice(
           0,
           6
@@ -844,7 +941,7 @@
                       ${esc(
                         vehicle.position_match?.next_stop_address ||
                         vehicle.stop_address
-                      )}
+                      )}${expectedDelaySeconds(vehicle) > 0 ? ` · эффект ${duration(expectedDelaySeconds(vehicle))}` : ''}
                     </small>
                   </span>
 
@@ -867,7 +964,7 @@
             .join('')
         : (
             '<p class="empty">' +
-            'Нет рейсов для отображения' +
+            'Нет рейсов, требующих вмешательства' +
             '</p>'
           );
 
@@ -885,6 +982,59 @@
             );
         }
       );
+  }
+
+
+  /* =======================================================
+     ACTION CENTER
+     ======================================================= */
+
+  function renderActionCenter() {
+    const list = $('action-center-list');
+    const summary = $('action-center-summary');
+    if (!list) return;
+
+    const due = actionCenter.filter(item => item.due).length;
+    if (summary) {
+      const blocked = Number(actionCenterSummary.blocked || 0);
+      const timedOut = Number(actionCenterSummary.timed_out || 0);
+      const terminal = blocked + timedOut;
+      const terminalLabel = [
+        blocked ? `${blocked} заблокировано` : '',
+        timedOut ? `${timedOut} истекло` : ''
+      ].filter(Boolean).join(' · ');
+      const historyLabel = terminal ? `история: ${terminalLabel}` : '';
+      summary.textContent = actionCenter.length
+        ? `${due ? `${due} требуют внимания · ` : ''}${actionCenter.length} открытых${historyLabel ? ` · ${historyLabel}` : ''}`
+        : terminal
+          ? `Нет открытых действий · ${historyLabel}`
+          : 'Нет открытых действий';
+    }
+
+    if (!actionCenter.length) {
+      list.innerHTML = '<p class="empty">Открытых действий нет.</p>';
+      return;
+    }
+
+    list.innerHTML = actionCenter.slice(0, 8).map(item => {
+      const status = item.status === 'blocked_by_guardrail'
+        ? 'Заблокировано правилами'
+        : item.due
+          ? 'Проверить сейчас'
+          : `Проверить в ${time(item.due_at)}`;
+      const priority = ['critical', 'high', 'medium', 'low'].includes(item.priority)
+        ? item.priority
+        : 'medium';
+      return `<button class="action-center-item ${item.due ? 'is-due' : ''}" data-id="${item.tr_id}" type="button">
+        <i class="action-center-mark ${priority}"></i>
+        <span class="action-center-copy"><b>${esc(item.title)}</b><small>ТС ${item.tr_id} · ${esc(item.reason)}</small></span>
+        <span class="action-center-status">${esc(status)}</span>
+      </button>`;
+    }).join('');
+
+    document.querySelectorAll('.action-center-item').forEach(item => {
+      item.onclick = () => openVehicle(Number(item.dataset.id));
+    });
   }
 
 
@@ -1015,6 +1165,7 @@
     if (selectedId !== id) {
       explanationOpen = false;
       commandHistoryOpen = false;
+      commandFeedback = null;
     }
 
     selectedId = id;
@@ -1270,6 +1421,9 @@
       ? new Date(new Date(vehicle.target_time_begin).getTime() + vehicle.prediction_s * 1000).toISOString() : null;
     const risk = Number.isFinite(vehicle.late_probability) && !vehicle.stale
       ? `${Math.round(vehicle.late_probability * 100)}%` : '—';
+    const recommendation = vehicle.dispatcher_recommendation || {};
+    const initialAction = actionText[recommendation.action] ? recommendation.action : 'contact';
+    const expectedImpact = expectedDelaySeconds(vehicle);
     $('vehicle-detail').innerHTML =
       `<div class="vehicle-title"><p class="eyebrow">РЕЙС</p><h2>ТС ${vehicle.tr_id}</h2><p>${esc(vehicle.route_start_stop || '—')} → ${esc(vehicle.route_end_stop || '—')}</p></div>
       <div class="detail-status"><span class="tag ${vehicle.level}">${esc(vehicle.status_label || labels[vehicle.level])}</span></div>
@@ -1296,6 +1450,14 @@
           <dt>Прогноз рассчитан · МСК</dt><dd>${time(vehicle.T)}${Number.isFinite(vehicle.horizon_s) ? ` · горизонт ${duration(vehicle.horizon_s)}` : ''}</dd>
         </dl>
       </details>
+
+      <section class="decision-panel">
+        <p class="eyebrow">ЛОГИКА РЕАГИРОВАНИЯ</p>
+        <h3>${esc(recommendation.title || 'Продолжать наблюдение')}</h3>
+        <p>${esc(recommendation.reason || 'Недостаточно данных для рекомендации.')}</p>
+        <small>${expectedImpact != null ? `Ожидаемое воздействие: ${duration(expectedImpact)} · ` : ''}следующая проверка после действия определяется по горизонту прогноза.</small>
+        <div class="action-plan" id="action-plan"><small>Сравниваю пользу допустимых действий…</small></div>
+      </section>
 
       <section class="action-section">
 
@@ -1335,14 +1497,14 @@
           class="command-text"
           id="command-text"
         >${esc(
-          actionText.contact
+          actionText[initialAction]
         )}</textarea>
 
 
         <button
           class="send-command"
           id="send-command"
-          data-action="contact"
+          data-action="${initialAction}"
         >
           Зарегистрировать указание
         </button>
@@ -1351,7 +1513,8 @@
         <div
           class="command-result"
           id="command-result"
-        ></div>
+          aria-live="polite"
+        >${commandFeedbackHtml(vehicle.tr_id)}</div>
 
       </section>
 
@@ -1440,6 +1603,9 @@
               .textContent =
               button.textContent
                 .trim();
+            commandFeedback = null;
+            const result = $('command-result');
+            if (result) result.textContent = '';
           };
         }
       );
@@ -1447,6 +1613,11 @@
 
     $('send-command').onclick =
       sendCommand;
+
+    const simulateButton = $('simulate-command');
+    if (simulateButton && commandFeedback?.commandId) {
+      simulateButton.onclick = () => simulateCommand(commandFeedback.commandId);
+    }
 
 
     /*
@@ -1459,10 +1630,10 @@
       vehicle.tr_id;
 
     try {
-      const items =
-        await commandHistory(
-          requestedVehicleId
-        );
+      const [items, plan] = await Promise.all([
+        commandHistory(requestedVehicleId),
+        api(`/api/action-plan?tr_id=${requestedVehicleId}&dispatcher_id=${encodeURIComponent(profileId)}`).catch(() => null)
+      ]);
 
       if (
         selectedId !==
@@ -1495,7 +1666,7 @@
                     <small>
                       ${time(
                         item.created_at
-                      )}
+                      )} · ${esc(commandStatuses[item.status] || item.status || 'статус не указан')}
                     </small>
                   </li>`
               )
@@ -1505,6 +1676,36 @@
               'Указаний пока нет.' +
               '</li>'
             );
+
+      const actionPlan = $('action-plan');
+      if (actionPlan && plan?.options?.length) {
+        actionPlan.innerHTML = `<b>Польза действий · ${esc(plan.model)}</b>${plan.options.map(option => {
+          const utility = option.utility || {};
+          const score = Number(utility.score);
+          const scoreText = Number.isFinite(score) ? `${Math.round(score)}/100` : '—';
+          const effect = Number(utility.expected_saved_delay_s || 0);
+          const allowed = option.decision?.allowed === true;
+          const label = allowed ? scoreText : 'заблокировано';
+          return `<button type="button" class="action-plan-option ${option.action === plan.recommended_action ? 'is-recommended' : ''} ${allowed ? '' : 'is-blocked'}" data-plan-action="${esc(option.action)}" ${allowed ? '' : 'disabled aria-disabled="true"'}>
+            <span><b>${esc(option.title)}</b><small>${esc(utility.rationale || 'Нет пояснения')}</small></span>
+            <strong>${label}${effect > 0 ? ` · −${duration(effect)}` : ''}</strong>
+          </button>`;
+        }).join('')}<small class="action-plan-note">Это proxy benefit-v1: расчёт пользы, а не подтверждённый фактический эффект.</small>`;
+        actionPlan.querySelectorAll('[data-plan-action]').forEach(button => {
+          button.onclick = () => {
+            if (button.disabled) return;
+            const target = button.dataset.planAction;
+            const send = $('send-command');
+            if (!send || !actionText[target]) return;
+            $('command-text').value = actionText[target];
+            send.dataset.action = target;
+            send.textContent = button.querySelector('b')?.textContent || 'Зарегистрировать указание';
+            commandFeedback = null;
+            const result = $('command-result');
+            if (result) result.textContent = '';
+          };
+        });
+      }
 
     } catch (error) {
       if (
@@ -1593,18 +1794,33 @@
        */
       commandHistoryOpen = true;
 
-      const result =
-        $('command-result');
-
-      if (result) {
-        result.textContent =
-          `Указание зарегистрировано: ` +
-          `${data.action_title}.`;
-      }
-
+      const decision = data.decision || {};
+      const commandMessage = decision.allowed
+        ? `Указание зарегистрировано и прошло проверку. Следующая проверка: ${time(decision.next_check_at)}.`
+        : `Указание сохранено как заблокированное: ${(decision.blockers || []).join('; ') || 'недостаточно данных'}.`;
+      commandFeedback = decision.allowed
+        ? {
+            tr_id: vehicle.tr_id,
+            kind: 'queued',
+            message: commandMessage,
+            commandId: data.id,
+            simulatable: true,
+          }
+        : {
+            tr_id: vehicle.tr_id,
+            kind: 'blocked',
+            message: commandMessage,
+            detail: 'Это терминальный результат guardrail: он остаётся в журнале, но не попадает в очередь открытых действий.',
+            simulatable: false,
+          };
       await renderDetail();
 
     } catch (error) {
+      commandFeedback = {
+        tr_id: vehicle.tr_id,
+        kind: 'error',
+        message: `Не удалось зарегистрировать: ${error.message}`,
+      };
       const result =
         $('command-result');
 
@@ -1619,6 +1835,37 @@
     }
   }
 
+  async function simulateCommand(commandId) {
+    const button = $('simulate-command');
+    if (button) button.disabled = true;
+    try {
+      const data = await api(`/api/driver-commands/${encodeURIComponent(commandId)}/simulate`, {method: 'POST'});
+      commandHistoryOpen = true;
+      const response = data.simulated_response || {};
+      const projection = response.projection || {};
+      const next = response.next_step || {};
+      commandFeedback = {
+        tr_id: selectedId,
+        kind: 'simulation',
+        response: response.response,
+        note: response.note || 'Локальная симуляция, live-контур не изменён.',
+        reason: next.reason || '',
+        checkAt: next.check_at,
+        expectedSavedDelayS: projection.expected_saved_delay_s,
+      };
+      await refresh();
+    } catch (error) {
+      if (button) button.disabled = false;
+      commandFeedback = {
+        tr_id: selectedId,
+        kind: 'error',
+        message: `Симуляция не выполнена: ${error.message}`,
+      };
+      const result = $('command-result');
+      if (result) result.innerHTML = `<span class="reserve-blocked">Симуляция не выполнена: ${esc(error.message)}</span>`;
+    }
+  }
+
 
   /* =======================================================
      REFRESH
@@ -1628,7 +1875,8 @@
     try {
       const [
         state,
-        network
+        network,
+        actionData
       ] =
         await Promise.all([
           api(
@@ -1637,8 +1885,17 @@
             )}`
           ),
 
-          api('/api/network')
+          api('/api/network'),
+
+          api(
+            `/api/action-center?dispatcher_id=${encodeURIComponent(
+              profileId
+            )}`
+          ).catch(() => ({ items: [] }))
         ]);
+
+      actionCenter = actionData.items || [];
+      actionCenterSummary = actionData.summary || {};
 
       const allVehicles = state.vehicles || [];
       const liveMode = state.state?.mode === 'live';
@@ -1662,7 +1919,10 @@
       paths =
         network.paths || [];
 
-      render(state);
+      render(state, { refreshDetail: false });
+      if ($('drawer')?.classList.contains('open')) {
+        await renderDetail();
+      }
 
     } catch (error) {
       $('attention-list').innerHTML =

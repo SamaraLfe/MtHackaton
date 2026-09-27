@@ -24,6 +24,170 @@ def test_risk_and_incident_helpers():
     assert [x['vehicle_id'] for x in backend.incidents(items)]==[10]
 
 
+def test_business_kpis_are_explainable_and_risk_weighted():
+    result=backend.business_kpis([
+        {'tr_id':10,'level':'high','late_probability':.8,'prediction_s':180},
+        {'tr_id':11,'level':'low','late_probability':.1,'prediction_s':-30},
+        {'tr_id':12,'level':'unknown','late_probability':None,'prediction_s':None},
+    ])
+    assert result['active_vehicles']==3
+    assert result['forecasted_vehicles']==2
+    assert result['expected_delay_minutes']==2.4
+    assert result['top_priority_tr_id']==10
+
+
+def test_driver_decision_has_guardrails_and_follow_up():
+    vehicle={
+        'tr_id':10,'level':'high','prediction_s':180,'current_deviation_s':150,
+        'late_probability':.8,'horizon_s':720,'connection_state':'live','stale':False,
+        'trip_status':'active',
+    }
+    ready=backend.driver_decision(vehicle,'accelerate_safely')
+    assert ready['allowed'] is True
+    assert ready['evidence']['expected_delay_s']==144
+    assert ready['next_check_in_s']<=720
+
+    blocked=backend.driver_decision({**vehicle,'prediction_s':60},'accelerate_safely')
+    assert blocked['allowed'] is False
+    assert '120' in ' '.join(blocked['blockers'])
+    assert ready['utility']['model']=='benefit-v1-rule-based'
+    assert ready['utility']['expected_saved_delay_s']>=0
+
+
+def test_action_center_orders_due_work_and_respects_dispatcher_scope(monkeypatch):
+    now=pd.Timestamp('2026-01-06T12:00:00+03:00')
+    monkeypatch.setattr(backend,'get_dispatcher',lambda dispatcher_id: {'assigned_tr_ids':[10]} if dispatcher_id=='dispatcher-01' else None)
+    monkeypatch.setattr(backend,'stored_driver_commands',lambda limit=200:[
+        {'id':'cmd-due','tr_id':10,'created_at':'2026-01-06T11:50:00+03:00','status':'queued_for_integration','action':'contact','action_title':'Связаться с водителем','decision':{'priority':'medium','next_check_at':'2026-01-06T11:55:00+03:00','goal':'Подтвердить обстановку'}},
+        {'id':'cmd-blocked','tr_id':10,'created_at':'2026-01-06T11:48:00+03:00','status':'blocked_by_guardrail','action':'accelerate_safely','action_title':'Сократить отставание','decision':{'priority':'high','blockers':['Прогноз недостаточен']}},
+        {'id':'cmd-filtered','tr_id':11,'created_at':'2026-01-06T11:40:00+03:00','status':'blocked_by_guardrail','action':'accelerate_safely','action_title':'Сократить отставание','decision':{'priority':'high','blockers':['Нет свежей телеметрии']}},
+        {'id':'cmd-open','tr_id':10,'created_at':'2026-01-06T11:59:00+03:00','status':'queued_for_integration','action':'maintain','action_title':'Продолжать по графику','decision':{'priority':'low','next_check_at':'2026-01-06T12:05:00+03:00','goal':'Сохранить интервал'}},
+    ])
+    monkeypatch.setattr(backend,'stored_reserve_actions',lambda limit=100:[])
+
+    items=backend.action_center_items('dispatcher-01',now)
+
+    assert [item['id'] for item in items]==['cmd-due','cmd-open']
+    assert items[0]['due'] is True
+    assert items[0]['priority']=='medium'
+    assert items[1]['due'] is False
+
+
+def test_stale_driver_command_becomes_terminal_integration_timeout(monkeypatch):
+    saved=[]
+    old={'id':'cmd-old','tr_id':10,'created_at':'2026-01-06T11:00:00+03:00','status':'queued_for_integration'}
+    monkeypatch.setattr(backend,'stored_driver_commands',lambda limit=2000:[dict(old)])
+    monkeypatch.setattr(backend,'update_driver_command',lambda command:saved.append(command))
+    expired=backend.expire_stale_driver_commands(pd.Timestamp('2026-01-06T12:00:00+03:00'),ttl_s=900)
+    assert expired==1
+    assert saved[0]['status']=='integration_timeout'
+    assert saved[0]['simulation_available'] is False
+
+
+def test_stale_reserve_action_becomes_terminal_integration_timeout(monkeypatch):
+    saved=[]
+    old={'id':'reserve-old','tr_id':10,'created_at':'2026-01-06T11:00:00+03:00','status':'queued_for_integration','external_execution':False}
+    monkeypatch.setattr(backend,'stored_reserve_actions',lambda limit=2000:[dict(old)])
+    monkeypatch.setattr(backend,'update_reserve_action',lambda action:saved.append(action))
+    expired=backend.expire_stale_reserve_actions(pd.Timestamp('2026-01-06T12:00:00+03:00'),ttl_s=900)
+    assert expired==1
+    assert saved[0]['status']=='integration_timeout'
+    assert saved[0]['external_execution'] is False
+    assert 'резерва' in saved[0]['terminal_reason']
+
+
+def test_action_center_endpoint_returns_operational_summary():
+    with TestClient(backend.app) as client:
+        response=client.get('/api/action-center',params={'dispatcher_id':'dispatcher-01'})
+        assert response.status_code==200
+        data=response.json()
+        assert {'items','summary','as_of','dispatcher_id'}<=set(data)
+        assert {'open','due','blocked','high_priority','reserve_timed_out'}<=set(data['summary'])
+        assert data['dispatcher_id']=='dispatcher-01'
+
+
+def test_action_plan_ranks_actions_with_transparent_benefit_model():
+    with TestClient(backend.app) as client:
+        response=client.get('/api/action-plan',params={'tr_id':131672,'dispatcher_id':'dispatcher-02'})
+        assert response.status_code==200,response.text
+        data=response.json()
+        assert data['model']=='benefit-v1-rule-based'
+        assert len(data['options'])==4
+        assert all('utility' in option and 'decision' in option for option in data['options'])
+        assert data['recommended_action'] in {option['action'] for option in data['options']}
+
+
+def test_driver_simulator_closes_allowed_command_from_open_queue():
+    command_id=None
+    old_mode=backend.state.get('mode')
+    try:
+        with TestClient(backend.app) as client:
+            client.post('/api/mode',json={'mode':'replay'})
+            created=client.post('/api/driver-commands',json={
+                'role':'dispatcher','dispatcher_id':'dispatcher-02','tr_id':131672,'action':'maintain',
+                'message':'Подтвердите движение по графику для локальной симуляции.'
+            })
+            assert created.status_code==201,created.text
+            command=created.json();command_id=command['id']
+            assert command['status']=='queued_for_integration'
+            simulated=client.post(f"/api/driver-commands/{command_id}/simulate")
+            assert simulated.status_code==200,simulated.text
+            result=simulated.json()
+            assert result['status']=='simulated_completed'
+            assert result['simulated_response']['acknowledged'] is True
+            assert result['simulated_response']['mode']=='local_driver_simulator'
+            assert result['simulated_response']['next_step']['action']=='recheck_vehicle'
+            assert result['simulated_response']['next_step']['check_at']
+    finally:
+        if command_id:
+            with sqlite3.connect(backend.DB_PATH) as store:
+                store.execute('DELETE FROM driver_commands WHERE id=?',(command_id,))
+                store.commit()
+        backend.state['mode']=old_mode
+
+
+def test_driver_simulator_rejects_expired_command():
+    command_id=None
+    try:
+        with TestClient(backend.app) as client:
+            created=client.post('/api/driver-commands',json={
+                'role':'dispatcher','dispatcher_id':'dispatcher-02','tr_id':131672,'action':'maintain',
+                'message':'Проверка недоступности просроченного канала.'
+            })
+            assert created.status_code==201,created.text
+            command=created.json();command_id=command['id']
+            command['status']='integration_timeout'
+            command['simulation_available']=False
+            backend.update_driver_command(command)
+            response=client.post(f"/api/driver-commands/{command_id}/simulate")
+            assert response.status_code==409
+            assert 'недоступна' in response.json()['detail']['message']
+    finally:
+        if command_id:
+            with sqlite3.connect(backend.DB_PATH) as store:
+                store.execute('DELETE FROM driver_commands WHERE id=?',(command_id,))
+                store.commit()
+
+
+def test_reserve_placement_handles_vehicle_without_control_stop():
+    saved=backend.schedule
+    backend.schedule=pd.DataFrame([
+        dict(tt_action_item_id=7,tr_id=1,ts=100,time_begin='2026-01-06 10:00:00',lon=37.6,lat=55.7,building_address='Stop A'),
+        dict(tt_action_item_id=8,tr_id=1,ts=200,time_begin='2026-01-06 10:10:00',lon=37.61,lat=55.71,building_address='Stop B'),
+    ])
+    try:
+        placement=backend.reserve_placement({
+            'tr_id':1,'target_stop_id':None,'T':None,'target_time_begin':None,
+            'current_deviation_s':30,'prediction_s':180,'horizon_s':600,
+            'stale':False,'connection_state':'live',
+            'position_match':{'segment_index':0,'fraction':0.2,'projected_lon':37.602,'projected_lat':55.702,'confidence':0.8},
+        })
+        assert placement is not None
+        assert placement['target_stop_address']=='Stop B'
+    finally:
+        backend.schedule=saved
+
+
 def test_metrics_expose_readable_v5_summary():
     with TestClient(backend.app) as client:
         response=client.get('/api/metrics')
@@ -46,6 +210,28 @@ def test_what_if_reduces_projected_risk():
         assert response.status_code==200
         data=response.json()
         assert data['projected'][0]['projected_late_probability']==.68
+        assert data['impact']['saved_expected_delay_minutes']==.4
+        backend.vehicles.clear()
+
+
+def test_reserve_release_is_persisted_only_after_evidence_gate():
+    action_id=None
+    try:
+        with TestClient(backend.app) as client:
+            client.post('/api/mode',json={'mode':'replay'})
+            created=client.post('/api/reserve-dispatches',json={'dispatcher_id':'dispatcher-02','tr_id':131672})
+            assert created.status_code==201,created.text
+            action=created.json();action_id=action['id']
+            assert action['status']=='queued_for_integration'
+            assert action['decision']['allowed'] is True
+            assert action['placement']['reserve_eta_s']<=action['placement']['horizon_s']
+            history=client.get('/api/reserve-dispatches',params={'tr_id':131672}).json()['items']
+            assert any(item['id']==action_id for item in history)
+    finally:
+        if action_id:
+            with sqlite3.connect(backend.DB_PATH) as store:
+                store.execute('DELETE FROM reserve_actions WHERE id=?',(action_id,))
+                store.commit()
         backend.vehicles.clear()
 
 def test_map_match_and_admin_role_gate():
@@ -74,7 +260,8 @@ def test_dispatcher_command_is_persisted_in_the_local_outbox():
             })
             assert response.status_code==201,response.text
             command=response.json();command_id=command['id']
-            assert command['status']=='queued_for_integration'
+            assert command['status']==('queued_for_integration' if command['decision']['allowed'] else 'blocked_by_guardrail')
+            assert command['decision']['action']=='accelerate_safely'
             assert command['channel']=='local_dispatch_outbox'
             assert command['dispatcher']['id']=='dispatcher-01'
         with sqlite3.connect(backend.DB_PATH) as store:
@@ -158,8 +345,17 @@ def test_dispatcher_keeps_operational_reserve_what_if_workflow_visible():
     map_source=(Path('dashboard')/'map.js').read_text(encoding='utf-8')
     assert 'Выпустить резервное ТС' in page
     assert 'reserve-route' in page and 'reserve-mode' in page
+    assert 'action-center-list' in page
     assert "'/api/what-if'" in source
+    assert '/api/action-center' in source
     assert 'scenarioVehicle' in source and 'scenario-marker' in map_source
+
+
+def test_attention_queue_does_not_label_on_time_vehicles_as_interventions():
+    source=(Path('dashboard')/'dispatcher.js').read_text(encoding='utf-8')
+    attention=source[source.index('function renderAttention()'):source.index('function renderActionCenter()')]
+    assert '.concat(' not in attention
+    assert 'Нет рейсов, требующих вмешательства' in attention
 
 
 def test_backend_builds_and_exposes_code_documentation_route():

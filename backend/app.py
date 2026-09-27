@@ -103,12 +103,17 @@ class AdminSimulation(BaseModel):
     interval_s:int=Field(default=30,ge=5,le=300,description='Интервал между событиями, секунды.')
 
 class DriverCommand(BaseModel):
-    """Locally queued instruction; it is never delivered outside the MVP."""
+    """Auditable driver instruction evaluated against current vehicle evidence."""
     role:str=Field(pattern='^(dispatcher|admin)$',description='Заявленная роль автора записи.',examples=['dispatcher'])
     dispatcher_id:str=Field(pattern='^dispatcher-[a-z0-9]{2,40}$',description='Существующий локальный профиль диспетчера.',examples=['dispatcher-01'])
     tr_id:int=Field(gt=0,description='Получатель указания.',examples=[131672])
     action:str=Field(pattern='^(contact|maintain|accelerate_safely|slow_down_safely)$',description='contact, maintain, accelerate_safely или slow_down_safely.',examples=['contact'])
     message:str=Field(min_length=5,max_length=300,description='Текст локального указания.',examples=['Уточните причину задержки и текущую обстановку.'])
+
+class ReserveDispatch(BaseModel):
+    """Request to register a reserve release after data-driven validation."""
+    dispatcher_id:str=Field(pattern='^(admin|dispatcher)-[a-z0-9-]{2,40}$',description='Профиль оператора, подтверждающий выпуск резерва.',examples=['dispatcher-02'])
+    tr_id:int=Field(gt=0,description='Основное ТС/линия, для которой выпускается резерв.',examples=[131672])
 
 class DispatcherCreate(BaseModel):
     """New local dispatcher profile persisted in SQLite."""
@@ -158,6 +163,8 @@ def init_store():
           id TEXT PRIMARY KEY, payload TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS driver_commands (
           id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS reserve_actions (
+          id TEXT PRIMARY KEY, tr_id INTEGER NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS app_meta (
           key TEXT PRIMARY KEY, value TEXT NOT NULL);
     ''')
@@ -188,9 +195,15 @@ def save_simulation(run):
     db.commit()
 
 def stored_simulations(status=None,tr_id=None,limit=50):
-    """Read durable scenario history with conservative server-side filters."""
+    """Read scenario history, preferring fresher in-process lifecycle state."""
     rows=db.execute('SELECT payload FROM simulations ORDER BY created_at DESC').fetchall()
-    items=[json.loads(row['payload']) for row in rows]
+    by_id={item['id']:item for item in (json.loads(row['payload']) for row in rows)}
+    # A background run can reach a terminal state immediately before its latest
+    # SQLite snapshot becomes visible to a concurrent list request.  The run
+    # registry is authoritative while this backend process owns the task.
+    for run_id,run in simulation_runs.items():
+        by_id[run_id]=clean(run)
+    items=sorted(by_id.values(),key=lambda item:item.get('created_at',''),reverse=True)
     if status: items=[item for item in items if item.get('status')==status]
     if tr_id is not None: items=[item for item in items if item.get('tr_id')==tr_id]
     return items[:limit]
@@ -201,6 +214,12 @@ def save_driver_command(command):
                (command['id'],command['tr_id'],json.dumps(clean(command),ensure_ascii=False),command['created_at']))
     db.commit()
 
+def update_driver_command(command):
+    """Update one local command while preserving its immutable command id."""
+    db.execute('UPDATE driver_commands SET payload=? WHERE id=?',
+               (json.dumps(clean(command),ensure_ascii=False),command['id']))
+    db.commit()
+
 def stored_driver_commands(tr_id=None,limit=200):
     """Return durable outbox records newest first; no delivery is implied."""
     query='SELECT payload FROM driver_commands'
@@ -209,6 +228,140 @@ def stored_driver_commands(tr_id=None,limit=200):
         query+=' WHERE tr_id=?';params.append(tr_id)
     query+=' ORDER BY created_at DESC LIMIT ?';params.append(limit)
     return [json.loads(row['payload']) for row in db.execute(query,params)]
+
+def stored_driver_command(command_id):
+    """Read one command by id for idempotent simulator callbacks."""
+    row=db.execute('SELECT payload FROM driver_commands WHERE id=?',(command_id,)).fetchone()
+    return json.loads(row['payload']) if row else None
+
+def expire_stale_driver_commands(now=None,ttl_s=900):
+    """Close local integration records that could not be delivered in time."""
+    now=pd.Timestamp.now(tz='Europe/Moscow') if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now=now.tz_localize('Europe/Moscow')
+    expired=0
+    for command in stored_driver_commands(limit=2000):
+        if command.get('status')!='queued_for_integration':
+            continue
+        try:
+            created=pd.Timestamp(command.get('created_at'))
+            if created.tzinfo is None:
+                created=created.tz_localize('Europe/Moscow')
+        except (TypeError,ValueError):
+            continue
+        if (now-created).total_seconds()<=ttl_s:
+            continue
+        command.update(
+            status='integration_timeout',simulation_available=False,
+            terminal_reason='Внешний канал не подтвердил доставку в течение 15 минут.',
+            resolved_at=now.isoformat(),
+        )
+        update_driver_command(command)
+        expired+=1
+    return expired
+
+def save_reserve_action(action):
+    """Persist a validated reserve release in the local integration outbox."""
+    db.execute('INSERT INTO reserve_actions(id,tr_id,payload,created_at) VALUES(?,?,?,?)',
+               (action['id'],action['tr_id'],json.dumps(clean(action),ensure_ascii=False),action['created_at']))
+    db.commit()
+
+def update_reserve_action(action):
+    """Update a reserve request without changing its audit identity."""
+    db.execute('UPDATE reserve_actions SET payload=? WHERE id=?',
+               (json.dumps(clean(action),ensure_ascii=False),action['id']))
+    db.commit()
+
+def stored_reserve_actions(tr_id=None,limit=100):
+    """Return newest reserve decisions with their evidence and lifecycle state."""
+    query='SELECT payload FROM reserve_actions'
+    params=[]
+    if tr_id is not None:
+        query+=' WHERE tr_id=?';params.append(tr_id)
+    query+=' ORDER BY created_at DESC LIMIT ?';params.append(limit)
+    return [json.loads(row['payload']) for row in db.execute(query,params)]
+
+def expire_stale_reserve_actions(now=None,ttl_s=900):
+    """Close reserve requests that the external fleet did not acknowledge."""
+    now=pd.Timestamp.now(tz='Europe/Moscow') if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now=now.tz_localize('Europe/Moscow')
+    expired=0
+    for action in stored_reserve_actions(limit=2000):
+        if action.get('status')!='queued_for_integration':
+            continue
+        try:
+            created=pd.Timestamp(action.get('created_at'))
+            if created.tzinfo is None:
+                created=created.tz_localize('Europe/Moscow')
+        except (TypeError,ValueError):
+            continue
+        if (now-created).total_seconds()<=ttl_s:
+            continue
+        action.update(
+            status='integration_timeout',external_execution=False,
+            terminal_reason='Внешний флот не подтвердил выпуск резерва в течение 15 минут.',
+            resolved_at=now.isoformat(),
+        )
+        update_reserve_action(action)
+        expired+=1
+    return expired
+
+def action_center_items(dispatcher_id=None,now=None):
+    """Combine open driver and reserve work into one dispatcher queue."""
+    now=pd.Timestamp.now(tz='Europe/Moscow') if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now=now.tz_localize('Europe/Moscow')
+    assigned=None
+    if dispatcher_id:
+        profile=get_dispatcher(dispatcher_id)
+        if profile is None:
+            raise HTTPException(404,'Dispatcher not found')
+        assigned=set(profile['assigned_tr_ids'])
+    items=[]
+
+    def add_item(item,kind,created_at,due_at,priority,title,reason,status,action):
+        try:
+            created=pd.Timestamp(created_at)
+            if created.tzinfo is None:created=created.tz_localize('Europe/Moscow')
+            due=pd.Timestamp(due_at)
+            if due.tzinfo is None:due=due.tz_localize('Europe/Moscow')
+        except (TypeError,ValueError):
+            created=now;due=now
+        age_s=max(0.0,(now-created).total_seconds())
+        items.append(clean({
+            'id':item['id'],'kind':kind,'tr_id':int(item['tr_id']),'title':title,'reason':reason,
+            'priority':priority,'status':status,'action':action,'created_at':created.isoformat(),
+            'due_at':due.isoformat(),'due':due<=now,'age_s':round(age_s,1),
+        }))
+
+    for command in stored_driver_commands(limit=200):
+        tr=int(command['tr_id'])
+        if assigned is not None and tr not in assigned:continue
+        # A guardrail rejection is a terminal audit result, not an open task.
+        # It stays in the vehicle history and can be retried after the reason
+        # is fixed, but it must not keep the dispatcher queue red forever.
+        if command.get('status')!='queued_for_integration':continue
+        decision=command.get('decision') or {}
+        due_at=decision.get('next_check_at') or command.get('created_at')
+        priority=decision.get('priority') or 'medium'
+        title='Проверить результат указания водителю'
+        reason=(decision.get('blockers') or [decision.get('goal') or command.get('action_title')])[0]
+        add_item(command,'driver_command',command.get('created_at'),due_at,priority,title,reason,command.get('status'),command.get('action'))
+
+    for reserve in stored_reserve_actions(limit=100):
+        tr=int(reserve['tr_id'])
+        if assigned is not None and tr not in assigned:continue
+        if reserve.get('status')!='queued_for_integration':continue
+        created=pd.Timestamp(reserve.get('created_at') or now)
+        if created.tzinfo is None:created=created.tz_localize('Europe/Moscow')
+        due_at=(created+pd.to_timedelta(300,unit='s')).isoformat()
+        reason='Проверить подтверждение выпуска резервного ТС во внешнем флоте'
+        add_item(reserve,'reserve_release',created.isoformat(),due_at,'high','Проверить заявку на выпуск резерва',reason,reserve.get('status'),'release_reserve')
+
+    priority_rank={'critical':0,'high':1,'medium':2,'low':3,'none':4}
+    items.sort(key=lambda item:(not item['due'],priority_rank.get(item['priority'],9),item['due_at']))
+    return items
 
 def live_track(tr_id,limit=100):
     """Return recent valid GPS points, preserving simulated-point provenance."""
@@ -309,14 +462,16 @@ def planned_position_at(tr, ts):
     left=max(0,min(len(route)-1,right-1))
     if right>=len(route):
         start=route.iloc[-1]; end=route.iloc[0]; end_ts=float(end.ts)+period; start_ts=float(start.ts)
+        segment_index=len(route)-1
     else:
         start=route.iloc[left]; end=route.iloc[right]; start_ts=float(start.ts); end_ts=float(end.ts)
+        segment_index=left
     fraction=0.0 if end_ts<=start_ts else min(1.0,max(0.0,(target-start_ts)/(end_ts-start_ts)))
     lon=float(start.lon)+(float(end.lon)-float(start.lon))*fraction
     lat=float(start.lat)+(float(end.lat)-float(start.lat))*fraction
     distance=haversine(float(start.lon),float(start.lat),float(end.lon),float(end.lat))
     speed=min(130.0,max(1.0,distance/max(1.0,end_ts-start_ts)*3.6))
-    return {'lon':lon,'lat':lat,'speed':speed}
+    return {'lon':lon,'lat':lat,'speed':speed,'segment_index':segment_index,'fraction':fraction}
 
 def stop_neighbors(tr,stop):
     """Return readable neighbouring planned stops for a selected target."""
@@ -344,6 +499,46 @@ def route_risk(items):
 def incidents(items):
     return [dict(vehicle_id=int(v['tr_id']),route_id=int(v['tr_id']),level=v.get('level','unknown'),prediction_s=v.get('prediction_s'),late_probability=v.get('late_probability'),reason=v.get('reason'),stop_address=v.get('stop_address'),source=v.get('source'),recommendation=v.get('recommendation')) for v in sorted(items,key=lambda x:({'high':0,'medium':1,'low':2,'unknown':3}[x.get('level','unknown')],-(x.get('late_probability') or -1))) if v.get('level') in {'high','medium'}]
 
+def business_kpis(items):
+    """Return transparent operational impact metrics for the current fleet."""
+    operational=[]
+    forecasted=[]
+    for item in items:
+        if item.get('trip_status') in {'completed','not_started'} or item.get('on_route') is False:
+            continue
+        operational.append(item)
+        prediction=item.get('prediction_s')
+        probability=item.get('late_probability')
+        if item.get('stale') or prediction is None or probability is None:
+            continue
+        try:
+            prediction=float(prediction); probability=float(probability)
+        except (TypeError,ValueError):
+            continue
+        if not np.isfinite(prediction) or not np.isfinite(probability):
+            continue
+        forecasted.append((item,max(0.0,prediction),min(1.0,max(0.0,probability))))
+
+    exposure=sum(delay for _,delay,_ in forecasted)
+    expected=sum(delay*probability for _,delay,probability in forecasted)
+    on_time=sum(1 for item,_,_ in forecasted if item.get('level')=='low')
+    attention=sum(1 for item in operational if item.get('level') in {'high','medium'} or item.get('attention_level')=='critical')
+    high=sum(1 for item in operational if item.get('level')=='high' or item.get('attention_level')=='critical')
+    top=max(forecasted,key=lambda value:value[1]*value[2],default=None)
+    return clean({
+        'active_vehicles':len(operational),
+        'forecasted_vehicles':len(forecasted),
+        'attention_vehicles':attention,
+        'high_risk_vehicles':high,
+        'coverage_pct':round(100*len(forecasted)/len(operational),1) if operational else None,
+        'on_time_forecast_pct':round(100*on_time/len(forecasted),1) if forecasted else None,
+        'delay_exposure_minutes':round(exposure/60,1),
+        'expected_delay_minutes':round(expected/60,1),
+        'top_priority_tr_id':int(top[0]['tr_id']) if top else None,
+        'definition':'Σ max(0, прогноз задержки) × P(задержка > 120 с) / 60; прозрачный proxy для приоритизации',
+    })
+
+
 def reserve_placement(vehicle):
     """Choose a concrete on-route position for the non-persistent reserve.
 
@@ -364,9 +559,50 @@ def reserve_placement(vehicle):
         match={'segment_index':0,'projected_lon':float(route.iloc[0].lon),'projected_lat':float(route.iloc[0].lat),
                'segment_start_stop_address':display_text(route.iloc[0].building_address),'next_stop_address':display_text(route.iloc[1].building_address if len(route)>1 else route.iloc[0].building_address),
                'distance_m':None,'confidence':0}
-    index=max(0,min(len(route)-2,int(match.get('segment_index',0)))) if len(route)>1 else 0
-    target_rows=route[route.tt_action_item_id==int(vehicle.get('target_stop_id',-1))]
-    target_index=int(target_rows.index[0]) if not target_rows.empty else min(len(route)-1,index+1)
+    nearest_index=max(0,min(len(route)-2,int(match.get('segment_index',0)))) if len(route)>1 else 0
+    raw_target_id=vehicle.get('target_stop_id')
+    try:
+        target_id=int(raw_target_id) if raw_target_id is not None and not pd.isna(raw_target_id) else None
+    except (TypeError,ValueError):
+        target_id=None
+    target_rows=route[route.tt_action_item_id==target_id] if target_id is not None else route.iloc[0:0]
+    target_index=int(target_rows.index[0]) if not target_rows.empty else min(len(route)-1,nearest_index+1)
+    schedule_shift=0.0
+    target_epoch=None
+    if not target_rows.empty and vehicle.get('target_time_begin') is not None:
+        try:
+            target_epoch=epoch(vehicle['target_time_begin'])
+            target_row=target_rows.iloc[int(np.argmin(np.abs(target_rows.ts.to_numpy(dtype=float)-target_epoch)))]
+            # Historical snapshots and live passes can use a different
+            # calendar anchor. Align the selected planned stop to the actual
+            # forecast target before choosing the current segment by time.
+            schedule_shift=float(target_epoch)-float(target_row.ts)
+            target_index=int(target_row.name)
+        except (TypeError,ValueError):
+            target_epoch=None
+    index=nearest_index
+    if target_epoch is not None and vehicle.get('T') is not None and len(route)>1:
+        try:
+            current_raw_ts=epoch(vehicle['T'])-schedule_shift
+            temporal_index=int(np.searchsorted(route.ts.to_numpy(dtype=float),current_raw_ts,side='right')-1)
+            temporal_index=max(0,min(len(route)-2,temporal_index))
+            if temporal_index<target_index:
+                index=temporal_index
+                segment_start=route.iloc[index]
+                segment_end=route.iloc[index+1]
+                temporal_fraction=min(1.0,max(0.0,(current_raw_ts-float(segment_start.ts))/max(1.0,float(segment_end.ts)-float(segment_start.ts))))
+                projected_lon=float(segment_start.lon)+(float(segment_end.lon)-float(segment_start.lon))*temporal_fraction
+                projected_lat=float(segment_start.lat)+(float(segment_end.lat)-float(segment_start.lat))*temporal_fraction
+                # Nearest-geometry matching can jump to another pass of a
+                # loop. For a forecasted target, time is the safer signal.
+                match={**match,'segment_index':index,'fraction':0.0,
+                       'projected_lon':projected_lon,'projected_lat':projected_lat,
+                       'segment_start_stop_address':display_text(route.iloc[index].building_address),
+                       'next_stop_address':display_text(route.iloc[index+1].building_address),
+                       'confidence':max(float(match.get('confidence') or 0.0),0.35)}
+                match['fraction']=temporal_fraction
+        except (TypeError,ValueError):
+            pass
     if target_index <= index:
         target_index=min(len(route)-1,index+1)
     target=route.iloc[target_index]
@@ -374,26 +610,64 @@ def reserve_placement(vehicle):
     for row in route.iloc[index+1:min(len(route),index+13)].itertuples():
         track.append({'lon':float(row.lon),'lat':float(row.lat),'simulated':True})
     current=float(vehicle.get('current_deviation_s') or 0)
-    forecast=float(vehicle.get('prediction_s') or current)
+    raw_forecast=vehicle.get('prediction_s')
+    forecast=float(raw_forecast) if raw_forecast is not None else current
     positive_delay=max(0.0,forecast,current)
-    # One additional vehicle relieves a portion of a positive delay.  The
-    # coefficient is deliberately explicit and bounded; it is not presented
-    # as a second ML prediction.
-    relief=round(min(positive_delay,max(30.0,180.0*(1-0.85))),1) if positive_delay else 0.0
-    after_prediction=round(forecast-relief if forecast>0 else forecast,1)
-    after_current=round(current-min(max(0.0,current),relief),1)
     distance_to_target=0.0
     if len(route)>1:
         first_fraction=1.0-float(match.get('fraction',0.0)) if match.get('segment_index')==index else 1.0
         distance_to_target+=haversine(float(match.get('projected_lon',route.iloc[index].lon)),float(match.get('projected_lat',route.iloc[index].lat)),route.iloc[index+1].lon,route.iloc[index+1].lat)*first_fraction
         for left,right in zip(route.iloc[index+1:target_index].itertuples(),route.iloc[index+2:target_index+1].itertuples()):
             distance_to_target+=haversine(left.lon,left.lat,right.lon,right.lat)
+
+    # Validate the scenario against the actual target horizon and planned
+    # geometry.  The reserve starts at the current projected point because no
+    # depot/driver data is available; its effect is therefore bounded by what
+    # can physically be reached before the target stop.
+    fraction=float(match.get('fraction',0.0) or 0.0)
+    if len(route)>1 and index<len(route)-1:
+        current_plan_ts=float(route.iloc[index].ts)+fraction*max(0.0,float(route.iloc[index+1].ts)-float(route.iloc[index].ts))
+    else:
+        current_plan_ts=float(route.iloc[index].ts)
+    planned_time_s=max(1.0,float(target.ts)-current_plan_ts)
+    planned_speed_kmh=distance_to_target/planned_time_s*3.6 if distance_to_target else 0.0
+    reserve_speed_kmh=round(min(60.0,max(15.0,planned_speed_kmh*1.15 if planned_speed_kmh else 25.0)),1)
+    reserve_eta_s=distance_to_target/(reserve_speed_kmh/3.6) if distance_to_target else 0.0
+    horizon=vehicle.get('horizon_s')
+    if horizon is None and vehicle.get('T') is not None and vehicle.get('target_time_begin') is not None:
+        try:horizon=epoch(vehicle['target_time_begin'])-epoch(vehicle['T'])
+        except (TypeError,ValueError):horizon=None
+    horizon=float(horizon) if horizon is not None else None
+    slack_s=(horizon-reserve_eta_s) if horizon is not None else None
+    confidence=float(match.get('confidence') or 0.0)
+    blockers=[]
+    if horizon is None or horizon<=0:
+        blockers.append('Нет положительного горизонта до контрольной точки')
+    if confidence<0.25:
+        blockers.append('Низкая уверенность сопоставления с плановой траекторией')
+    if slack_s is not None and slack_s<0:
+        blockers.append('Резерв не успевает к контрольной точке по расчётному ETA')
+    if vehicle.get('stale') or vehicle.get('connection_state')=='offline':
+        blockers.append('Телеметрия устарела: сначала нужно восстановить связь')
+    feasible=not blockers
+    horizon_factor=min(1.0,max(0.0,(horizon or 0.0)/900.0))
+    slack_factor=min(1.0,max(0.0,(slack_s or 0.0)/max(horizon or 1.0,1.0)))
+    effect_ratio=round(min(0.35,0.05+0.20*confidence*horizon_factor*slack_factor),3) if feasible else 0.0
+    relief=round(positive_delay*effect_ratio,1) if positive_delay else 0.0
+    after_prediction=round(forecast-relief if forecast>0 else forecast,1)
+    after_current=round(current-min(max(0.0,current),relief),1)
     return {
         'tr_id':tr,'segment_index':index,'lon':track[0]['lon'],'lat':track[0]['lat'],
         'start_stop_address':display_text(match.get('segment_start_stop_address',route.iloc[index].building_address)),
         'next_stop_address':display_text(match.get('next_stop_address',route.iloc[index+1].building_address if len(route)>1 else route.iloc[index].building_address)),
         'target_stop_address':display_text(target.building_address),'target_stop_id':int(target.tt_action_item_id),
-        'distance_to_target_m':round(distance_to_target,1),'confidence':match.get('confidence'),
+        'distance_to_target_m':round(distance_to_target,1),'confidence':confidence,
+        'horizon_s':round(horizon,1) if horizon is not None else None,
+        'planned_time_to_target_s':round(planned_time_s,1),
+        'planned_speed_kmh':round(planned_speed_kmh,1),
+        'reserve_speed_kmh':reserve_speed_kmh,'reserve_eta_s':round(reserve_eta_s,1),
+        'slack_s':round(slack_s,1) if slack_s is not None else None,
+        'feasible':feasible,'blockers':blockers,'effect_ratio':effect_ratio,
         'reason':'Позиция выбрана по текущей проекции на плановый сегмент; резерв следует к целевой остановке.',
         'relief_s':relief,'before_current_deviation_s':round(current,1),'after_current_deviation_s':after_current,
         'before_prediction_s':round(forecast,1),'after_prediction_s':after_prediction,'track':track,
@@ -478,7 +752,9 @@ def match_stop(tr_id, lon, lat, segment_hint=None):
         if allowed is not None and position not in allowed:
             continue
         fraction,projected_lon,projected_lat,distance=_segment_projection(lon,lat,start.lon,start.lat,end.lon,end.lat)
-        if best is None or distance<best['distance']:
+        same_geometry = best is not None and abs(distance-best['distance']) <= 1.0
+        closer_to_hint = same_geometry and hint is not None and abs(position-hint) < abs(best['position']-hint)
+        if best is None or distance<best['distance'] or closer_to_hint:
             heading=(math.degrees(math.atan2((end.lon-start.lon)*math.cos(math.radians((start.lat+end.lat)/2)),end.lat-start.lat))+360)%360
             best={'position':position,'start':start,'end':end,'fraction':fraction,'lon':projected_lon,'lat':projected_lat,'distance':distance,'heading':heading}
     if best is None:
@@ -487,7 +763,9 @@ def match_stop(tr_id, lon, lat, segment_hint=None):
         # reset its calibrated pass.
         for position,(start,end) in enumerate(zip(rows,rows[1:])):
             fraction,projected_lon,projected_lat,distance=_segment_projection(lon,lat,start.lon,start.lat,end.lon,end.lat)
-            if best is None or distance<best['distance']:
+            same_geometry = best is not None and abs(distance-best['distance']) <= 1.0
+            closer_to_hint = same_geometry and hint is not None and abs(position-hint) < abs(best['position']-hint)
+            if best is None or distance<best['distance'] or closer_to_hint:
                 heading=(math.degrees(math.atan2((end.lon-start.lon)*math.cos(math.radians((start.lat+end.lat)/2)),end.lat-start.lat))+360)%360
                 best={'position':position,'start':start,'end':end,'fraction':fraction,'lon':projected_lon,'lat':projected_lat,'distance':distance,'heading':heading}
     start,end=best['start'],best['end']
@@ -504,7 +782,7 @@ def match_stop(tr_id, lon, lat, segment_hint=None):
             'distance_to_next_stop_m':round(distance_to_next,2),'direction_degrees':round(best['heading'],1),
             'direction':'along_planned_trajectory','confidence':round(max(0.,1-best['distance']/250),3)}
 
-def estimate_position(tr_id, lon, lat, ts, speed=None):
+def estimate_position(tr_id, lon, lat, ts, speed=None, segment_hint=None, fraction_hint=None, allow_slow_stop=True):
     """Estimate live schedule offset from the vehicle's position on the plan.
 
     The emulator moves between planned stop coordinates, so a stop-arrival-only
@@ -515,7 +793,12 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
     planned sequence without pretending that an arrival was observed.
     """
     previous_state = position_states.get(tr_id, {})
-    match = match_stop(tr_id, lon, lat, previous_state.get('segment_index'))
+    match = match_stop(
+        tr_id,
+        lon,
+        lat,
+        previous_state.get('segment_index') if segment_hint is None else segment_hint,
+    )
     # A nearest point many kilometres away is not an operational match.  The
     # source may be live, but its coordinate is not evidence for this route.
     if not match or float(match.get('distance_m', float('inf'))) > 250:
@@ -541,14 +824,18 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
         if match.get('segment_index') == position:
             # Use the same projection as the geometry matcher rather than a
             # nearest-stop snap so the expected time moves continuously.
-            fraction, _, _, _ = _segment_projection(lon, lat, start.lon, start.lat, end.lon, end.lat)
+            fraction = (
+                min(1.0, max(0.0, float(fraction_hint)))
+                if fraction_hint is not None
+                else _segment_projection(lon, lat, start.lon, start.lat, end.lon, end.lat)[0]
+            )
         raw_expected = float(start.ts) + fraction * max(0.0, float(end.ts) - float(start.ts))
     # A near-zero speed packet at a planned stop is the one case where the
     # feed gives us an observed arrival signal rather than only a geometric
     # estimate.  Keep this explicit so the UI/API can distinguish it.
     observed = route[route.tt_action_item_id == int(match['stop_id'])]
     nearest_stop_distance = min((haversine(lon, lat, row.lon, row.lat) for row in observed.itertuples()), default=float('inf'))
-    if speed is not None and float(speed) < 5 and nearest_stop_distance <= 60:
+    if allow_slow_stop and speed is not None and float(speed) < 5 and nearest_stop_distance <= 60:
         planned = float(observed.iloc[(observed.ts - ts).abs().argmin()].ts)
         # The schedule has already been moved to the live calendar day, but
         # the vehicle may start a run at a different point of that plan.  Use
@@ -561,9 +848,16 @@ def estimate_position(tr_id, lon, lat, ts, speed=None):
         if offset is None:
             raw_gap = float(ts) - planned
             # A normally aligned live plan must retain a real delay (for
-            # example, 45 seconds after the scheduled stop).  Calibrate only
-            # when the timestamp is clearly from another calendar/pass.
-            offset = raw_gap if abs(raw_gap) > max(3600.0, period) else 0.0
+            # example, 45 seconds after the scheduled stop).  A synthetic
+            # source, however, starts at the first stop when its process is
+            # launched.  On a long circular route the wall-clock gap to that
+            # first stop can be smaller than one full route period, so using
+            # ``period`` as the only threshold mistakes a fresh source pass
+            # for several hours of operational delay.  Treat a gap larger
+            # than half a route as a new source pass while preserving normal
+            # sub-hour operational deviations.
+            calibration_threshold=max(3600.0, period * 0.5)
+            offset = raw_gap if abs(raw_gap) > calibration_threshold else 0.0
             position_offsets[tr_id] = offset
         offset = float(offset)
         expected = planned + offset
@@ -714,6 +1008,7 @@ async def ingest(event):
             }
         return
     state['clock']=timestamp(event['event_time']).isoformat()
+    projection_segment_hint = None
     if event.get('telemetry_source')=='ndtp_nav00' and event.get('location_valid'):
         # The external image's empty-cell auto generator emits random GPS.
         # Keep the original NDTP source for provenance, but make its map
@@ -721,6 +1016,7 @@ async def ingest(event):
         raw_lon,raw_lat=float(event['lon']),float(event['lat'])
         projected=planned_position_at(tr,ts)
         if projected is not None:
+            projection_segment_hint=projected.get('segment_index')
             event['raw_lon']=raw_lon; event['raw_lat']=raw_lat
             event['lon']=projected['lon']; event['lat']=projected['lat']; event['speed']=projected['speed']
             event['position_adjusted']=True
@@ -741,7 +1037,16 @@ async def ingest(event):
                 })
     position_match = None
     if event['location_valid']:
-        position_match = estimate_position(tr, event['lon'], event['lat'], ts, event.get('speed'))
+        position_match = estimate_position(
+            tr,
+            event['lon'],
+            event['lat'],
+            ts,
+            event.get('speed'),
+            segment_hint=projection_segment_hint,
+            fraction_hint=projected.get('fraction') if projection_segment_hint is not None else None,
+            allow_slow_stop=event.get('telemetry_source') not in {'ndtp_nav00', 'custom_ndtp_nav00'},
+        )
         if position_match is not None:
             deviations[tr] = {
                 'stop': int(position_match['stop_id']),
@@ -1257,7 +1562,216 @@ def operational_vehicle(tr, now):
         item.update(prediction_s=None,late_probability=None,lower_s=None,upper_s=None,stale=True)
     track=live_track(tr)
     if track:item['live_track']=track
+    item['dispatcher_recommendation']=dispatcher_recommendation(item)
     return clean(item)
+
+
+def action_vehicle(tr_id):
+    """Read the same evidence that is shown to the dispatcher before acting."""
+    tr=int(tr_id)
+    if state.get('mode')=='live':
+        return operational_vehicle(tr,time.time())
+    return dict(vehicles.get(tr) or archive_vehicles.get(tr) or {})
+
+
+def dispatcher_recommendation(vehicle):
+    """Select a next action from freshness, risk and the current forecast."""
+    level=vehicle.get('level','unknown')
+    prediction=vehicle.get('prediction_s')
+    probability=vehicle.get('late_probability')
+    if vehicle.get('trip_status')=='completed':
+        action='maintain';title='Действие не требуется';reason='Рейс уже завершён.';priority='none'
+    elif vehicle.get('connection_state') in {'offline','waiting'} or vehicle.get('attention_level')=='critical':
+        action='contact';title='Восстановить связь';reason='Сначала нужно подтвердить состояние ТС по каналу связи.';priority='critical'
+    elif level=='high' and prediction is not None and float(prediction)>0:
+        action='contact';title='Связаться и проверить обстановку';reason='Высокий риск положительной задержки требует подтверждения причины до выпуска управляемого действия.';priority='high'
+    elif level=='medium' and prediction is not None and float(prediction)>0:
+        action='contact';title='Уточнить возможность выдержать график';reason='Средний риск положительной задержки: сначала собираем подтверждение от водителя.';priority='medium'
+    elif prediction is not None and float(prediction)<-60:
+        action='slow_down_safely';title='Согласовать выдерживание интервала';reason='Прогноз показывает опережение плана; важно не создавать неравномерный интервал.';priority='low'
+    else:
+        action='maintain';title='Продолжать по графику';reason='Нет сигнала, требующего активного вмешательства.';priority='low'
+    return {'action':action,'title':title,'reason':reason,'priority':priority,'late_probability':probability,'prediction_s':prediction}
+
+DRIVER_ACTION_TITLES={
+    'contact':'Связаться с водителем',
+    'maintain':'Продолжать по графику',
+    'accelerate_safely':'Безопасно сократить отставание',
+    'slow_down_safely':'Согласовать выдерживание интервала',
+}
+
+def action_benefit_model(vehicle,action,decision=None):
+    """Estimate action value from the same evidence used by the guardrails.
+
+    This is intentionally a transparent decision-support model, not a claim of
+    learned causal impact: the source data has no labelled post-action outcomes.
+    Its versioned output can later be replaced by a calibrated outcome model.
+    """
+    decision=decision or {}
+    prediction=float(vehicle['prediction_s']) if vehicle.get('prediction_s') is not None else None
+    probability=float(vehicle['late_probability']) if vehicle.get('late_probability') is not None else None
+    probability=None if probability is None else min(1.0,max(0.0,probability))
+    expected_before=None if prediction is None or probability is None else round(max(0.0,prediction)*probability,1)
+    stale=bool(vehicle.get('stale')) or vehicle.get('connection_state') in {'offline','waiting','historical'}
+    evidence_count=sum(value is not None for value in (prediction,probability,vehicle.get('horizon_s')))
+    confidence=min(1.0,0.35+0.2*evidence_count)
+    if stale:confidence*=0.35
+    effect=decision.get('expected_effect') or {}
+    saved_expected=0.0
+    information_value=0.0
+    rationale=''
+    if action=='accelerate_safely':
+        recoverable=max(0.0,float(effect.get('recoverable_delay_s') or 0.0))
+        saved_expected=recoverable*(probability or 0.0)
+        rationale='Потенциал сокращения задержки взвешен вероятностью события и снижением уверенности при устаревшей телеметрии.'
+    elif action=='contact':
+        # Contact has no claimed physical delay saving; its value is the risk
+        # exposure that becomes observable before the next intervention.
+        information_value=(expected_before or 0.0)*0.10
+        rationale='Информационное действие: не обещает снижение задержки, но уменьшает неопределённость перед следующим шагом.'
+    elif action=='slow_down_safely':
+        information_value=max(0.0,abs(min(0.0,prediction or 0.0)))*0.20
+        rationale='Ценность — в снижении риска неравномерного интервала; это не пассажиро-минуты и не факт результата.'
+    else:
+        rationale='Наблюдение сохраняет текущую картину без заявленного активного эффекта.'
+    total_value=saved_expected+information_value
+    denominator=max(1.0,expected_before or 0.0)
+    score=min(100.0,max(0.0,100.0*total_value/denominator*confidence)) if total_value else 0.0
+    if action=='contact' and expected_before and not decision.get('allowed',True):
+        score=0.0
+    blockers=decision.get('blockers') or []
+    if blockers:
+        score=0.0
+        rationale=f"Недоступно: {blockers[0]}"
+    return clean({
+        'model':'benefit-v1-rule-based','score':round(score,1),'confidence_pct':round(confidence*100,1),
+        'expected_exposure_s':expected_before,'expected_saved_delay_s':round(saved_expected,1),
+        'information_value_s':round(information_value,1),'rationale':rationale,
+        'allowed':bool(decision.get('allowed',True)),'action':action,
+    })
+
+def simulate_driver_response(vehicle,command):
+    """Produce an explicit, deterministic local driver response for demos/tests."""
+    action=command['action']
+    decision=command.get('decision') or driver_decision(vehicle,action)
+    prediction=float(vehicle['prediction_s']) if vehicle.get('prediction_s') is not None else None
+    probability=float(vehicle['late_probability']) if vehicle.get('late_probability') is not None else None
+    probability=None if probability is None else min(1.0,max(0.0,probability))
+    before=prediction
+    after=prediction
+    result='acknowledged'
+    response='Водитель получил указание и подтвердил текущую обстановку.'
+    if action=='accelerate_safely':
+        recoverable=max(0.0,float((decision.get('expected_effect') or {}).get('recoverable_delay_s') or 0.0))
+        after=max(0.0,(prediction or 0.0)-recoverable)
+        result='applied'
+        response='Принял. Сокращаю отставание только в безопасном режиме, без нарушения ПДД.'
+    elif action=='slow_down_safely':
+        correction=min(abs(min(0.0,prediction or 0.0)),30.0)
+        after=(prediction or 0.0)+correction
+        result='applied'
+        response='Принял. Выравниваю интервал без резкого торможения.'
+    elif action=='maintain':
+        result='applied'
+        response='Принял. Продолжаю движение по графику и сообщу при изменении обстановки.'
+    else:
+        result='acknowledged'
+        response='Принял. Текущее состояние подтверждаю, продолжаю наблюдение.'
+    expected_saved=None if before is None or after is None or probability is None else round(max(0.0,before-after)*probability,1)
+    next_step={
+        'action':'recheck_vehicle',
+        'title':'Повторно проверить рейс',
+        'check_in_s':decision.get('next_check_in_s'),
+        'check_at':decision.get('next_check_at'),
+        'reason':'Проверить новый прогноз и подтверждённую обстановку после реакции водителя.',
+    }
+    return clean({
+        'mode':'local_driver_simulator','simulated_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
+        'acknowledged':True,'result':result,'response':response,
+        'projection':{'prediction_before_s':before,'prediction_after_s':round(after,1) if after is not None else None,'expected_saved_delay_s':expected_saved},
+        'next_step':next_step,
+        'note':'Симуляция реакции для прототипа; live-телеметрия и прогноз в state не изменяются.',
+    })
+
+
+def driver_decision(vehicle,action):
+    """Evaluate a driver instruction and return evidence for the audit trail."""
+    recommendation=dispatcher_recommendation(vehicle)
+    prediction=vehicle.get('prediction_s')
+    current=vehicle.get('current_deviation_s')
+    probability=vehicle.get('late_probability')
+    horizon=vehicle.get('horizon_s')
+    stale=bool(vehicle.get('stale')) or vehicle.get('connection_state') in {'offline','waiting'}
+    prediction=float(prediction) if prediction is not None else None
+    current=float(current) if current is not None else None
+    probability=float(probability) if probability is not None else None
+    horizon=float(horizon) if horizon is not None else None
+    expected_delay_s=None if prediction is None or probability is None else round(max(0.0,prediction)*min(1.0,max(0.0,probability)),1)
+    blockers=[]
+    if vehicle.get('trip_status')=='completed':
+        blockers.append('Рейс завершён')
+    if action=='contact':
+        if vehicle.get('connection_state')=='waiting':
+            blockers.append('Выход на линию ещё не подтверждён')
+        allowed=not blockers and vehicle.get('trip_status')!='completed'
+        goal='Подтвердить причину отклонения, состояние ТС и возможность выполнить следующий безопасный шаг.'
+        effect={'type':'information','expected':'уточнение фактической причины и доступности следующего действия'}
+    elif action=='accelerate_safely':
+        if stale:blockers.append('Нет свежей телеметрии')
+        if prediction is None or prediction<120:blockers.append('Прогноз не показывает задержку не менее 120 секунд')
+        if probability is None or probability<.35:blockers.append('Риск ниже порога активного вмешательства')
+        if horizon is not None and horizon<600:blockers.append('До контрольной точки осталось меньше 10 минут')
+        allowed=not blockers
+        recoverable=round(min(max(0.0,prediction or 0.0),max(30.0,(current or prediction or 0.0)*.25)),1) if allowed else 0.0
+        goal='Сократить отставание только в рамках ПДД и подтверждённой дорожной обстановки.'
+        effect={'type':'heuristic','recoverable_delay_s':recoverable,'note':'Оценка потенциала, не обещание фактического сокращения.'}
+    elif action=='slow_down_safely':
+        if stale:blockers.append('Нет свежей телеметрии')
+        if prediction is None or prediction>-60:blockers.append('Нет устойчивого сигнала опережения более 60 секунд')
+        allowed=not blockers
+        goal='Вернуть интервал к плану без создания нового скопления пассажиров.'
+        effect={'type':'headway_control','expected':'снижение риска опережения и неравномерного интервала'}
+    else:
+        allowed=not vehicle.get('trip_status')=='completed'
+        goal='Продолжать движение по графику и повторно проверить состояние в заданный момент.'
+        effect={'type':'monitoring','expected':'сохранение текущего интервала без активного воздействия'}
+    base_check=90 if recommendation.get('priority') in {'critical','high'} else 180 if recommendation.get('priority')=='medium' else 300
+    if horizon is not None and horizon>0:
+        base_check=min(base_check,max(30.0,horizon-60))
+    next_check=(pd.Timestamp.now(tz='Europe/Moscow')+pd.to_timedelta(base_check,unit='s')).isoformat()
+    decision=clean({
+        'action':action,'allowed':allowed,'status':'ready' if allowed else 'blocked_by_guardrail',
+        'priority':recommendation.get('priority'),'goal':goal,'blockers':blockers,
+        'evidence':{'prediction_s':prediction,'current_deviation_s':current,'late_probability':probability,'horizon_s':horizon,'expected_delay_s':expected_delay_s,'stale':stale},
+        'expected_effect':effect,'next_check_in_s':round(base_check,1),'next_check_at':next_check,
+        'recommended_action':recommendation.get('action'),'recommended_title':recommendation.get('title'),
+    })
+    decision['utility']=action_benefit_model(vehicle,action,decision)
+    return decision
+
+
+def reserve_release_decision(vehicle,placement):
+    """Gate a real reserve-release record with explicit operational evidence."""
+    blockers=list(placement.get('blockers',[]))
+    prediction=vehicle.get('prediction_s')
+    probability=vehicle.get('late_probability')
+    if prediction is None or float(prediction)<=0:
+        blockers.append('Нет положительного прогноза задержки')
+    if probability is None or float(probability)<.35:
+        blockers.append('Риск задержки ниже порога выпуска резерва (35%)')
+    if vehicle.get('degraded'):
+        blockers.append('Прогноз работает в fallback-режиме')
+    expected_before=None if prediction is None or probability is None else round(max(0.0,float(prediction))*min(1.0,max(0.0,float(probability))),1)
+    effect_ratio=float(placement.get('effect_ratio') or 0.0)
+    expected_after=None if expected_before is None else round(expected_before*(1-effect_ratio),1)
+    return clean({
+        'action':'release_reserve','allowed':not blockers,
+        'status':'ready' if not blockers else 'blocked_by_guardrail',
+        'goal':'Снизить ожидаемое воздействие задержки до контрольной остановки',
+        'blockers':blockers,
+        'evidence':{'prediction_s':prediction,'late_probability':probability,'expected_delay_s':expected_before,'expected_after_s':expected_after,'effect_ratio':effect_ratio,'horizon_s':placement.get('horizon_s'),'reserve_eta_s':placement.get('reserve_eta_s'),'slack_s':placement.get('slack_s'),'confidence':placement.get('confidence')},
+        'expected_effect':{'saved_expected_delay_s':None if expected_before is None else round(expected_before-expected_after,1),'note':'Сценарная оценка на основе геометрии и текущей вероятности, не гарантия фактического результата.'},
+    })
 
 
 def telemetry_fallback_active(now=None):
@@ -1331,6 +1845,7 @@ def historical_fallback_state(dispatcher_id=None):
         track = live_track(int(vehicle['tr_id']))
         if track:
             vehicle['live_track'] = track
+        vehicle['dispatcher_recommendation']=dispatcher_recommendation(vehicle)
         output.append(clean(vehicle))
 
     if dispatcher_id:
@@ -1343,7 +1858,7 @@ def historical_fallback_state(dispatcher_id=None):
     fallback_state = dict(state)
     fallback_state.update(mode='replay', fallback_mode='historical', source_mode='live', snapshot=True)
     return {'vehicles': output, 'state': fallback_state, 'counters': dict(counters),
-            'total_points': len(points), 'dispatcher_id': dispatcher_id}
+            'business': business_kpis(output), 'total_points': len(points), 'dispatcher_id': dispatcher_id}
 
 
 @app.get('/api/state', **operation('state'))
@@ -1361,7 +1876,8 @@ async def get_state(
             if profile is None:raise HTTPException(404,'Dispatcher not found')
             ids &= set(profile['assigned_tr_ids'])
         now=time.time()
-        return {'vehicles':[operational_vehicle(tr,now) for tr in sorted(ids)],'state':state,
+        output=[operational_vehicle(tr,now) for tr in sorted(ids)]
+        return {'vehicles':output,'state':state,'business':business_kpis(output),
                 'counters':dict(counters),'total_points':len(points),'dispatcher_id':dispatcher_id}
 
     # Replay retains its historical clock and never raises live connection alarms.
@@ -1391,6 +1907,8 @@ async def get_state(
 
         if track:
             vehicle['live_track'] = track
+
+        vehicle['dispatcher_recommendation']=dispatcher_recommendation(vehicle)
 
         output.append(vehicle)
 
@@ -1425,6 +1943,7 @@ async def get_state(
     return {
         'vehicles': output,
         'state': state,
+        'business': business_kpis(output),
         'counters': dict(counters),
         'total_points': len(points),
         'dispatcher_id': dispatcher_id,
@@ -1443,23 +1962,40 @@ async def get_risk():
 
 @app.post('/api/what-if',**operation('what_if'))
 async def what_if(body:WhatIf):
-    baseline=route_risk(list(vehicles.values()))
-    relief=max(0.5,1-0.15*body.extra_vehicles-body.headway_reduction_pct/100)
+    source_items=list(vehicles.values())
+    baseline=route_risk(source_items)
+    vehicle=None
+    placement=None
+    reserve_effect_ratio=0.15
+    if body.tr_id is not None:
+        vehicle=vehicles.get(int(body.tr_id)) or archive_vehicles.get(int(body.tr_id))
+        if vehicle is None:
+            raise HTTPException(422,'Unknown vehicle/route for reserve scenario')
+        placement=reserve_placement(vehicle)
+        if placement is None:
+            raise HTTPException(422,'Selected vehicle has no planned geometry')
+        if placement.get('feasible'):
+            reserve_effect_ratio=float(placement.get('effect_ratio') or 0.0)
+    relief=max(0.5,1-reserve_effect_ratio*body.extra_vehicles-body.headway_reduction_pct/100)
     projected=[]
     for item in baseline:
         probability=item['max_late_probability']
         adjusted=None if probability is None else probability*relief
         level='unknown' if adjusted is None else 'high' if adjusted>=.7 else 'medium' if adjusted>=.35 else 'low'
         projected.append({**item,'projected_late_probability':adjusted,'projected_level':level})
-    response={'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'risk_multiplier':relief},'baseline':baseline,'projected':projected}
+    projected_items=[]
+    for item in source_items:
+        probability=item.get('late_probability')
+        adjusted=None if probability is None else float(probability)*relief
+        projected_items.append({**item,'late_probability':adjusted,'level':'unknown' if adjusted is None else 'high' if adjusted>=.7 else 'medium' if adjusted>=.35 else 'low'})
+    baseline_business=business_kpis(source_items)
+    projected_business=business_kpis(projected_items)
+    response={'assumptions':{'extra_vehicles':body.extra_vehicles,'headway_reduction_pct':body.headway_reduction_pct,'reserve_effect_ratio':reserve_effect_ratio,'risk_multiplier':relief},'baseline':baseline,'projected':projected,
+              'impact':{'baseline':baseline_business,'projected':projected_business,
+                        'saved_expected_delay_minutes':round(max(0.0,(baseline_business.get('expected_delay_minutes') or 0)-(projected_business.get('expected_delay_minutes') or 0)),1),
+                        'note':'Сценарная оценка: риск масштабируется заданным коэффициентом и не является вторым ML-прогнозом.'}}
     if body.tr_id is None:
         return response
-    vehicle=vehicles.get(int(body.tr_id)) or archive_vehicles.get(int(body.tr_id))
-    if vehicle is None:
-        raise HTTPException(422,'Unknown vehicle/route for reserve scenario')
-    placement=reserve_placement(vehicle)
-    if placement is None:
-        raise HTTPException(422,'Selected vehicle has no planned geometry')
     selected=next((item for item in projected if int(item['tr_id'])==int(body.tr_id)),None)
     if selected is None:
         selected={'tr_id':int(body.tr_id),'level':vehicle.get('level','unknown'),'max_late_probability':vehicle.get('late_probability'),'projected_late_probability':None,'projected_level':'unknown'}
@@ -1470,6 +2006,7 @@ async def what_if(body:WhatIf):
             {'tr_id':int(body.tr_id),'role':'Основное ТС','before_prediction_s':placement['before_prediction_s'],'after_prediction_s':placement['after_prediction_s'],'before_current_deviation_s':placement['before_current_deviation_s'],'after_current_deviation_s':placement['after_current_deviation_s'],'before_late_probability':selected.get('max_late_probability'),'after_late_probability':selected.get('projected_late_probability')},
             {'tr_id':-abs(int(body.tr_id)),'role':'Резервное ТС','placement':'На текущем плановом сегменте','target_stop_address':placement['target_stop_address'],'track':placement['track']},
         ],
+        'decision':reserve_release_decision(vehicle,placement),
     })
     return response
 
@@ -1481,29 +2018,140 @@ async def map_match(body:MapMatch):
 
 @app.get('/api/driver-commands',**operation('commands'))
 async def get_driver_commands(tr_id:int|None=None):
+    expire_stale_driver_commands()
     items=stored_driver_commands(tr_id)
     return {'items':items,'channel':'local_dispatch_outbox','external_delivery':False}
+
+@app.get('/api/action-plan',**operation('action_plan'))
+async def get_action_plan(tr_id:int,dispatcher_id:str|None=None):
+    vehicle=action_vehicle(tr_id)
+    if not vehicle:
+        raise HTTPException(404,'Unknown vehicle/route for action plan')
+    if dispatcher_id:
+        dispatcher=get_dispatcher(dispatcher_id)
+        if dispatcher is None:
+            raise HTTPException(404,'Dispatcher not found')
+        if int(tr_id) not in set(dispatcher['assigned_tr_ids']):
+            raise HTTPException(403,'Vehicle is not assigned to this dispatcher')
+    options=[]
+    for action in ('contact','accelerate_safely','maintain','slow_down_safely'):
+        decision=driver_decision(vehicle,action)
+        options.append({'action':action,'title':DRIVER_ACTION_TITLES[action],'decision':decision,'utility':decision['utility']})
+    options.sort(key=lambda item:(not item['decision']['allowed'],-float(item['utility'].get('score') or 0.0)))
+    recommended=next((item for item in options if item['decision']['allowed']),options[0])
+    return clean({
+        'tr_id':int(tr_id),'model':'benefit-v1-rule-based','recommended_action':recommended['action'],
+        'recommended_title':recommended['title'],'options':options,
+        'evidence':{'prediction_s':vehicle.get('prediction_s'),'late_probability':vehicle.get('late_probability'),'current_deviation_s':vehicle.get('current_deviation_s'),'horizon_s':vehicle.get('horizon_s'),'stale':vehicle.get('stale')},
+    })
 
 @app.post('/api/driver-commands',status_code=201,**operation('queue_command'))
 async def queue_driver_command(body:DriverCommand):
     dispatcher=get_dispatcher(body.dispatcher_id)
     if dispatcher is None:raise HTTPException(422,'Unknown dispatcher profile')
-    action_titles={
-        'contact':'Связаться с водителем',
-        'maintain':'Продолжать по графику',
-        'accelerate_safely':'При возможности сократить отставание безопасно',
-        'slow_down_safely':'При необходимости снизить темп безопасно',
-    }
+    vehicle=action_vehicle(body.tr_id)
+    if not vehicle:
+        raise HTTPException(422,'Unknown vehicle/route for driver action')
+    decision=driver_decision(vehicle,body.action)
     command={
         'id':f"cmd-{uuid.uuid4().hex[:12]}",
         'tr_id':body.tr_id,'role':body.role,'dispatcher':dispatcher,'action':body.action,
-        'action_title':action_titles[body.action],'message':body.message,
+        'action_title':DRIVER_ACTION_TITLES[body.action],'message':body.message,
         'created_at':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
-        'status':'queued_for_integration','channel':'local_dispatch_outbox',
-        'external_delivery':False,
+        'status':'queued_for_integration' if decision['allowed'] else 'blocked_by_guardrail','channel':'local_dispatch_outbox',
+        'external_delivery':False,'simulation_available':decision['allowed'],
+        'decision':decision,
     }
     save_driver_command(command)
     return command
+
+@app.post('/api/driver-commands/{command_id}/simulate',**operation('simulate_command'))
+async def simulate_driver_command(command_id:str):
+    command=stored_driver_command(command_id)
+    if command is None:
+        raise HTTPException(404,'Driver command not found')
+    if command.get('status')=='blocked_by_guardrail':
+        raise HTTPException(status_code=409,detail={'message':'Заблокированное guardrail указание нельзя передать симулятору','blockers':command.get('decision',{}).get('blockers',[])})
+    if command.get('status')=='simulated_completed':
+        return command
+    if command.get('status')!='queued_for_integration' or command.get('simulation_available') is False:
+        raise HTTPException(status_code=409,detail={'message':'Для этого указания локальная симуляция больше недоступна','status':command.get('status')})
+    vehicle=action_vehicle(command['tr_id'])
+    if not vehicle:
+        raise HTTPException(422,'Vehicle is no longer available for driver simulation')
+    simulation=simulate_driver_response(vehicle,command)
+    command.update(status='simulated_completed',delivery_mode='local_driver_simulator',external_delivery=False,simulation_available=False,simulated_response=simulation,resolved_at=simulation['simulated_at'])
+    update_driver_command(command)
+    return command
+
+@app.get('/api/reserve-dispatches',**operation('reserve_dispatches'))
+async def get_reserve_dispatches(tr_id:int|None=None):
+    expire_stale_reserve_actions()
+    items=stored_reserve_actions(tr_id)
+    return {'items':items,'channel':'reserve_integration_outbox','external_execution':False}
+
+@app.post('/api/reserve-dispatches',status_code=201,**operation('reserve_dispatch'))
+async def release_reserve(body:ReserveDispatch):
+    expire_stale_reserve_actions()
+    dispatcher=get_dispatcher(body.dispatcher_id)
+    if dispatcher is None:
+        raise HTTPException(422,'Unknown dispatcher profile')
+    vehicle=action_vehicle(body.tr_id)
+    if not vehicle:
+        raise HTTPException(422,'Unknown vehicle/route for reserve release')
+    placement=reserve_placement(vehicle)
+    if placement is None:
+        raise HTTPException(422,'Selected vehicle has no planned geometry')
+    decision=reserve_release_decision(vehicle,placement)
+    if not decision['allowed']:
+        raise HTTPException(status_code=409,detail={'message':'Выпуск резерва заблокирован правилами безопасности данных','decision':decision,'placement':placement})
+    now=pd.Timestamp.now(tz='Europe/Moscow')
+    recent=stored_reserve_actions(body.tr_id,limit=1)
+    if recent:
+        try:
+            if recent[0].get('status')=='queued_for_integration' and (now-pd.Timestamp(recent[0]['created_at'])).total_seconds()<900:
+                raise HTTPException(status_code=409,detail={'message':'Для этой линии уже есть активная заявка на резерв','existing_action':recent[0]})
+        except HTTPException:
+            raise
+        except (TypeError,ValueError):
+            pass
+    action={
+        'id':f"reserve-{uuid.uuid4().hex[:12]}",'tr_id':int(body.tr_id),'role':dispatcher['role'],'dispatcher':dispatcher,
+        'action':'release_reserve','action_title':'Выпуск резервного ТС','status':'queued_for_integration',
+        'channel':'reserve_integration_outbox','external_execution':False,'created_at':now.isoformat(),
+        'placement':placement,'decision':decision,
+        'message':'Заявка подготовлена после проверки горизонта, ETA резерва, уверенности map matching и риска задержки.',
+    }
+    save_reserve_action(action)
+    return action
+
+@app.get('/api/action-center',**operation('action_center'))
+async def get_action_center(dispatcher_id:str|None=None):
+    expire_stale_driver_commands()
+    expire_stale_reserve_actions()
+    items=action_center_items(dispatcher_id)
+    commands=stored_driver_commands(limit=2000)
+    if dispatcher_id:
+        profile=get_dispatcher(dispatcher_id)
+        assigned=set(profile['assigned_tr_ids']) if profile else set()
+        commands=[command for command in commands if int(command['tr_id']) in assigned]
+    reserve_actions=stored_reserve_actions(limit=2000)
+    if dispatcher_id:
+        reserve_actions=[action for action in reserve_actions if int(action['tr_id']) in assigned]
+    reserve_timed_out=sum(action.get('status')=='integration_timeout' for action in reserve_actions)
+    return {
+        'items':items,
+        'summary':{
+            'open':len(items),
+            'due':sum(bool(item.get('due')) for item in items),
+            'blocked':sum(command.get('status')=='blocked_by_guardrail' for command in commands),
+            'timed_out':sum(command.get('status')=='integration_timeout' for command in commands)+reserve_timed_out,
+            'reserve_timed_out':reserve_timed_out,
+            'high_priority':sum(item.get('priority') in {'critical','high'} for item in items),
+        },
+        'as_of':pd.Timestamp.now(tz='Europe/Moscow').isoformat(),
+        'dispatcher_id':dispatcher_id,
+    }
 
 @app.get('/api/admin/simulation',**operation('simulation_status'))
 async def simulation_status():

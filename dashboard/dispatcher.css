@@ -391,7 +391,7 @@ body {
 
 .kpis {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(6, 1fr);
 
   gap: 14px;
 
@@ -546,6 +546,8 @@ body {
   color: var(--muted);
 
   font-size: 11px;
+
+  flex-wrap: wrap;
 }
 
 .reserve-result b {
@@ -576,6 +578,11 @@ body {
   padding: 0;
 }
 
+.reserve-blocked {
+  color: var(--red);
+  font-weight: 700;
+}
+
 
 /* =========================================================
    BUTTONS
@@ -603,10 +610,26 @@ body {
 }
 
 .primary:disabled,
-.send-command:disabled {
+.send-command:disabled,
+.secondary:disabled {
   cursor: not-allowed;
 
   opacity: 0.6;
+}
+
+.secondary {
+  border: 1px solid #b8cfdf;
+  background: #f8fbfd;
+  color: #155b8d;
+  border-radius: 7px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.secondary:hover {
+  background: #eef6fb;
 }
 
 
@@ -864,6 +887,105 @@ body {
   color: var(--muted);
 
   font-size: 11px;
+}
+
+
+/* =========================================================
+   ACTION CENTER
+   ========================================================= */
+
+.action-center-card {
+  margin-top: 14px;
+}
+
+.action-center-summary {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.action-center-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 12px 14px;
+}
+
+.action-center-item {
+  display: grid;
+  grid-template-columns: 5px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.action-center-item:hover {
+  background: #f8fbfd;
+  border-color: #b8cfdf;
+}
+
+.action-center-item.is-due {
+  border-color: #e8c9c5;
+  background: #fffafa;
+}
+
+.action-center-mark {
+  width: 5px;
+  height: 38px;
+  border-radius: 4px;
+  background: var(--muted);
+}
+
+.action-center-mark.critical,
+.action-center-mark.high {
+  background: var(--red);
+}
+
+.action-center-mark.medium {
+  background: var(--amber);
+}
+
+.action-center-mark.low {
+  background: var(--green);
+}
+
+.action-center-copy {
+  min-width: 0;
+}
+
+.action-center-copy b,
+.action-center-copy small {
+  display: block;
+}
+
+.action-center-copy b {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.action-center-copy small {
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-center-status {
+  color: #315f7c;
+  font-size: 10px;
+  font-weight: 650;
+  text-align: right;
+  white-space: nowrap;
 }
 
 
@@ -1243,6 +1365,104 @@ body.drawer-open .topbar {
   font-size: 12px;
 }
 
+.decision-panel {
+  margin-top: 15px;
+  padding: 13px 14px;
+  background: #eef7f0;
+  border-left: 3px solid var(--green);
+  border-radius: 0 8px 8px 0;
+}
+
+.decision-panel h3 {
+  margin: 0 0 5px;
+  font-size: 15px;
+}
+
+.decision-panel p:not(.eyebrow) {
+  margin: 4px 0;
+  color: #435665;
+  font-size: 12px;
+}
+
+.decision-panel small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.action-plan {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid #d7e6dc;
+}
+
+.action-plan > b {
+  color: #315f45;
+  font-size: 11px;
+}
+
+.action-plan-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid #d5e4da;
+  border-radius: 6px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.action-plan-option:hover,
+.action-plan-option.is-recommended {
+  border-color: #82b394;
+  background: #f8fcf9;
+}
+
+.action-plan-option.is-blocked,
+.action-plan-option:disabled {
+  border-color: #e1e5e8;
+  background: #f7f8f9;
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: .8;
+}
+
+.action-plan-option.is-blocked:hover,
+.action-plan-option:disabled:hover {
+  border-color: #e1e5e8;
+  background: #f7f8f9;
+}
+
+.action-plan-option b,
+.action-plan-option small {
+  display: block;
+}
+
+.action-plan-option b {
+  color: #315f45;
+  font-size: 11px;
+}
+
+.action-plan-option small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.action-plan-option strong {
+  color: #315f45;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.action-plan-note {
+  line-height: 1.35;
+}
+
 
 /* ---------------------------------------------------------
    DETAILS / ACTIONS
@@ -1367,6 +1587,19 @@ body.drawer-open .topbar {
   font-size: 11px;
 
   color: var(--green);
+}
+
+.command-result > * {
+  display: block;
+  margin-top: 6px;
+}
+
+.command-result > *:first-child {
+  margin-top: 0;
+}
+
+.command-result small {
+  color: var(--muted);
 }
 
 
@@ -1550,6 +1783,10 @@ dialog form {
     --drawer-width: 400px;
   }
 
+  .kpis {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
   .main-grid {
     grid-template-columns:
       minmax(0, 1.5fr)
@@ -1560,6 +1797,10 @@ dialog form {
 
 
 @media (max-width: 1050px) {
+
+  .action-center-list {
+    grid-template-columns: 1fr;
+  }
 
   .reserve-card {
     grid-template-columns: 1fr;

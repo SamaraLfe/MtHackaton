@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ТАКТ · Рабочее место диспетчера</title>
   <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-  <link rel="stylesheet" href="/static/dispatcher.css?v=profile-9">
+  <link rel="stylesheet" href="/static/dispatcher.css?v=actions-8">
 </head>
 <body>
   <header class="topbar">
@@ -26,6 +26,8 @@
       <article><span>Требуют внимания</span><b id="kpi-attention">—</b></article>
       <article><span>Актуальные прогнозы</span><b id="kpi-predictions">—</b></article>
       <article><span>Время обработки данных</span><b id="kpi-processing">—</b></article>
+      <article title="Сумма положительных прогнозов, взвешенная вероятностью задержки более 120 секунд"><span>Ожидаемые минуты задержки</span><b id="kpi-expected-delay">—</b><small>proxy для приоритизации</small></article>
+      <article title="Доля активных ТС с актуальным прогнозом в окне T+10…T+15"><span>Покрытие прогнозом</span><b id="kpi-coverage">—</b><small>качество операционной картины</small></article>
     </section>
 
     <section class="main-grid">
@@ -59,6 +61,14 @@
       </article>
     </section>
 
+    <section class="card action-center-card" id="action-center-card" aria-labelledby="action-center-title">
+      <div class="card-head">
+        <div><p class="eyebrow">ЦЕНТР ДЕЙСТВИЙ</p><h2 id="action-center-title">Что проверить дальше</h2></div>
+        <span class="action-center-summary" id="action-center-summary">—</span>
+      </div>
+      <div id="action-center-list" class="action-center-list"></div>
+    </section>
+
     <section class="reserve-card card is-hidden" id="reserve-card" aria-labelledby="reserve-title">
       <div class="reserve-copy"><p class="eyebrow">ОПЕРАТИВНОЕ РЕШЕНИЕ</p><h2 id="reserve-title">Выпустить резервное ТС</h2><p>Backend выбирает текущий плановый сегмент выбранной линии, рассчитывает ожидаемое снижение задержки и строит путь резерва до целевой остановки. Live-расписание не меняется.</p></div>
       <div class="reserve-controls"><label>Линия<select id="reserve-route"></select></label><span class="reserve-mode">Сценарий: +1 ТС на выбранной плановой траектории</span><button class="primary" id="reserve-run" type="button">Рассчитать и показать</button></div>
@@ -79,7 +89,7 @@
 
   <script src="/static/vendor/leaflet/leaflet.js"></script>
   <script src="/static/map-config.js"></script>
-  <script src="/static/map.js?v=profile-9"></script>
-  <script src="/static/dispatcher.js?v=profile-9"></script>
+  <script src="/static/map.js?v=actions-8"></script>
+  <script src="/static/dispatcher.js?v=actions-8"></script>
 </body>
 </html>

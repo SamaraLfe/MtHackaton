@@ -1,7 +1,15 @@
 {
-  "reference_commit": "b4b636b",
-  "submission_semantic_sha256": "53c01c78bcbbf6dbc209f65dcfc7363df9fed2bcb30908a76cd7365fee6012cf",
-  "rows": 151,
-  "sample_ids_unique": true,
-  "finite_predictions": true
+  "readiness_ready": true,
+  "observability_available": true,
+  "observability_samples": 12,
+  "execution_target": "docker",
+  "replay_points": 151,
+  "submission_rows": 151,
+  "submission_schema_valid": true,
+  "replay_horizon_all_valid": true,
+  "replay_request_p50_ms": 40.91650000191294,
+  "replay_request_p95_ms": 55.308299997705035,
+  "replay_request_max_ms": 124.16889998712577,
+  "ndtp_fragmented_frame": true,
+  "ndtp_bad_crc_rejected": true
 }
